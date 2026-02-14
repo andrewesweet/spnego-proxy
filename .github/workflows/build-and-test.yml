@@ -2,7 +2,7 @@ name: Build and Test
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, 'claude/**']
   pull_request:
     branches: [main, master]
 
@@ -25,13 +25,16 @@ jobs:
         env:
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: "1"
+          CC: ${{ matrix.arch == 'amd64' && 'clang -arch x86_64' || 'clang -arch arm64' }}
         run: go build -v -o spnego-proxy-darwin-${{ matrix.arch }} .
 
-      - name: Verify binary
-        run: file spnego-proxy-darwin-${{ matrix.arch }}
+      - name: Verify binary architecture
+        run: |
+          file spnego-proxy-darwin-${{ matrix.arch }}
+          otool -L spnego-proxy-darwin-${{ matrix.arch }}
 
       - name: Verify GSS framework linkage
-        run: otool -L spnego-proxy-darwin-${{ matrix.arch }} | grep -i gss
+        run: otool -L spnego-proxy-darwin-${{ matrix.arch }} | grep -i GSS
 
       - name: Run unit tests
         if: matrix.arch == 'arm64'
