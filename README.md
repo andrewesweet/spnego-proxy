@@ -17,7 +17,7 @@ for Linux/Windows or when explicitly requested on macOS.
 ### From source (requires Go 1.22+)
 
 ```bash
-go install github.com/montag451/spnego-proxy@latest
+go install github.com/andrewesweet/spnego-proxy@latest
 ```
 
 ### Build from this repository
