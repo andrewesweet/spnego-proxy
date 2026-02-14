@@ -1,50 +1,125 @@
-# Description #
+# spnego-proxy
 
-Say that you work for a company that limits internet access through a
-proxy that requires SPNEGO authentication, if you want to use an
-application that does not support this authentication mechanism, then
-you are out of luck. `spnego-proxy` enables those applications to
-access internet by handling the authentication on behalf of the
-client. It sits between the application and the real proxy and acts as
-a normal HTTP proxy. It forwards requests made by the client to the
-real proxy by adding a `Proxy-Authorization` header to the
-requests. It does not alter nor does it inspects traffic between the
-client and the real proxy.
+An HTTP proxy that handles SPNEGO (Kerberos) authentication on behalf of
+clients that don't support it. It sits between the application and the
+real proxy, forwarding requests with a `Proxy-Authorization: Negotiate`
+header. It does not alter nor inspect traffic between the client and the
+real proxy.
 
-# Installation #
+This fork adds **native macOS GSS-API support**, allowing passwordless
+operation using Kerberos tickets from the macOS credential cache
+(including the Keychain-based `API:` cache type). The existing
+password-based authentication via `gokrb5` is preserved as a fallback
+for Linux/Windows or when explicitly requested on macOS.
 
-Just copy one of the pre-compiled binary available
-[here](https://github.com/montag451/spnego-proxy/releases/latest) on
-your machine (preferably in a location contained in your PATH) and you
-are done. If you feel adventurous or you don't like using binaries not
-compiled by you, you can compile the binary from sources. To do so,
-you need to install the [Go toolchain](https://golang.org/dl/). Once
-the go toolchain is installed on your machine, execute `go install
-github.com/montag451/spnego-proxy@latest`. The binary will be
-installed in the `bin` directory of your `GOPATH` (use `go env GOPATH`
-to find out the value of `GOPATH` on your machine)
+## Installation
 
-# Usage #
+### From source (requires Go 1.22+)
 
-Type `spnego-proxy -h` to find out the options that the
-command understands. The required options are:
+```bash
+go install github.com/andrewesweet/spnego-proxy@latest
+```
 
-- `addr`
-- `config`
-- `user`
-- `realm`
-- `proxy`
+### Build from this repository
 
-The `addr` flag specifies the listening address of the proxy.
+```bash
+git clone https://github.com/andrewesweet/spnego-proxy.git
+cd spnego-proxy
 
-The `config` flag specifies the location of a file which contains
-Active Directory or Kerberos configuration information required to
-authenticate with SPNEGO. The format of the file is specified
-[here](https://web.mit.edu/kerberos/krb5-latest/doc/admin/conf_files/krb5_conf.html).
+# macOS (with CGO for GSS-API support)
+CGO_ENABLED=1 go build -o spnego-proxy .
 
-The `user` flag specifies the user name used to authenticate with the real proxy.
+# Linux (pure Go, gokrb5 fallback)
+CGO_ENABLED=0 go build -o spnego-proxy .
+```
 
-The `realm` flag specifies the Kerberos realm or the Active Directory
-domain to which the user belongs.
+## Usage
 
-The `proxy` flag specifies the address of the real proxy.
+### macOS (GSS-API mode — passwordless)
+
+On macOS, `spnego-proxy` uses the native GSS-API framework (Heimdal) to
+acquire SPNEGO tokens from the default Kerberos credential cache. This
+works with tickets obtained via `kinit` or the macOS Kerberos SSO
+extension automatically.
+
+Only two flags are required:
+
+```bash
+# Ensure you have a valid Kerberos ticket
+kinit user@REALM.COM
+klist
+
+# Run the proxy
+./spnego-proxy \
+    -addr 127.0.0.1:3128 \
+    -proxy upstream-proxy.example.com:8080
+
+# Test
+curl -x http://127.0.0.1:3128 https://example.com
+```
+
+Optional flags for macOS GSS-API mode:
+
+- `-spn` — Override the service principal name (default: `HTTP@<proxy-hostname>`)
+- `-debug` — Enable debug logging
+
+### Linux/Windows (password-based mode)
+
+On non-macOS platforms, or when `-user` is specified on macOS, the proxy
+uses the pure-Go `gokrb5` library with password-based authentication.
+
+Required flags:
+
+```bash
+./spnego-proxy \
+    -addr 127.0.0.1:3128 \
+    -proxy upstream-proxy.example.com:8080 \
+    -config /etc/krb5.conf \
+    -user myuser \
+    -realm EXAMPLE.COM \
+    -password-file /path/to/password
+```
+
+All flags:
+
+| Flag | Description | Required |
+|------|-------------|----------|
+| `-addr` | Listen address (default: `127.0.0.1:8080`) | Yes |
+| `-proxy` | Upstream proxy address | Yes |
+| `-spn` | Service principal name (default: `HTTP/<proxy-host>`) | No |
+| `-debug` | Enable debug logging | No |
+| `-config` | Kerberos config file path | Password mode only |
+| `-user` | Kerberos username (triggers password-based auth on macOS) | Password mode only |
+| `-realm` | Kerberos realm | Password mode only |
+| `-password-file` | Path to password file (prompts if omitted) | No |
+
+### macOS with explicit password
+
+If you provide `-user` on macOS, the proxy will use the `gokrb5`
+password-based path instead of the native GSS-API:
+
+```bash
+./spnego-proxy \
+    -addr 127.0.0.1:3128 \
+    -proxy upstream-proxy.example.com:8080 \
+    -config /etc/krb5.conf \
+    -user myuser \
+    -realm EXAMPLE.COM \
+    -password-file /path/to/password
+```
+
+## Architecture
+
+The project uses Go build tags to separate platform-specific authentication:
+
+- `main.go` — Shared proxy logic, `TokenProvider` interface, CLI flags
+- `auth_gss_darwin.go` — macOS: CGO-based GSS-API token acquisition
+- `gss_darwin.c` / `gss_darwin.h` — C helpers for GSS-API calls
+- `auth_gokrb5.go` — Pure-Go gokrb5 password-based auth (all platforms)
+- `auth_notdarwin.go` — Non-macOS: returns error when native GSS is unavailable
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+Based on [montag451/spnego-proxy](https://github.com/montag451/spnego-proxy).

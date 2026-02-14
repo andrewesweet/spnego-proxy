@@ -2,80 +2,27 @@ package main
 
 import (
 	"bufio"
-	"encoding/base64"
 	"errors"
 	"flag"
-	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"sync"
-
-	"github.com/jcmturner/gokrb5/v8/client"
-	"github.com/jcmturner/gokrb5/v8/config"
-	"github.com/jcmturner/gokrb5/v8/spnego"
-	"golang.org/x/crypto/ssh/terminal"
 )
 
 var logger = log.New(os.Stderr, "", log.LstdFlags)
 
-func getPassword(passwordFile string) (string, error) {
-	var password []byte
-	if passwordFile == "" {
-		stdin := int(os.Stdin.Fd())
-		if !terminal.IsTerminal(stdin) {
-			return "", errors.New("no password file specified and stdin is not a terminal")
-		}
-		stdout := int(os.Stdout.Fd())
-		if !terminal.IsTerminal(stdout) {
-			return "", errors.New("no password file specified and stdout is not a terminal")
-		}
-		fmt.Print("Password: ")
-		var err error
-		password, err = terminal.ReadPassword(stdin)
-		if err != nil {
-			return "", fmt.Errorf("failed to read password: %w", err)
-		}
-		fmt.Println()
-	} else {
-		f, err := os.Open(passwordFile)
-		if err != nil {
-			return "", fmt.Errorf("failed to open password file %q: %w", passwordFile, err)
-		}
-		password, err = ioutil.ReadAll(f)
-		if err != nil {
-			return "", fmt.Errorf("failed to read password file %q: %w", passwordFile, err)
-		}
-	}
-	return string(password), nil
+// TokenProvider acquires SPNEGO tokens for proxy authentication.
+type TokenProvider interface {
+	// GetToken returns a base64-encoded SPNEGO token for the given proxy host.
+	GetToken(proxyHost string) (string, error)
+	// Close cleans up any resources.
+	Close() error
 }
 
-type SPNEGOClient struct {
-	Client *spnego.SPNEGO
-	mu     sync.Mutex
-}
-
-func (c *SPNEGOClient) GetToken() (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.Client.AcquireCred(); err != nil {
-		return "", fmt.Errorf("could not acquire client credential: %v", err)
-	}
-	token, err := c.Client.InitSecContext()
-	if err != nil {
-		return "", fmt.Errorf("could not initialize context: %v", err)
-	}
-	b, err := token.Marshal()
-	if err != nil {
-		return "", fmt.Errorf("could not marshal SPNEGO token: %v", err)
-	}
-	return base64.StdEncoding.EncodeToString(b), nil
-}
-
-func handleClient(conn net.Conn, proxy string, spnegoCli *SPNEGOClient, debug bool) {
+func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug bool) {
 	defer conn.Close()
 	if debug {
 		defer logger.Printf("stop processing request for client: %v", conn.RemoteAddr())
@@ -91,7 +38,7 @@ func handleClient(conn net.Conn, proxy string, spnegoCli *SPNEGOClient, debug bo
 	if debug {
 		reqReader = bufio.NewReader(io.TeeReader(conn, os.Stdout))
 	}
-	token, err := spnegoCli.GetToken()
+	token, err := provider.GetToken(proxy)
 	if err != nil {
 		logger.Printf("failed to get SPNEGO token: %v", err)
 		return
@@ -129,55 +76,50 @@ func handleClient(conn net.Conn, proxy string, spnegoCli *SPNEGOClient, debug bo
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "bind address")
-	cfgFile := flag.String("config", "", "config file")
-	user := flag.String("user", "", "user name")
-	realm := flag.String("realm", "", "realm")
 	proxy := flag.String("proxy", "", "proxy address")
-	spn := flag.String("spn", "", "service principal name")
-	passwordFile := flag.String("password-file", "", "password file path")
+	spn := flag.String("spn", "", "service principal name (default: HTTP@<proxy-host>)")
 	debug := flag.Bool("debug", false, "turn on debugging")
+
+	// Flags for gokrb5 password-based auth (optional on macOS, required on other platforms)
+	cfgFile := flag.String("config", "", "kerberos config file")
+	user := flag.String("user", "", "kerberos user name")
+	realm := flag.String("realm", "", "kerberos realm")
+	passwordFile := flag.String("password-file", "", "password file path")
 	flag.Parse()
-	if *addr == "" || *cfgFile == "" || *user == "" || *realm == "" || *proxy == "" {
+
+	if *addr == "" || *proxy == "" {
+		logger.Println("-addr and -proxy are required")
 		flag.Usage()
 		os.Exit(1)
 	}
-	if *spn == "" {
-		host, _, err := net.SplitHostPort(*proxy)
-		if err != nil {
-			logger.Panic(err)
-		}
-		*spn = "HTTP/" + host
-		logger.Println("inferred service principal name:", *spn)
-		logger.Println("if it's not correct use the -spn flag")
+
+	var provider TokenProvider
+	var err error
+
+	if *user != "" {
+		// Explicit user provided — use gokrb5 password-based auth on any platform
+		provider, err = NewGokrb5TokenProvider(*user, *realm, *cfgFile, *passwordFile, *proxy, *spn, *debug)
+	} else {
+		// Try platform-native GSS-API (macOS) or error on other platforms
+		provider, err = newNativeTokenProvider(*proxy, *spn)
 	}
-	cfg, err := config.Load(*cfgFile)
 	if err != nil {
-		logger.Panic(err)
+		logger.Fatal(err)
 	}
-	passwd, err := getPassword(*passwordFile)
-	if err != nil {
-		logger.Panic(err)
-	}
-	opts := []func(*client.Settings){
-		client.DisablePAFXFAST(true),
-	}
-	if *debug {
-		opts = append(opts, client.Logger(logger))
-	}
-	cli := client.NewWithPassword(*user, *realm, passwd, cfg, opts...)
-	spnegoCli := &SPNEGOClient{
-		Client: spnego.SPNEGOClient(cli, *spn),
-	}
+	defer provider.Close()
+
 	l, err := net.Listen("tcp", *addr)
 	if err != nil {
-		logger.Panic(err)
+		logger.Fatal(err)
 	}
 	defer l.Close()
+	logger.Printf("listening on %s, proxying to %s", *addr, *proxy)
+
 	for {
 		conn, err := l.Accept()
 		if err != nil {
-			logger.Panic(err)
+			logger.Fatal(err)
 		}
-		go handleClient(conn, *proxy, spnegoCli, *debug)
+		go handleClient(conn, *proxy, provider, *debug)
 	}
 }
