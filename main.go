@@ -90,6 +90,9 @@ func main() {
 	spn := flag.String("spn", "", "service principal name (default: HTTP@<proxy-host>)")
 	debug := flag.Bool("debug", false, "turn on debugging")
 
+	followRedirects := flag.Bool("follow-redirects", false, "follow HTTP redirects on behalf of the client")
+	maxRedirects := flag.Int("max-redirects", defaultMaxRedirects, "maximum number of redirects to follow")
+
 	// Flags for gokrb5 password-based auth (optional on macOS, required on other platforms)
 	cfgFile := flag.String("config", "", "kerberos config file")
 	user := flag.String("user", "", "kerberos user name")
@@ -126,11 +129,19 @@ func main() {
 	defer func() { _ = l.Close() }()
 	logger.Printf("listening on %s, proxying to %s", *addr, *proxy)
 
+	if *followRedirects {
+		logger.Printf("redirect following enabled (max %d)", *maxRedirects)
+	}
+
 	for {
 		conn, err := l.Accept()
 		if err != nil {
 			logger.Fatal(err)
 		}
-		go handleClient(conn, *proxy, provider, *debug)
+		if *followRedirects {
+			go handleClientFollowRedirects(conn, *proxy, provider, *maxRedirects, *debug)
+		} else {
+			go handleClient(conn, *proxy, provider, *debug)
+		}
 	}
 }
