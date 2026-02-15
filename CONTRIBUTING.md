@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- [Go 1.25+](https://go.dev/dl/)
+- [Go 1.26+](https://go.dev/dl/)
 - [clang-format](https://clang.llvm.org/docs/ClangFormat.html) (for C code
   formatting)
 

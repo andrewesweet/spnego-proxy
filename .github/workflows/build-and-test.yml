@@ -11,7 +11,6 @@ jobs:
     runs-on: macos-latest
     strategy:
       matrix:
-        go-version: ['1.25', '1.26']
         arch: ['amd64', 'arm64']
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -19,7 +18,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version-file: .go-version
 
       - name: Build (darwin/${{ matrix.arch }})
         env:
@@ -49,21 +48,18 @@ jobs:
       - name: Upload binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: spnego-proxy-darwin-${{ matrix.arch }}-go${{ matrix.go-version }}
+          name: spnego-proxy-darwin-${{ matrix.arch }}
           path: spnego-proxy-darwin-${{ matrix.arch }}
 
   build-linux:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        go-version: ['1.25', '1.26']
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version-file: .go-version
 
       - name: Build (linux/amd64 - gokrb5 fallback)
         env:
@@ -84,5 +80,5 @@ jobs:
       - name: Upload binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: spnego-proxy-linux-amd64-go${{ matrix.go-version }}
+          name: spnego-proxy-linux-amd64
           path: spnego-proxy-linux-amd64
