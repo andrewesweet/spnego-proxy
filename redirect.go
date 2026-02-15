@@ -233,9 +233,70 @@ func sendHTTPRequestViaProxy(
 	return resp, conn, br, nil
 }
 
+// writeProxyRequest writes req to conn in proxy form, optionally tee-ing
+// to the debug logger.
+func writeProxyRequest(req *http.Request, conn net.Conn, debug bool) error {
+	if debug {
+		return req.WriteProxy(io.MultiWriter(conn, logger.Writer()))
+	}
+	return req.WriteProxy(conn)
+}
+
+// proxyTunnel bidirectionally forwards bytes between the client and an
+// upstream proxy connection until both directions are closed.
+func proxyTunnel(clientReader io.Reader, clientConn net.Conn, proxyConn net.Conn, debug bool) {
+	var wg sync.WaitGroup
+	forward := func(from io.Reader, to net.Conn) {
+		defer wg.Done()
+		defer func() {
+			if cw, ok := to.(interface{ CloseWrite() error }); ok {
+				_ = cw.CloseWrite()
+			}
+		}()
+		if debug {
+			logger.Printf("forward start -> %v", to.RemoteAddr())
+			defer logger.Printf("forward done -> %v", to.RemoteAddr())
+		}
+		if _, err := io.Copy(to, from); err != nil {
+			logger.Printf("forward error -> %v: %v", to.RemoteAddr(), err)
+		}
+	}
+	wg.Add(2)
+	go forward(clientReader, proxyConn)
+	go forward(proxyConn, clientConn)
+	wg.Wait()
+}
+
+// forwardRequest dials the upstream proxy, injects SPNEGO authentication,
+// writes the request, and bidirectionally forwards the remaining bytes.
+// clientReader should be the buffered reader used to parse the original
+// request so that any bytes already buffered are not lost.
+func forwardRequest(clientConn net.Conn, clientReader io.Reader, req *http.Request, proxy string, provider TokenProvider, debug bool) {
+	proxyConn, err := net.Dial("tcp", proxy)
+	if err != nil {
+		logger.Printf("failed to connect to proxy: %v", err)
+		return
+	}
+	defer func() { _ = proxyConn.Close() }()
+
+	token, err := provider.GetToken(proxy)
+	if err != nil {
+		logger.Printf("failed to get SPNEGO token: %v", err)
+		return
+	}
+	req.Header.Set("Proxy-Authorization", "Negotiate "+token)
+
+	if err := writeProxyRequest(req, proxyConn, debug); err != nil {
+		logger.Printf("failed to write request to proxy: %v", err)
+		return
+	}
+
+	proxyTunnel(clientReader, clientConn, proxyConn, debug)
+}
+
 // handleClientFollowRedirects handles an inbound HTTP proxy request with
 // redirect following.  For CONNECT requests it falls back to normal pass-
-// through behaviour handled by the caller.
+// through behaviour.
 func handleClientFollowRedirects(conn net.Conn, proxy string, provider TokenProvider, maxRedirects int, debug bool) {
 	defer func() { _ = conn.Close() }()
 	if debug {
@@ -256,10 +317,10 @@ func handleClientFollowRedirects(conn net.Conn, proxy string, provider TokenProv
 		return
 	}
 
-	// CONNECT requests establish opaque tunnels — fall back to the normal
-	// pass-through path because we cannot inspect encrypted traffic.
+	// CONNECT requests establish opaque tunnels — redirect following does
+	// not apply because CONNECT does not produce HTTP-level redirects.
 	if req.Method == http.MethodConnect {
-		handleCONNECTPassthrough(conn, req, reqReader, proxy, provider, debug)
+		forwardRequest(conn, reqReader, req, proxy, provider, debug)
 		return
 	}
 
@@ -343,58 +404,4 @@ func handleClientFollowRedirects(conn net.Conn, proxy string, provider TokenProv
 		// Update the Host header for the new target.
 		hdr.Set("Host", target.Host)
 	}
-}
-
-// handleCONNECTPassthrough handles a CONNECT request using the same
-// pass-through tunnel logic as the original handleClient, but starting from
-// an already-parsed request.
-func handleCONNECTPassthrough(conn net.Conn, req *http.Request, reqReader *bufio.Reader, proxy string, provider TokenProvider, debug bool) {
-	proxyConn, err := net.Dial("tcp", proxy)
-	if err != nil {
-		logger.Printf("failed to connect to proxy: %v", err)
-		return
-	}
-	defer func() { _ = proxyConn.Close() }()
-
-	token, err := provider.GetToken(proxy)
-	if err != nil {
-		logger.Printf("failed to get SPNEGO token: %v", err)
-		return
-	}
-	req.Header.Set("Proxy-Authorization", "Negotiate "+token)
-
-	if debug {
-		if err := req.WriteProxy(io.MultiWriter(proxyConn, logger.Writer())); err != nil {
-			logger.Printf("failed to write CONNECT request to proxy: %v", err)
-			return
-		}
-	} else {
-		if err := req.WriteProxy(proxyConn); err != nil {
-			logger.Printf("failed to write CONNECT request to proxy: %v", err)
-			return
-		}
-	}
-
-	var wg sync.WaitGroup
-	forward := func(from io.Reader, to net.Conn) {
-		defer wg.Done()
-		defer func() {
-			if cw, ok := to.(interface{ CloseWrite() error }); ok {
-				_ = cw.CloseWrite()
-			}
-		}()
-		if debug {
-			logger.Printf("forward start -> %v", to.RemoteAddr())
-			defer logger.Printf("forward done -> %v", to.RemoteAddr())
-		}
-		if _, err := io.Copy(to, from); err != nil {
-			logger.Printf("forward error -> %v: %v", to.RemoteAddr(), err)
-		}
-	}
-	wg.Add(2)
-	// Use reqReader (buffered) for client→proxy so any data already buffered
-	// from reading the CONNECT request is not lost.
-	go forward(reqReader, proxyConn)
-	go forward(proxyConn, conn)
-	wg.Wait()
 }

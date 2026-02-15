@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"sync"
 )
 
 var logger = log.New(os.Stderr, "", log.LstdFlags)
@@ -30,22 +29,11 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 		defer logger.Printf("stop processing request for client: %v", conn.RemoteAddr())
 		logger.Printf("new client: %v", conn.RemoteAddr())
 	}
-	proxyConn, err := net.Dial("tcp", proxy)
-	if err != nil {
-		logger.Printf("failed to connect to proxy: %v", err)
-		return
-	}
-	defer func() { _ = proxyConn.Close() }()
+
 	reqReader := bufio.NewReader(conn)
 	if debug {
-		reqReader = bufio.NewReader(io.TeeReader(conn, os.Stdout))
+		reqReader = bufio.NewReader(io.TeeReader(conn, logger.Writer()))
 	}
-	token, err := provider.GetToken(proxy)
-	if err != nil {
-		logger.Printf("failed to get SPNEGO token: %v", err)
-		return
-	}
-	authHeader := "Negotiate " + token
 	req, err := http.ReadRequest(reqReader)
 	if err != nil {
 		if !errors.Is(err, io.EOF) {
@@ -53,35 +41,8 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 		}
 		return
 	}
-	req.Header.Set("Proxy-Authorization", authHeader)
-	if debug {
-		if err := req.WriteProxy(io.MultiWriter(proxyConn, os.Stdout)); err != nil {
-			logger.Printf("failed to write request to proxy: %v", err)
-			return
-		}
-	} else {
-		if err := req.WriteProxy(proxyConn); err != nil {
-			logger.Printf("failed to write request to proxy: %v", err)
-			return
-		}
-	}
-	var wg sync.WaitGroup
-	forward := func(from, to net.Conn) {
-		defer wg.Done()
-		defer func() { _ = to.(*net.TCPConn).CloseWrite() }()
-		if debug {
-			fromAddr, toAddr := from.RemoteAddr(), to.RemoteAddr()
-			logger.Printf("forward start %v -> %v", fromAddr, toAddr)
-			defer logger.Printf("forward done %v -> %v", fromAddr, toAddr)
-		}
-		if _, err := io.Copy(to, from); err != nil {
-			logger.Printf("forward error %v -> %v: %v", from.RemoteAddr(), to.RemoteAddr(), err)
-		}
-	}
-	wg.Add(2)
-	go forward(conn, proxyConn)
-	go forward(proxyConn, conn)
-	wg.Wait()
+
+	forwardRequest(conn, reqReader, req, proxy, provider, debug)
 }
 
 func main() {
