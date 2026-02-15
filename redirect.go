@@ -19,11 +19,11 @@ const defaultMaxRedirects = 10
 // include a Location header worth following.
 func isRedirect(code int) bool {
 	switch code {
-	case http.StatusMovedPermanently,  // 301
-		http.StatusFound,              // 302
-		http.StatusSeeOther,           // 303
-		http.StatusTemporaryRedirect,  // 307
-		http.StatusPermanentRedirect:  // 308
+	case http.StatusMovedPermanently, // 301
+		http.StatusFound,             // 302
+		http.StatusSeeOther,          // 303
+		http.StatusTemporaryRedirect, // 307
+		http.StatusPermanentRedirect: // 308
 		return true
 	}
 	return false
