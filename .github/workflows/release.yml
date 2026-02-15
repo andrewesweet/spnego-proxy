@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions: {}
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-release.yml
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: artifacts
+        run: shasum -a 256 spnego-proxy-* > checksums-sha256.txt
+
+      - name: Detect pre-release from SemVer tag
+        id: semver
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          # SemVer 2.0.0: pre-release version indicated by hyphen after patch
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-.+ ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create draft release with assets
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          prerelease: ${{ steps.semver.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          make_latest: ${{ steps.semver.outputs.prerelease != 'true' }}
+          files: |
+            artifacts/spnego-proxy-darwin-amd64
+            artifacts/spnego-proxy-darwin-arm64
+            artifacts/spnego-proxy-darwin-amd64.sbom.spdx.json
+            artifacts/spnego-proxy-darwin-arm64.sbom.spdx.json
+            artifacts/checksums-sha256.txt
+
+      - name: Publish release (makes it immutable)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --draft=false

@@ -14,7 +14,7 @@ for Linux/Windows or when explicitly requested on macOS.
 
 ## Installation
 
-### From source (requires Go 1.22+)
+### From source (requires Go 1.25+)
 
 ```bash
 go install github.com/andrewesweet/spnego-proxy@latest
