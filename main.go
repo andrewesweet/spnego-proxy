@@ -1,3 +1,5 @@
+// Package main implements a local TCP proxy that injects SPNEGO authentication
+// headers into HTTP requests forwarded to an upstream proxy.
 package main
 
 import (

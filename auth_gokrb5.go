@@ -41,7 +41,7 @@ func getPassword(passwordFile string) (string, error) {
 		return string(password), nil
 	}
 
-	f, err := os.Open(passwordFile)
+	f, err := os.Open(passwordFile) //nolint:gosec // path comes from a CLI flag, not user-controlled input
 	if err != nil {
 		return "", fmt.Errorf("failed to open password file: %w", err)
 	}
@@ -93,7 +93,7 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 	}, nil
 }
 
-func (p *Gokrb5TokenProvider) GetToken(proxyHost string) (string, error) {
+func (p *Gokrb5TokenProvider) GetToken(_ string) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err := p.spnegoClient.AcquireCred(); err != nil {
