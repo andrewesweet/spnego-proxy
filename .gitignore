@@ -1,1 +1,29 @@
+# Compiled binary
 spnego-proxy
+
+# Go build/test artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+
+# Go coverage and profiling
+*.out
+*.prof
+
+# C object files and archives
+*.o
+*.a
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
