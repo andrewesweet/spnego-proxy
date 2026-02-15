@@ -10,6 +10,15 @@ permissions:
   contents: read
 
 jobs:
+  clang-format:
+    name: clang-format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Run clang-format
+        run: clang-format --dry-run --Werror gss_darwin.c gss_darwin.h
+
   clang-tidy:
     name: clang-tidy
     runs-on: macos-latest
