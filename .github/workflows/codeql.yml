@@ -20,6 +20,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - language: actions
+            runner: ubuntu-latest
+            build-mode: none
           - language: go
             runner: ubuntu-latest
             build-mode: autobuild
