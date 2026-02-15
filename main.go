@@ -74,7 +74,9 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 			logger.Printf("forward start %v -> %v", fromAddr, toAddr)
 			defer logger.Printf("forward done %v -> %v", fromAddr, toAddr)
 		}
-		_, _ = io.Copy(to, from)
+		if _, err := io.Copy(to, from); err != nil {
+			logger.Printf("forward error %v -> %v: %v", from.RemoteAddr(), to.RemoteAddr(), err)
+		}
 	}
 	wg.Add(2)
 	go forward(conn, proxyConn)
