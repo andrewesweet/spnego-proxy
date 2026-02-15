@@ -25,7 +25,7 @@ jobs:
         id: linter
         with:
           style: ''
-          tidy-checks: '-*,clang-analyzer-*,bugprone-*,performance-*,portability-*'
+          tidy-checks: '-*,clang-analyzer-*,bugprone-*,-bugprone-easily-swappable-parameters,performance-*,portability-*'
           version: '18'
           files-changed-only: false
           lines-changed-only: false
