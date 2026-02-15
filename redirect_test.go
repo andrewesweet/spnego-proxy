@@ -155,7 +155,7 @@ func TestFollowRedirects_Integration(t *testing.T) {
 		{statusCode: 301, location: "http://example.com/step3"},
 		{statusCode: 200, body: "final body"},
 	})
-	defer upstream.Close()
+	defer func() { _ = upstream.Close() }()
 
 	provider := &fakeTokenProvider{token: "dGVzdA=="}
 
@@ -169,13 +169,15 @@ func TestFollowRedirects_Integration(t *testing.T) {
 	}()
 
 	// Send a plain HTTP proxy request.
-	fmt.Fprintf(clientConn, "GET http://example.com/step1 HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	if _, err := fmt.Fprintf(clientConn, "GET http://example.com/step1 HTTP/1.1\r\nHost: example.com\r\n\r\n"); err != nil {
+		t.Fatalf("writing request: %v", err)
+	}
 
 	resp, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
 	if err != nil {
 		t.Fatalf("reading response: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
@@ -184,7 +186,7 @@ func TestFollowRedirects_Integration(t *testing.T) {
 	if string(body) != "final body" {
 		t.Errorf("body = %q, want %q", string(body), "final body")
 	}
-	clientConn.Close()
+	_ = clientConn.Close()
 	wg.Wait()
 }
 
@@ -200,7 +202,7 @@ func TestFollowRedirects_MaxExceeded(t *testing.T) {
 		}
 	}
 	upstream := startFakeUpstreamProxy(t, responses)
-	defer upstream.Close()
+	defer func() { _ = upstream.Close() }()
 
 	provider := &fakeTokenProvider{token: "dGVzdA=="}
 	clientConn, proxyConn := net.Pipe()
@@ -212,20 +214,22 @@ func TestFollowRedirects_MaxExceeded(t *testing.T) {
 		handleClientFollowRedirects(proxyConn, upstream.Addr().String(), provider, 3, false)
 	}()
 
-	fmt.Fprintf(clientConn, "GET http://example.com/step1 HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	if _, err := fmt.Fprintf(clientConn, "GET http://example.com/step1 HTTP/1.1\r\nHost: example.com\r\n\r\n"); err != nil {
+		t.Fatalf("writing request: %v", err)
+	}
 
 	resp, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
 	if err != nil {
 		t.Fatalf("reading response: %v", err)
 	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
 
 	// After 3 redirects the 4th redirect should be returned as-is.
 	if resp.StatusCode != 302 {
 		t.Errorf("status = %d, want 302 (max redirects exceeded)", resp.StatusCode)
 	}
-	clientConn.Close()
+	_ = clientConn.Close()
 	wg.Wait()
 }
 
@@ -237,7 +241,7 @@ func TestFollowRedirects_CONNECT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	tunnelBody := "hello from tunnel"
 	var wg sync.WaitGroup
@@ -248,19 +252,19 @@ func TestFollowRedirects_CONNECT(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		br := bufio.NewReader(c)
 		req, err := http.ReadRequest(br)
 		if err != nil {
 			return
 		}
 		if req.Method != http.MethodConnect {
-			fmt.Fprintf(c, "HTTP/1.1 400 Bad Request\r\n\r\n")
+			_, _ = fmt.Fprintf(c, "HTTP/1.1 400 Bad Request\r\n\r\n")
 			return
 		}
-		fmt.Fprintf(c, "HTTP/1.1 200 Connection Established\r\n\r\n")
+		_, _ = fmt.Fprintf(c, "HTTP/1.1 200 Connection Established\r\n\r\n")
 		// Echo something back through the tunnel.
-		fmt.Fprint(c, tunnelBody)
+		_, _ = fmt.Fprint(c, tunnelBody)
 	}()
 
 	provider := &fakeTokenProvider{token: "dGVzdA=="}
@@ -273,13 +277,16 @@ func TestFollowRedirects_CONNECT(t *testing.T) {
 		handleClientFollowRedirects(proxyConn, ln.Addr().String(), provider, 10, false)
 	}()
 
-	fmt.Fprintf(clientConn, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+	if _, err := fmt.Fprintf(clientConn, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"); err != nil {
+		t.Fatalf("writing CONNECT request: %v", err)
+	}
 
 	br := bufio.NewReader(clientConn)
 	resp, err := http.ReadResponse(br, nil)
 	if err != nil {
 		t.Fatalf("reading CONNECT response: %v", err)
 	}
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		t.Fatalf("CONNECT status = %d, want 200", resp.StatusCode)
@@ -294,7 +301,7 @@ func TestFollowRedirects_CONNECT(t *testing.T) {
 	if string(buf) != tunnelBody {
 		t.Errorf("tunnel data = %q, want %q", string(buf), tunnelBody)
 	}
-	clientConn.Close()
+	_ = clientConn.Close()
 	wg.Wait()
 	wg2.Wait()
 }
@@ -327,7 +334,7 @@ func startFakeUpstreamProxy(t *testing.T, responses []fakeResponse) net.Listener
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				br := bufio.NewReader(c)
 				_, err := http.ReadRequest(br)
 				if err != nil {
@@ -344,10 +351,10 @@ func startFakeUpstreamProxy(t *testing.T, responses []fakeResponse) net.Listener
 				mu.Unlock()
 
 				if r.location != "" {
-					fmt.Fprintf(c, "HTTP/1.1 %d %s\r\nLocation: %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+					_, _ = fmt.Fprintf(c, "HTTP/1.1 %d %s\r\nLocation: %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
 						r.statusCode, http.StatusText(r.statusCode), r.location)
 				} else {
-					fmt.Fprintf(c, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+					_, _ = fmt.Fprintf(c, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 						r.statusCode, http.StatusText(r.statusCode), len(r.body), r.body)
 				}
 			}(c)

@@ -70,7 +70,7 @@ func dialUpstreamPlainHTTP(proxy string) (net.Conn, error) {
 // dialUpstreamHTTPS connects to the upstream proxy, issues a CONNECT request
 // authenticated with SPNEGO, performs a TLS handshake, and returns the TLS
 // connection ready for the caller to send an origin-form HTTP request.
-func dialUpstreamHTTPS(proxy string, provider TokenProvider, targetHost string, debug bool) (net.Conn, error) {
+func dialUpstreamHTTPS(proxy string, provider TokenProvider, targetHost string) (net.Conn, error) {
 	raw, err := net.Dial("tcp", proxy)
 	if err != nil {
 		return nil, fmt.Errorf("dial upstream proxy: %w", err)
@@ -78,7 +78,7 @@ func dialUpstreamHTTPS(proxy string, provider TokenProvider, targetHost string, 
 
 	token, err := provider.GetToken(proxy)
 	if err != nil {
-		raw.Close()
+		_ = raw.Close()
 		return nil, fmt.Errorf("SPNEGO token for CONNECT: %w", err)
 	}
 
@@ -92,19 +92,19 @@ func dialUpstreamHTTPS(proxy string, provider TokenProvider, targetHost string, 
 		},
 	}
 	if err := connectReq.Write(raw); err != nil {
-		raw.Close()
+		_ = raw.Close()
 		return nil, fmt.Errorf("write CONNECT: %w", err)
 	}
 
 	br := bufio.NewReader(raw)
 	resp, err := http.ReadResponse(br, connectReq)
 	if err != nil {
-		raw.Close()
+		_ = raw.Close()
 		return nil, fmt.Errorf("read CONNECT response: %w", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		raw.Close()
+		_ = raw.Close()
 		return nil, fmt.Errorf("CONNECT returned %s", resp.Status)
 	}
 
@@ -113,9 +113,12 @@ func dialUpstreamHTTPS(proxy string, provider TokenProvider, targetHost string, 
 	if err != nil {
 		host = targetHost
 	}
-	tlsConn := tls.Client(raw, &tls.Config{ServerName: host})
+	tlsConn := tls.Client(raw, &tls.Config{
+		ServerName: host,
+		MinVersion: tls.VersionTLS12,
+	})
 	if err := tlsConn.Handshake(); err != nil {
-		tlsConn.Close()
+		_ = tlsConn.Close()
 		return nil, fmt.Errorf("TLS handshake: %w", err)
 	}
 	return tlsConn, nil
@@ -170,7 +173,7 @@ func sendHTTPRequestViaProxy(
 	if target.Scheme == "https" {
 		targetHostPort := hostWithPort(target)
 
-		tlsConn, err := dialUpstreamHTTPS(proxy, provider, targetHostPort, debug)
+		tlsConn, err := dialUpstreamHTTPS(proxy, provider, targetHostPort)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -188,13 +191,13 @@ func sendHTTPRequestViaProxy(
 			logger.Printf("redirect-follow: HTTPS %s %s", method, target.String())
 		}
 		if err := outReq.Write(tlsConn); err != nil {
-			tlsConn.Close()
+			_ = tlsConn.Close()
 			return nil, nil, nil, fmt.Errorf("write HTTPS request: %w", err)
 		}
 		br := bufio.NewReader(tlsConn)
 		resp, err := http.ReadResponse(br, outReq)
 		if err != nil {
-			tlsConn.Close()
+			_ = tlsConn.Close()
 			return nil, nil, nil, fmt.Errorf("read HTTPS response: %w", err)
 		}
 		return resp, tlsConn, br, nil
@@ -208,7 +211,7 @@ func sendHTTPRequestViaProxy(
 
 	token, err := provider.GetToken(proxy)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, nil, nil, fmt.Errorf("SPNEGO token: %w", err)
 	}
 	outReq.Header.Set("Proxy-Authorization", "Negotiate "+token)
@@ -218,13 +221,13 @@ func sendHTTPRequestViaProxy(
 		logger.Printf("redirect-follow: HTTP %s %s", method, target.String())
 	}
 	if err := outReq.WriteProxy(conn); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, nil, nil, fmt.Errorf("write HTTP request: %w", err)
 	}
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, outReq)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, nil, nil, fmt.Errorf("read HTTP response: %w", err)
 	}
 	return resp, conn, br, nil
@@ -234,7 +237,7 @@ func sendHTTPRequestViaProxy(
 // redirect following.  For CONNECT requests it falls back to normal pass-
 // through behaviour handled by the caller.
 func handleClientFollowRedirects(conn net.Conn, proxy string, provider TokenProvider, maxRedirects int, debug bool) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if debug {
 		defer logger.Printf("stop processing request for client: %v", conn.RemoteAddr())
 		logger.Printf("new client (follow-redirects): %v", conn.RemoteAddr())
@@ -271,7 +274,7 @@ func handleClientFollowRedirects(conn net.Conn, proxy string, provider TokenProv
 	var bodyBytes []byte
 	if req.Body != nil {
 		bodyBytes, err = io.ReadAll(req.Body)
-		req.Body.Close()
+		_ = req.Body.Close()
 		if err != nil {
 			logger.Printf("failed to read request body: %v", err)
 			return
@@ -302,7 +305,7 @@ func handleClientFollowRedirects(conn net.Conn, proxy string, provider TokenProv
 			if err := resp.Write(conn); err != nil {
 				logger.Printf("failed writing response to client: %v", err)
 			}
-			upstreamConn.Close()
+			_ = upstreamConn.Close()
 			return
 		}
 
@@ -312,14 +315,14 @@ func handleClientFollowRedirects(conn net.Conn, proxy string, provider TokenProv
 			if err := resp.Write(conn); err != nil {
 				logger.Printf("failed writing response to client: %v", err)
 			}
-			upstreamConn.Close()
+			_ = upstreamConn.Close()
 			return
 		}
 
 		// Drain and close redirect response body.
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		upstreamConn.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		_ = upstreamConn.Close()
 
 		newTarget, err := resolveRedirectURL(target, loc)
 		if err != nil {
@@ -351,7 +354,7 @@ func handleCONNECTPassthrough(conn net.Conn, req *http.Request, reqReader *bufio
 		logger.Printf("failed to connect to proxy: %v", err)
 		return
 	}
-	defer proxyConn.Close()
+	defer func() { _ = proxyConn.Close() }()
 
 	token, err := provider.GetToken(proxy)
 	if err != nil {
@@ -361,9 +364,15 @@ func handleCONNECTPassthrough(conn net.Conn, req *http.Request, reqReader *bufio
 	req.Header.Set("Proxy-Authorization", "Negotiate "+token)
 
 	if debug {
-		req.WriteProxy(io.MultiWriter(proxyConn, logger.Writer()))
+		if err := req.WriteProxy(io.MultiWriter(proxyConn, logger.Writer())); err != nil {
+			logger.Printf("failed to write CONNECT request to proxy: %v", err)
+			return
+		}
 	} else {
-		req.WriteProxy(proxyConn)
+		if err := req.WriteProxy(proxyConn); err != nil {
+			logger.Printf("failed to write CONNECT request to proxy: %v", err)
+			return
+		}
 	}
 
 	var wg sync.WaitGroup
@@ -371,14 +380,16 @@ func handleCONNECTPassthrough(conn net.Conn, req *http.Request, reqReader *bufio
 		defer wg.Done()
 		defer func() {
 			if cw, ok := to.(interface{ CloseWrite() error }); ok {
-				cw.CloseWrite()
+				_ = cw.CloseWrite()
 			}
 		}()
 		if debug {
 			logger.Printf("forward start -> %v", to.RemoteAddr())
 			defer logger.Printf("forward done -> %v", to.RemoteAddr())
 		}
-		io.Copy(to, from)
+		if _, err := io.Copy(to, from); err != nil {
+			logger.Printf("forward error -> %v: %v", to.RemoteAddr(), err)
+		}
 	}
 	wg.Add(2)
 	// Use reqReader (buffered) for client→proxy so any data already buffered
