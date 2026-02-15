@@ -91,6 +91,8 @@ All flags:
 | `-proxy` | Upstream proxy address | Yes |
 | `-spn` | Service principal name (default: `HTTP/<proxy-host>`) | No |
 | `-debug` | Enable debug logging | No |
+| `-follow-redirects` | Follow HTTP redirects on behalf of the client | No |
+| `-max-redirects` | Maximum number of redirects to follow (default: 10) | No |
 | `-config` | Kerberos config file path | Password mode only |
 | `-user` | Kerberos username (triggers password-based auth on macOS) | Password mode only |
 | `-realm` | Kerberos realm | Password mode only |
@@ -111,11 +113,43 @@ password-based path instead of the native GSS-API:
     -password-file /path/to/password
 ```
 
+## Redirect following
+
+Some HTTP clients do not handle redirects themselves. When
+`-follow-redirects` is enabled, the proxy follows 3xx redirects
+(301, 302, 303, 307, 308) on the client's behalf and returns only the
+final response.
+
+```bash
+./spnego-proxy \
+    -addr 127.0.0.1:3128 \
+    -proxy upstream-proxy.example.com:8080 \
+    -follow-redirects
+```
+
+Behaviour details:
+
+- **Method and body preservation** — 307 and 308 redirects replay the
+  original method and request body. 301, 302, and 303 redirects switch
+  to GET and drop the body, per the HTTP specification.
+- **Redirect limit** — The proxy follows at most 10 redirects by
+  default. Use `-max-redirects` to change this. When the limit is
+  reached the last redirect response is returned to the client as-is.
+- **HTTPS targets** — Redirects that cross from HTTP to HTTPS (or vice
+  versa) are followed transparently. For HTTPS targets the proxy opens
+  a CONNECT tunnel to the upstream proxy, performs a TLS handshake, and
+  issues the request in origin form.
+- **CONNECT requests** — CONNECT tunnels are passed through unchanged.
+  Redirect following only applies to plain HTTP method requests
+  (GET, POST, etc.) because CONNECT establishes an opaque tunnel whose
+  traffic the proxy does not interpret at the HTTP level.
+
 ## Architecture
 
 The project uses Go build tags to separate platform-specific authentication:
 
 - `main.go` — Shared proxy logic, `TokenProvider` interface, CLI flags
+- `redirect.go` — Redirect-following proxy handler and HTTPS tunnel dialling
 - `auth_gss_darwin.go` — macOS: CGO-based GSS-API token acquisition
 - `gss_darwin.c` / `gss_darwin.h` — C helpers for GSS-API calls
 - `auth_gokrb5.go` — Pure-Go gokrb5 password-based auth (all platforms)
