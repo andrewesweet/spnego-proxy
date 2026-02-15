@@ -8,3 +8,7 @@ linters:
     - gosec
     - misspell
     - revive
+
+formatters:
+  enable:
+    - gofmt

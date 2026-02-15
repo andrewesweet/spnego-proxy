@@ -33,6 +33,9 @@ CGO_ENABLED=1 go build -o spnego-proxy .
 CGO_ENABLED=0 go build -o spnego-proxy .
 ```
 
+For development setup including formatting, linting, and testing, see
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Usage
 
 ### macOS (GSS-API mode — passwordless)
