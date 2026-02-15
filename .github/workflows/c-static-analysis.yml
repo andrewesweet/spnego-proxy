@@ -1,0 +1,56 @@
+name: C Static Analysis
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  clang-tidy:
+    name: clang-tidy
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Get macOS SDK path
+        id: sdk
+        run: echo "path=$(xcrun --show-sdk-path)" >> "$GITHUB_OUTPUT"
+
+      - name: Run clang-tidy
+        uses: cpp-linter/cpp-linter-action@b6edc0625e3941baa1797f4b4326adeab6890c97 # v2.16.7
+        id: linter
+        with:
+          style: ''
+          tidy-checks: '-*,clang-analyzer-*,bugprone-*,performance-*,portability-*'
+          version: '18'
+          files-changed-only: false
+          lines-changed-only: false
+          extra-args: '-isysroot ${{ steps.sdk.outputs.path }}'
+          file-annotations: true
+          step-summary: true
+
+      - name: Fail on clang-tidy errors
+        if: steps.linter.outputs.clang-tidy-checks-failed > 0
+        run: exit 1
+
+  cppcheck:
+    name: cppcheck
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install cppcheck
+        run: brew install cppcheck
+
+      - name: Run cppcheck
+        run: |
+          cppcheck \
+            --enable=all \
+            --error-exitcode=1 \
+            --suppress=missingIncludeSystem \
+            --suppress=unusedFunction \
+            gss_darwin.c
