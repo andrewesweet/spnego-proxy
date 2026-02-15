@@ -22,7 +22,7 @@ type Gokrb5TokenProvider struct {
 	mu           sync.Mutex
 }
 
-func getPassword(passwordFile string) (string, error) {
+func readPassword(passwordFile string) (string, error) {
 	if passwordFile == "" {
 		stdin := int(os.Stdin.Fd())
 		if !term.IsTerminal(stdin) {
@@ -43,12 +43,12 @@ func getPassword(passwordFile string) (string, error) {
 
 	f, err := os.Open(passwordFile)
 	if err != nil {
-		return "", fmt.Errorf("failed to open password file %q: %w", passwordFile, err)
+		return "", fmt.Errorf("failed to open password file: %w", err)
 	}
 	defer f.Close()
 	password, err := io.ReadAll(f)
 	if err != nil {
-		return "", fmt.Errorf("failed to read password file %q: %w", passwordFile, err)
+		return "", fmt.Errorf("failed to read password file: %w", err)
 	}
 	return string(password), nil
 }
@@ -75,7 +75,7 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 		return nil, fmt.Errorf("failed to load kerberos config: %w", err)
 	}
 
-	passwd, err := getPassword(passwordFile)
+	passwd, err := readPassword(passwordFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get password: %w", err)
 	}
