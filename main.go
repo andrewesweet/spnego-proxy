@@ -104,6 +104,7 @@ func main() {
 		provider, err = newNativeTokenProvider(*proxy, *spn)
 	}
 	if err != nil {
+		// codeql[go/clear-text-logging]
 		logger.Fatal(err)
 	}
 	defer provider.Close()

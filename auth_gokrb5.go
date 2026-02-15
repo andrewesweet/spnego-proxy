@@ -43,12 +43,12 @@ func getPassword(passwordFile string) (string, error) {
 
 	f, err := os.Open(passwordFile)
 	if err != nil {
-		return "", fmt.Errorf("failed to open password file %q: %w", passwordFile, err)
+		return "", fmt.Errorf("failed to open password file: %w", err)
 	}
 	defer f.Close()
 	password, err := io.ReadAll(f)
 	if err != nil {
-		return "", fmt.Errorf("failed to read password file %q: %w", passwordFile, err)
+		return "", fmt.Errorf("failed to read password file: %w", err)
 	}
 	return string(password), nil
 }
