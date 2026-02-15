@@ -39,7 +39,7 @@ func NewGSSTokenProvider(proxyHost, explicitSPN string) (*GSSTokenProvider, erro
 	return &GSSTokenProvider{spn: spn}, nil
 }
 
-func (g *GSSTokenProvider) GetToken(proxyHost string) (string, error) {
+func (g *GSSTokenProvider) GetToken(_ string) (string, error) {
 	cspn := C.CString(g.spn)
 	defer C.free(unsafe.Pointer(cspn))
 

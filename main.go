@@ -1,3 +1,5 @@
+// Package main implements a local TCP proxy that injects SPNEGO authentication
+// headers into HTTP requests forwarded to an upstream proxy.
 package main
 
 import (
@@ -23,7 +25,7 @@ type TokenProvider interface {
 }
 
 func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug bool) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if debug {
 		defer logger.Printf("stop processing request for client: %v", conn.RemoteAddr())
 		logger.Printf("new client: %v", conn.RemoteAddr())
@@ -33,7 +35,7 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 		logger.Printf("failed to connect to proxy: %v", err)
 		return
 	}
-	defer proxyConn.Close()
+	defer func() { _ = proxyConn.Close() }()
 	reqReader := bufio.NewReader(conn)
 	if debug {
 		reqReader = bufio.NewReader(io.TeeReader(conn, os.Stdout))
@@ -53,20 +55,28 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 	}
 	req.Header.Set("Proxy-Authorization", authHeader)
 	if debug {
-		req.WriteProxy(io.MultiWriter(proxyConn, os.Stdout))
+		if err := req.WriteProxy(io.MultiWriter(proxyConn, os.Stdout)); err != nil {
+			logger.Printf("failed to write request to proxy: %v", err)
+			return
+		}
 	} else {
-		req.WriteProxy(proxyConn)
+		if err := req.WriteProxy(proxyConn); err != nil {
+			logger.Printf("failed to write request to proxy: %v", err)
+			return
+		}
 	}
 	var wg sync.WaitGroup
 	forward := func(from, to net.Conn) {
 		defer wg.Done()
-		defer to.(*net.TCPConn).CloseWrite()
+		defer func() { _ = to.(*net.TCPConn).CloseWrite() }()
 		if debug {
 			fromAddr, toAddr := from.RemoteAddr(), to.RemoteAddr()
 			logger.Printf("forward start %v -> %v", fromAddr, toAddr)
 			defer logger.Printf("forward done %v -> %v", fromAddr, toAddr)
 		}
-		io.Copy(to, from)
+		if _, err := io.Copy(to, from); err != nil {
+			logger.Printf("forward error %v -> %v: %v", from.RemoteAddr(), to.RemoteAddr(), err)
+		}
 	}
 	wg.Add(2)
 	go forward(conn, proxyConn)
@@ -107,13 +117,13 @@ func main() {
 		// codeql[go/clear-text-logging]
 		logger.Fatal(err)
 	}
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	l, err := net.Listen("tcp", *addr)
 	if err != nil {
 		logger.Fatal(err)
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 	logger.Printf("listening on %s, proxying to %s", *addr, *proxy)
 
 	for {
