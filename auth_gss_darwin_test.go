@@ -11,7 +11,7 @@ func TestGSSTokenProviderInit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create GSSTokenProvider: %v", err)
 	}
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	if provider.spn != "HTTP@proxy.example.com" {
 		t.Errorf("Expected SPN HTTP@proxy.example.com, got %s", provider.spn)
@@ -23,7 +23,7 @@ func TestGSSTokenProviderExplicitSPN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create GSSTokenProvider: %v", err)
 	}
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	if provider.spn != "HTTP@custom.example.com" {
 		t.Errorf("Expected SPN HTTP@custom.example.com, got %s", provider.spn)
@@ -35,7 +35,7 @@ func TestGSSTokenProviderNoPort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create GSSTokenProvider: %v", err)
 	}
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	if provider.spn != "HTTP@proxy.example.com" {
 		t.Errorf("Expected SPN HTTP@proxy.example.com, got %s", provider.spn)
@@ -49,7 +49,7 @@ func TestGSSTokenAcquisitionWithoutTickets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create GSSTokenProvider: %v", err)
 	}
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	_, err = provider.GetToken("proxy.example.com:8080")
 	if err == nil {

@@ -45,7 +45,7 @@ func getPassword(passwordFile string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to open password file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	password, err := io.ReadAll(f)
 	if err != nil {
 		return "", fmt.Errorf("failed to read password file: %w", err)
@@ -97,15 +97,15 @@ func (p *Gokrb5TokenProvider) GetToken(proxyHost string) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err := p.spnegoClient.AcquireCred(); err != nil {
-		return "", fmt.Errorf("could not acquire client credential: %v", err)
+		return "", fmt.Errorf("could not acquire client credential: %w", err)
 	}
 	token, err := p.spnegoClient.InitSecContext()
 	if err != nil {
-		return "", fmt.Errorf("could not initialize context: %v", err)
+		return "", fmt.Errorf("could not initialize context: %w", err)
 	}
 	b, err := token.Marshal()
 	if err != nil {
-		return "", fmt.Errorf("could not marshal SPNEGO token: %v", err)
+		return "", fmt.Errorf("could not marshal SPNEGO token: %w", err)
 	}
 	return base64.StdEncoding.EncodeToString(b), nil
 }
