@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -63,10 +64,10 @@ func (p *CircuitBreakerTokenProvider) GetToken(proxyHost string) (string, error)
 		return p.inner.GetToken(proxyHost)
 	})
 	if err != nil {
-		switch err {
-		case gobreaker.ErrOpenState:
+		if errors.Is(err, gobreaker.ErrOpenState) {
 			return "", fmt.Errorf("circuit breaker open: token acquisition disabled after %d consecutive failures (cooldown %v)", cbConsecutiveFailures, cbTimeout)
-		case gobreaker.ErrTooManyRequests:
+		}
+		if errors.Is(err, gobreaker.ErrTooManyRequests) {
 			return "", fmt.Errorf("circuit breaker half-open: probe in progress, rejecting concurrent request")
 		}
 		return "", err
