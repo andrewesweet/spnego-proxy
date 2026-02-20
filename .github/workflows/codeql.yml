@@ -12,7 +12,7 @@ on:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
     permissions:
       security-events: write
       contents: read
@@ -21,14 +21,9 @@ jobs:
       matrix:
         include:
           - language: actions
-            runner: ubuntu-latest
             build-mode: none
           - language: go
-            runner: ubuntu-latest
             build-mode: autobuild
-          - language: c-cpp
-            runner: macos-latest
-            build-mode: manual
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
@@ -38,11 +33,56 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
 
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@6bc82e05fd0ea64601dd4b465378bbcf57de0314 # v4.32.1
+        with:
+          category: "/language:${{ matrix.language }}"
+
+  check-c-changes:
+    name: Check C/C++ changes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Check for C/C++ file changes
+        id: check
+        run: |
+          if git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.sha }}" | grep -qE '\.(c|h|cpp|hpp|cc|cxx)$'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  analyze-c-cpp:
+    name: Analyze (c-cpp)
+    needs: check-c-changes
+    if: >-
+      github.event_name != 'pull_request' ||
+      needs.check-c-changes.outputs.changed == 'true'
+    runs-on: macos-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@6bc82e05fd0ea64601dd4b465378bbcf57de0314 # v4.32.1
+        with:
+          languages: c-cpp
+          build-mode: manual
+
       - name: Build C code (macOS)
-        if: matrix.build-mode == 'manual'
         run: clang -c -DGSS_USE_APPLE_FRAMEWORK -framework GSS gss_darwin.c -o gss_darwin.o
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@6bc82e05fd0ea64601dd4b465378bbcf57de0314 # v4.32.1
         with:
-          category: "/language:${{ matrix.language }}"
+          category: "/language:c-cpp"
