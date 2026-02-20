@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"time"
 )
 
 var logger = log.New(os.Stderr, "", log.LstdFlags)
@@ -24,13 +25,13 @@ type TokenProvider interface {
 	Close() error
 }
 
-func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug bool) {
+func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug bool, dialTimeout, readTimeout time.Duration) {
 	defer func() { _ = conn.Close() }()
 	if debug {
 		defer logger.Printf("stop processing request for client: %v", conn.RemoteAddr())
 		logger.Printf("new client: %v", conn.RemoteAddr())
 	}
-	proxyConn, err := net.Dial("tcp", proxy)
+	proxyConn, err := net.DialTimeout("tcp", proxy, dialTimeout)
 	if err != nil {
 		logger.Printf("failed to connect to proxy: %v", err)
 		return
@@ -46,7 +47,9 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 		return
 	}
 	authHeader := "Negotiate " + token
+	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 	req, err := http.ReadRequest(reqReader)
+	_ = conn.SetReadDeadline(time.Time{}) // clear after read
 	if err != nil {
 		if !errors.Is(err, io.EOF) {
 			logger.Printf("failed to read request: %v", err)
@@ -90,6 +93,9 @@ func main() {
 	spn := flag.String("spn", "", "service principal name (default: HTTP@<proxy-host>)")
 	debug := flag.Bool("debug", false, "turn on debugging")
 
+	dialTimeout := flag.Duration("dial-timeout", 30*time.Second, "timeout for connecting to upstream proxy")
+	readTimeout := flag.Duration("read-timeout", 30*time.Second, "timeout for reading client HTTP request")
+
 	// Flags for gokrb5 password-based auth (optional on macOS, required on other platforms)
 	cfgFile := flag.String("config", "", "kerberos config file")
 	user := flag.String("user", "", "kerberos user name")
@@ -132,6 +138,6 @@ func main() {
 		if err != nil {
 			logger.Fatal(err)
 		}
-		go handleClient(conn, *proxy, provider, *debug)
+		go handleClient(conn, *proxy, provider, *debug, *dialTimeout, *readTimeout)
 	}
 }
