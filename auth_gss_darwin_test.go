@@ -51,7 +51,7 @@ func TestGSSTokenAcquisitionWithoutTickets(t *testing.T) {
 	}
 	defer func() { _ = provider.Close() }()
 
-	_, err = provider.GetToken("proxy.example.com:8080")
+	_, err = provider.GetToken()
 	if err == nil {
 		t.Log("GetToken succeeded — Kerberos tickets must be available in this environment")
 	} else {

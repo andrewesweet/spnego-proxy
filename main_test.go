@@ -41,7 +41,7 @@ func TestHandleClientReadTimeout(t *testing.T) {
 			if err != nil {
 				return
 			}
-			defer func() { _ = conn.Close() }()
+			_ = conn.Close()
 		}
 	}()
 
