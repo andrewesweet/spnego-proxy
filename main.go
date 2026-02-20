@@ -117,6 +117,7 @@ func main() {
 		// codeql[go/clear-text-logging]
 		logger.Fatal(err)
 	}
+	provider = NewCircuitBreakerTokenProvider(provider)
 	defer func() { _ = provider.Close() }()
 
 	l, err := net.Listen("tcp", *addr)
