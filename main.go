@@ -41,12 +41,6 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 	if debug {
 		reqReader = bufio.NewReader(io.TeeReader(conn, os.Stdout))
 	}
-	token, err := provider.GetToken(proxy)
-	if err != nil {
-		logger.Printf("failed to get SPNEGO token: %v", err)
-		return
-	}
-	authHeader := "Negotiate " + token
 	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 	req, err := http.ReadRequest(reqReader)
 	_ = conn.SetReadDeadline(time.Time{}) // clear after read
@@ -56,7 +50,12 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 		}
 		return
 	}
-	req.Header.Set("Proxy-Authorization", authHeader)
+	token, err := provider.GetToken(proxy)
+	if err != nil {
+		logger.Printf("failed to get SPNEGO token: %v", err)
+		return
+	}
+	req.Header.Set("Proxy-Authorization", "Negotiate "+token)
 	if debug {
 		if err := req.WriteProxy(io.MultiWriter(proxyConn, os.Stdout)); err != nil {
 			logger.Printf("failed to write request to proxy: %v", err)
@@ -71,7 +70,11 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 	var wg sync.WaitGroup
 	forward := func(from, to net.Conn) {
 		defer wg.Done()
-		defer func() { _ = to.(*net.TCPConn).CloseWrite() }()
+		defer func() {
+			if cw, ok := to.(interface{ CloseWrite() error }); ok {
+				_ = cw.CloseWrite()
+			}
+		}()
 		if debug {
 			fromAddr, toAddr := from.RemoteAddr(), to.RemoteAddr()
 			logger.Printf("forward start %v -> %v", fromAddr, toAddr)
@@ -136,7 +139,8 @@ func main() {
 	for {
 		conn, err := l.Accept()
 		if err != nil {
-			logger.Fatal(err)
+			logger.Printf("accept error: %v", err)
+			continue
 		}
 		go handleClient(conn, *proxy, provider, *debug, *dialTimeout, *readTimeout)
 	}
