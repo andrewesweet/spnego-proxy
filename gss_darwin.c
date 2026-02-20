@@ -9,30 +9,35 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void format_gss_error(OM_uint32 major, OM_uint32 minor, char *buf,
-                             size_t buflen) {
+static void append_status_messages(OM_uint32 status_value, int status_type,
+                                   char *buf, size_t buflen, size_t *offset) {
   OM_uint32 msg_ctx = 0;
   OM_uint32 min_stat;
   gss_buffer_desc msg_buf;
-  int first = 1;
-  size_t offset = 0;
 
   do {
-    gss_display_status(&min_stat, major, GSS_C_GSS_CODE, GSS_C_NO_OID, &msg_ctx,
-                       &msg_buf);
-    if (!first && offset < buflen - 2) {
-      buf[offset++] = ';';
-      buf[offset++] = ' ';
+    gss_display_status(&min_stat, status_value, status_type, GSS_C_NO_OID,
+                       &msg_ctx, &msg_buf);
+    if (*offset > 0 && *offset < buflen - 2) {
+      buf[(*offset)++] = ';';
+      buf[(*offset)++] = ' ';
     }
-    size_t to_copy = msg_buf.length < (buflen - offset - 1)
+    size_t to_copy = msg_buf.length < (buflen - *offset - 1)
                          ? msg_buf.length
-                         : (buflen - offset - 1);
-    memcpy(buf + offset, msg_buf.value, to_copy);
-    offset += to_copy;
+                         : (buflen - *offset - 1);
+    memcpy(buf + *offset, msg_buf.value, to_copy);
+    *offset += to_copy;
     gss_release_buffer(&min_stat, &msg_buf);
-    first = 0;
-  } while (msg_ctx != 0 && offset < buflen - 1);
+  } while (msg_ctx != 0 && *offset < buflen - 1);
+}
 
+static void format_gss_error(OM_uint32 major, OM_uint32 minor, char *buf,
+                             size_t buflen) {
+  size_t offset = 0;
+  append_status_messages(major, GSS_C_GSS_CODE, buf, buflen, &offset);
+  if (minor != 0) {
+    append_status_messages(minor, GSS_C_MECH_CODE, buf, buflen, &offset);
+  }
   buf[offset] = '\0';
 }
 
@@ -77,6 +82,10 @@ gss_token_result acquire_spnego_token(const char *spn) {
       NULL   // time_rec
   );
 
+  // GSS_S_CONTINUE_NEEDED is not checked here intentionally. For SPNEGO over
+  // HTTP proxy auth, only the initiator token (first call) is needed. The HTTP
+  // 407 challenge-response loop is handled at the protocol level; each proxy
+  // CONNECT triggers a fresh gss_init_sec_context call.
   if (GSS_ERROR(major)) {
     result.error_code = 1;
     format_gss_error(major, minor, result.error_msg, sizeof(result.error_msg));

@@ -65,7 +65,7 @@ func (p *CircuitBreakerTokenProvider) GetToken(proxyHost string) (string, error)
 	})
 	if err != nil {
 		if errors.Is(err, gobreaker.ErrOpenState) {
-			return "", fmt.Errorf("circuit breaker open: token acquisition disabled after %d consecutive failures (cooldown %v)", cbConsecutiveFailures, cbTimeout)
+			return "", fmt.Errorf("circuit breaker open: token acquisition disabled after %d consecutive failures", cbConsecutiveFailures)
 		}
 		if errors.Is(err, gobreaker.ErrTooManyRequests) {
 			return "", fmt.Errorf("circuit breaker half-open: probe in progress, rejecting concurrent request")

@@ -29,16 +29,12 @@ func getPassword(passwordFile string) (string, error) {
 		if !term.IsTerminal(stdin) {
 			return "", errors.New("no password file specified and stdin is not a terminal")
 		}
-		stdout := int(os.Stdout.Fd())
-		if !term.IsTerminal(stdout) {
-			return "", errors.New("no password file specified and stdout is not a terminal")
-		}
-		fmt.Print("Password: ")
+		fmt.Fprint(os.Stderr, "Password: ")
 		password, err := term.ReadPassword(stdin)
 		if err != nil {
 			return "", fmt.Errorf("failed to read password: %w", err)
 		}
-		fmt.Println()
+		fmt.Fprintln(os.Stderr)
 		return string(password), nil
 	}
 
