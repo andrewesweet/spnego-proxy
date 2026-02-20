@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/jcmturner/gokrb5/v8/client"
@@ -50,7 +51,7 @@ func getPassword(passwordFile string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to read password file: %w", err)
 	}
-	return string(password), nil
+	return strings.TrimRight(string(password), "\r\n"), nil
 }
 
 // NewGokrb5TokenProvider creates a token provider using gokrb5 with password-based auth.
