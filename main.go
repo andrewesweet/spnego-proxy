@@ -17,10 +17,19 @@ import (
 
 var logger = log.New(os.Stderr, "", log.LstdFlags)
 
+// extractHost returns the host portion of addr, stripping any port suffix.
+// If addr has no port, it is returned unchanged.
+func extractHost(addr string) string {
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		return h
+	}
+	return addr
+}
+
 // TokenProvider acquires SPNEGO tokens for proxy authentication.
 type TokenProvider interface {
-	// GetToken returns a base64-encoded SPNEGO token for the given proxy host.
-	GetToken(proxyHost string) (string, error)
+	// GetToken returns a base64-encoded SPNEGO token.
+	GetToken() (string, error)
 	// Close cleans up any resources.
 	Close() error
 }
@@ -38,9 +47,6 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 	}
 	defer func() { _ = proxyConn.Close() }()
 	reqReader := bufio.NewReader(conn)
-	if debug {
-		reqReader = bufio.NewReader(io.TeeReader(conn, os.Stdout))
-	}
 	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 	req, err := http.ReadRequest(reqReader)
 	_ = conn.SetReadDeadline(time.Time{}) // clear after read
@@ -50,22 +56,18 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 		}
 		return
 	}
-	token, err := provider.GetToken(proxy)
+	token, err := provider.GetToken()
 	if err != nil {
 		logger.Printf("failed to get SPNEGO token: %v", err)
 		return
 	}
-	req.Header.Set("Proxy-Authorization", "Negotiate "+token)
 	if debug {
-		if err := req.WriteProxy(io.MultiWriter(proxyConn, os.Stdout)); err != nil {
-			logger.Printf("failed to write request to proxy: %v", err)
-			return
-		}
-	} else {
-		if err := req.WriteProxy(proxyConn); err != nil {
-			logger.Printf("failed to write request to proxy: %v", err)
-			return
-		}
+		logger.Printf("proxy request: %s %s %s (headers: %d)", req.Method, req.RequestURI, req.Proto, len(req.Header))
+	}
+	req.Header.Set("Proxy-Authorization", "Negotiate "+token)
+	if err := req.WriteProxy(proxyConn); err != nil {
+		logger.Printf("failed to write request to proxy: %v", err)
+		return
 	}
 	var wg sync.WaitGroup
 	forward := func(from, to net.Conn) {

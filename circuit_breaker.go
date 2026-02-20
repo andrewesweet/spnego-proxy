@@ -59,9 +59,9 @@ func newCircuitBreakerTokenProvider(inner TokenProvider, settings gobreaker.Sett
 
 // GetToken acquires a token from the wrapped provider, subject to circuit
 // breaker policy. Returns a descriptive error when the circuit is open.
-func (p *CircuitBreakerTokenProvider) GetToken(proxyHost string) (string, error) {
+func (p *CircuitBreakerTokenProvider) GetToken() (string, error) {
 	token, err := p.cb.Execute(func() (string, error) {
-		return p.inner.GetToken(proxyHost)
+		return p.inner.GetToken()
 	})
 	if err != nil {
 		if errors.Is(err, gobreaker.ErrOpenState) {

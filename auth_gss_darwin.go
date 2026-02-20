@@ -13,7 +13,7 @@ import "C"
 import (
 	"encoding/base64"
 	"fmt"
-	"net"
+	"sync"
 	"unsafe"
 )
 
@@ -22,6 +22,7 @@ import (
 // credential cache, including the macOS Keychain-based API: cache type.
 type GSSTokenProvider struct {
 	spn string // e.g., "HTTP@proxy.host.com"
+	mu  sync.Mutex
 }
 
 // NewGSSTokenProvider creates a token provider that uses the macOS GSS-API framework.
@@ -29,17 +30,16 @@ type GSSTokenProvider struct {
 func NewGSSTokenProvider(proxyHost, explicitSPN string) (*GSSTokenProvider, error) {
 	spn := explicitSPN
 	if spn == "" {
-		host := proxyHost
-		if h, _, err := net.SplitHostPort(proxyHost); err == nil {
-			host = h
-		}
-		spn = "HTTP@" + host
+		spn = "HTTP@" + extractHost(proxyHost)
 	}
 	logger.Printf("using macOS GSS-API with SPN: %s", spn)
 	return &GSSTokenProvider{spn: spn}, nil
 }
 
-func (g *GSSTokenProvider) GetToken(_ string) (string, error) {
+func (g *GSSTokenProvider) GetToken() (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
 	cspn := C.CString(g.spn)
 	defer C.free(unsafe.Pointer(cspn))
 

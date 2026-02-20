@@ -1,13 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
-	"strings"
 	"sync"
 
 	"github.com/jcmturner/gokrb5/v8/client"
@@ -23,31 +22,49 @@ type Gokrb5TokenProvider struct {
 	mu           sync.Mutex
 }
 
-func getPassword(passwordFile string) (string, error) {
+// zeroBytes overwrites a byte slice with zeros to minimize how long
+// sensitive material (passwords) remains in memory.
+func zeroBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
+}
+
+func getPassword(passwordFile string) ([]byte, error) {
 	if passwordFile == "" {
 		stdin := int(os.Stdin.Fd())
 		if !term.IsTerminal(stdin) {
-			return "", errors.New("no password file specified and stdin is not a terminal")
+			return nil, errors.New("no password file specified and stdin is not a terminal")
 		}
 		fmt.Fprint(os.Stderr, "Password: ")
 		password, err := term.ReadPassword(stdin)
 		if err != nil {
-			return "", fmt.Errorf("failed to read password: %w", err)
+			return nil, fmt.Errorf("failed to read password: %w", err)
 		}
 		fmt.Fprintln(os.Stderr)
-		return string(password), nil
+		return password, nil
 	}
 
 	f, err := os.Open(passwordFile) //nolint:gosec // path comes from a CLI flag, not user-controlled input
 	if err != nil {
-		return "", fmt.Errorf("failed to open password file: %w", err)
+		return nil, fmt.Errorf("failed to open password file: %w", err)
 	}
 	defer func() { _ = f.Close() }()
-	password, err := io.ReadAll(f)
+
+	info, err := f.Stat()
 	if err != nil {
-		return "", fmt.Errorf("failed to read password file: %w", err)
+		return nil, fmt.Errorf("failed to stat password file: %w", err)
 	}
-	return strings.TrimRight(string(password), "\r\n"), nil
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		return nil, fmt.Errorf("password file %s has insecure permissions %04o; must not be accessible by group or others (e.g. 0600)", passwordFile, mode)
+	}
+
+	const maxPasswordFileSize = 4096
+	password, err := io.ReadAll(io.LimitReader(f, maxPasswordFileSize))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read password file: %w", err)
+	}
+	return bytes.TrimRight(password, "\r\n"), nil
 }
 
 // NewGokrb5TokenProvider creates a token provider using gokrb5 with password-based auth.
@@ -58,11 +75,7 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 
 	spnVal := explicitSPN
 	if spnVal == "" {
-		host, _, err := net.SplitHostPort(proxy)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse proxy address: %w", err)
-		}
-		spnVal = "HTTP/" + host
+		spnVal = "HTTP/" + extractHost(proxy)
 		logger.Println("inferred service principal name:", spnVal)
 		logger.Println("if it's not correct use the -spn flag")
 	}
@@ -76,6 +89,7 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 	if err != nil {
 		return nil, fmt.Errorf("failed to get password: %w", err)
 	}
+	defer zeroBytes(passwd)
 
 	opts := []func(*client.Settings){
 		client.DisablePAFXFAST(true),
@@ -83,14 +97,14 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 	if debug {
 		opts = append(opts, client.Logger(logger))
 	}
-	cli := client.NewWithPassword(user, realm, passwd, cfg, opts...)
+	cli := client.NewWithPassword(user, realm, string(passwd), cfg, opts...)
 
 	return &Gokrb5TokenProvider{
 		spnegoClient: spnego.SPNEGOClient(cli, spnVal),
 	}, nil
 }
 
-func (p *Gokrb5TokenProvider) GetToken(_ string) (string, error) {
+func (p *Gokrb5TokenProvider) GetToken() (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err := p.spnegoClient.AcquireCred(); err != nil {

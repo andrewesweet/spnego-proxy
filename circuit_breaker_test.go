@@ -19,7 +19,7 @@ type stubTokenProvider struct {
 	closed atomic.Bool
 }
 
-func (s *stubTokenProvider) GetToken(_ string) (string, error) {
+func (s *stubTokenProvider) GetToken() (string, error) {
 	s.calls.Add(1)
 	if s.err != nil {
 		return "", s.err
@@ -37,7 +37,7 @@ func (s *stubTokenProvider) Close() error {
 func tripBreaker(t *testing.T, cb *CircuitBreakerTokenProvider) {
 	t.Helper()
 	for i := 0; i < int(cbConsecutiveFailures); i++ {
-		_, err := cb.GetToken("proxy:8080")
+		_, err := cb.GetToken()
 		if err == nil {
 			t.Fatalf("expected error on call %d", i+1)
 		}
@@ -48,7 +48,7 @@ func TestCircuitBreakerPassesThrough(t *testing.T) {
 	inner := &stubTokenProvider{token: "tok123"}
 	cb := NewCircuitBreakerTokenProvider(inner)
 
-	token, err := cb.GetToken("proxy:8080")
+	token, err := cb.GetToken()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestCircuitBreakerOpensAfterConsecutiveFailures(t *testing.T) {
 
 	// Next call should be rejected without calling inner
 	callsBefore := inner.calls.Load()
-	_, err := cb.GetToken("proxy:8080")
+	_, err := cb.GetToken()
 	if err == nil {
 		t.Fatal("expected circuit breaker error")
 	}
@@ -90,12 +90,12 @@ func TestCircuitBreakerDoesNotTripOnIntermittentFailures(t *testing.T) {
 	// Fail twice (below threshold), then succeed
 	inner.err = errors.New("transient")
 	for i := 0; i < int(cbConsecutiveFailures)-1; i++ {
-		_, _ = cb.GetToken("proxy:8080")
+		_, _ = cb.GetToken()
 	}
 
 	// Recover — consecutive counter resets
 	inner.err = nil
-	token, err := cb.GetToken("proxy:8080")
+	token, err := cb.GetToken()
 	if err != nil {
 		t.Fatalf("unexpected error after recovery: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestCircuitBreakerDoesNotTripOnIntermittentFailures(t *testing.T) {
 
 	// Fail again — should still go through (counter was reset)
 	inner.err = errors.New("transient again")
-	_, err = cb.GetToken("proxy:8080")
+	_, err = cb.GetToken()
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -135,7 +135,7 @@ func TestCircuitBreakerOpenRejectsWithoutCallingInner(t *testing.T) {
 
 	// Circuit is now open — verify purely through observable behavior
 	callsBefore := inner.calls.Load()
-	_, err := cb.GetToken("proxy:8080")
+	_, err := cb.GetToken()
 	if err == nil {
 		t.Fatal("expected error while circuit is open")
 	}
@@ -178,7 +178,7 @@ func TestCircuitBreakerHalfOpenRejectsConcurrentRequests(t *testing.T) {
 	for i := 0; i < concurrency; i++ {
 		go func(idx int) {
 			defer wg.Done()
-			tokens[idx], errs[idx] = cb.GetToken("proxy:8080")
+			tokens[idx], errs[idx] = cb.GetToken()
 		}(i)
 	}
 	wg.Wait()
@@ -209,7 +209,7 @@ type slowTokenProvider struct {
 	token string
 }
 
-func (s *slowTokenProvider) GetToken(_ string) (string, error) {
+func (s *slowTokenProvider) GetToken() (string, error) {
 	time.Sleep(s.delay)
 	return s.token, nil
 }
