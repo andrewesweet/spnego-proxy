@@ -11,7 +11,7 @@ func TestHandleClientDialTimeout(t *testing.T) {
 	unreachable := "192.0.2.1:1"
 
 	client, server := net.Pipe()
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	provider := &stubTokenProvider{token: "tok"}
 	done := make(chan struct{})
@@ -34,20 +34,20 @@ func TestHandleClientReadTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer upstream.Close()
+	defer func() { _ = upstream.Close() }()
 	go func() {
 		for {
 			conn, err := upstream.Accept()
 			if err != nil {
 				return
 			}
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 		}
 	}()
 
 	// Create a client connection that connects but never sends data.
 	client, server := net.Pipe()
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	provider := &stubTokenProvider{token: "tok"}
 	done := make(chan struct{})
