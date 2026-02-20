@@ -1,0 +1,72 @@
+name: Build Release Binaries
+
+on:
+  workflow_call: {}
+
+permissions: {}
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      matrix:
+        arch: ['amd64', 'arm64']
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: .go-version
+
+      - name: Build (darwin/${{ matrix.arch }})
+        env:
+          GOARCH: ${{ matrix.arch }}
+          GOOS: darwin
+          CGO_ENABLED: "1"
+          CC: ${{ matrix.arch == 'amd64' && 'clang -arch x86_64' || 'clang -arch arm64' }}
+        run: go build -v -trimpath -o spnego-proxy-darwin-${{ matrix.arch }} .
+
+      - name: Verify binary architecture
+        run: |
+          file spnego-proxy-darwin-${{ matrix.arch }}
+          otool -L spnego-proxy-darwin-${{ matrix.arch }}
+
+      - name: Verify GSS framework linkage
+        run: otool -L spnego-proxy-darwin-${{ matrix.arch }} | grep -i GSS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8 # v3.1.0
+        with:
+          subject-path: spnego-proxy-darwin-${{ matrix.arch }}
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@28d71544de8eaf1b958d335707167c5f783590ad # v0.22.2
+        with:
+          path: .
+          format: spdx-json
+          output-file: spnego-proxy-darwin-${{ matrix.arch }}.sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest SBOM
+        uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3.0.0
+        with:
+          subject-path: spnego-proxy-darwin-${{ matrix.arch }}
+          sbom-path: spnego-proxy-darwin-${{ matrix.arch }}.sbom.spdx.json
+
+      - name: Upload binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: spnego-proxy-darwin-${{ matrix.arch }}
+          path: spnego-proxy-darwin-${{ matrix.arch }}
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: spnego-proxy-darwin-${{ matrix.arch }}.sbom.spdx.json
+          path: spnego-proxy-darwin-${{ matrix.arch }}.sbom.spdx.json
