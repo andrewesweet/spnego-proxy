@@ -1,6 +1,8 @@
 module github.com/montag451/spnego-proxy
 
-go 1.26
+go 1.24.0
+
+toolchain go1.24.7
 
 require (
 	github.com/jcmturner/gokrb5/v8 v8.4.2
