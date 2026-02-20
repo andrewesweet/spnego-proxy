@@ -3,8 +3,10 @@ package main
 import (
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	gobreaker "github.com/sony/gobreaker/v2"
 )
@@ -14,7 +16,7 @@ type stubTokenProvider struct {
 	calls  atomic.Int64
 	err    error  // when non-nil, GetToken returns this error
 	token  string // returned on success
-	closed bool
+	closed atomic.Bool
 }
 
 func (s *stubTokenProvider) GetToken(_ string) (string, error) {
@@ -26,8 +28,20 @@ func (s *stubTokenProvider) GetToken(_ string) (string, error) {
 }
 
 func (s *stubTokenProvider) Close() error {
-	s.closed = true
+	s.closed.Store(true)
 	return nil
+}
+
+// tripBreaker drives cbConsecutiveFailures failures through the provider to
+// open the circuit. The inner stub must already have a non-nil err.
+func tripBreaker(t *testing.T, cb *CircuitBreakerTokenProvider) {
+	t.Helper()
+	for i := 0; i < int(cbConsecutiveFailures); i++ {
+		_, err := cb.GetToken("proxy:8080")
+		if err == nil {
+			t.Fatalf("expected error on call %d", i+1)
+		}
+	}
 }
 
 func TestCircuitBreakerPassesThrough(t *testing.T) {
@@ -50,13 +64,7 @@ func TestCircuitBreakerOpensAfterConsecutiveFailures(t *testing.T) {
 	inner := &stubTokenProvider{err: errors.New("kdc error")}
 	cb := NewCircuitBreakerTokenProvider(inner)
 
-	// First cbConsecutiveFailures calls go through to inner
-	for i := 0; i < int(cbConsecutiveFailures); i++ {
-		_, err := cb.GetToken("proxy:8080")
-		if err == nil {
-			t.Fatalf("expected error on call %d", i+1)
-		}
-	}
+	tripBreaker(t, cb)
 	if inner.calls.Load() != int64(cbConsecutiveFailures) {
 		t.Fatalf("expected %d inner calls, got %d", cbConsecutiveFailures, inner.calls.Load())
 	}
@@ -114,25 +122,98 @@ func TestCircuitBreakerClosesDelegatesToInner(t *testing.T) {
 	if err := cb.Close(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !inner.closed {
+	if !inner.closed.Load() {
 		t.Error("expected inner provider to be closed")
 	}
 }
 
-func TestCircuitBreakerReportsState(t *testing.T) {
+func TestCircuitBreakerOpenRejectsWithoutCallingInner(t *testing.T) {
 	inner := &stubTokenProvider{err: errors.New("fail")}
 	cb := NewCircuitBreakerTokenProvider(inner)
 
-	if cb.cb.State() != gobreaker.StateClosed {
-		t.Fatalf("expected closed state initially")
-	}
+	tripBreaker(t, cb)
 
-	// Trip the breaker
-	for i := 0; i < int(cbConsecutiveFailures); i++ {
-		_, _ = cb.GetToken("proxy:8080")
+	// Circuit is now open — verify purely through observable behavior
+	callsBefore := inner.calls.Load()
+	_, err := cb.GetToken("proxy:8080")
+	if err == nil {
+		t.Fatal("expected error while circuit is open")
 	}
+	if !strings.Contains(err.Error(), "circuit breaker open") {
+		t.Errorf("expected 'circuit breaker open' error, got: %v", err)
+	}
+	if inner.calls.Load() != callsBefore {
+		t.Error("inner provider should not have been called while circuit is open")
+	}
+}
 
-	if cb.cb.State() != gobreaker.StateOpen {
-		t.Errorf("expected open state after %d failures, got %s", cbConsecutiveFailures, cb.cb.State())
+func TestCircuitBreakerHalfOpenRejectsConcurrentRequests(t *testing.T) {
+	// Use a very short timeout so the circuit transitions to half-open quickly,
+	// and a slow inner provider so the probe is still in-flight when concurrent
+	// requests arrive.
+	inner := &stubTokenProvider{err: errors.New("fail")}
+	cb := newCircuitBreakerTokenProvider(inner, gobreaker.Settings{
+		Name:        "test-concurrent",
+		MaxRequests: 1,
+		Timeout:     50 * time.Millisecond, // fast transition to half-open
+		ReadyToTrip: func(counts gobreaker.Counts) bool {
+			return counts.ConsecutiveFailures >= cbConsecutiveFailures
+		},
+	})
+
+	tripBreaker(t, cb)
+
+	// Wait for the circuit to transition to half-open
+	time.Sleep(100 * time.Millisecond)
+
+	// Now make inner slow so the probe blocks while concurrent callers fire
+	slowInner := &slowTokenProvider{delay: 200 * time.Millisecond, token: "recovered"}
+	cb.inner = slowInner
+
+	const concurrency = 5
+	errs := make([]error, concurrency)
+	tokens := make([]string, concurrency)
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+	for i := 0; i < concurrency; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			tokens[idx], errs[idx] = cb.GetToken("proxy:8080")
+		}(i)
 	}
+	wg.Wait()
+
+	var successes, tooMany int
+	for i := 0; i < concurrency; i++ {
+		if errs[i] == nil {
+			successes++
+			if tokens[i] != "recovered" {
+				t.Errorf("expected token 'recovered', got %q", tokens[i])
+			}
+		} else if strings.Contains(errs[i].Error(), "circuit breaker half-open") {
+			tooMany++
+		}
+	}
+	if successes != 1 {
+		t.Errorf("expected exactly 1 successful probe, got %d", successes)
+	}
+	if tooMany != concurrency-1 {
+		t.Errorf("expected %d ErrTooManyRequests rejections, got %d", concurrency-1, tooMany)
+	}
+}
+
+// slowTokenProvider introduces a delay before returning, used to keep the
+// half-open probe in-flight while concurrent requests arrive.
+type slowTokenProvider struct {
+	delay time.Duration
+	token string
+}
+
+func (s *slowTokenProvider) GetToken(_ string) (string, error) {
+	time.Sleep(s.delay)
+	return s.token, nil
+}
+
+func (s *slowTokenProvider) Close() error {
+	return nil
 }
