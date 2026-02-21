@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"unsafe"
 
 	"github.com/jcmturner/gokrb5/v8/client"
 	"github.com/jcmturner/gokrb5/v8/config"
@@ -20,6 +21,7 @@ import (
 type Gokrb5TokenProvider struct {
 	spnegoClient *spnego.SPNEGO
 	mu           sync.Mutex
+	passwd       []byte // retained so Close can zero the backing memory
 }
 
 // zeroBytes overwrites a byte slice with zeros to minimize how long
@@ -89,7 +91,6 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 	if err != nil {
 		return nil, fmt.Errorf("failed to get password: %w", err)
 	}
-	defer zeroBytes(passwd)
 
 	opts := []func(*client.Settings){
 		client.DisablePAFXFAST(true),
@@ -97,10 +98,15 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 	if debug {
 		opts = append(opts, client.Logger(logger))
 	}
-	cli := client.NewWithPassword(user, realm, string(passwd), cfg, opts...)
+	// Use unsafe.String so the string shares the passwd byte slice's backing
+	// memory instead of creating a separate heap copy that cannot be zeroed.
+	// The byte slice is retained in the struct and zeroed in Close().
+	passwdStr := unsafe.String(unsafe.SliceData(passwd), len(passwd))
+	cli := client.NewWithPassword(user, realm, passwdStr, cfg, opts...)
 
 	return &Gokrb5TokenProvider{
 		spnegoClient: spnego.SPNEGOClient(cli, spnVal),
+		passwd:       passwd,
 	}, nil
 }
 
@@ -122,5 +128,6 @@ func (p *Gokrb5TokenProvider) GetToken() (string, error) {
 }
 
 func (p *Gokrb5TokenProvider) Close() error {
+	zeroBytes(p.passwd)
 	return nil
 }
