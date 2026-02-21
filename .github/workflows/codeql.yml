@@ -64,8 +64,9 @@ jobs:
     name: Analyze (c-cpp)
     needs: check-c-changes
     if: >-
-      github.event_name != 'pull_request' ||
-      needs.check-c-changes.outputs.changed == 'true'
+      !cancelled() &&
+      (github.event_name != 'pull_request' ||
+       needs.check-c-changes.outputs.changed == 'true')
     runs-on: macos-latest
     permissions:
       security-events: write
