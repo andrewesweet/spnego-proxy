@@ -17,17 +17,15 @@ import (
 
 // Gokrb5TokenProvider uses the pure-Go gokrb5 library for SPNEGO token acquisition.
 // This is the fallback path used on non-macOS platforms or when -user is specified.
+//
+// Note: the gokrb5 client retains the password string in memory for the
+// lifetime of the process so it can re-authenticate when the TGT expires.
+// Go does not provide primitives to scrub string-backed memory, so the
+// password cannot be reliably zeroed. Use a keytab instead of a password
+// in environments where this is a concern.
 type Gokrb5TokenProvider struct {
 	spnegoClient *spnego.SPNEGO
 	mu           sync.Mutex
-}
-
-// zeroBytes overwrites a byte slice with zeros to minimize how long
-// sensitive material (passwords) remains in memory.
-func zeroBytes(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
 }
 
 func getPassword(passwordFile string) ([]byte, error) {
@@ -89,7 +87,6 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 	if err != nil {
 		return nil, fmt.Errorf("failed to get password: %w", err)
 	}
-	defer zeroBytes(passwd)
 
 	opts := []func(*client.Settings){
 		client.DisablePAFXFAST(true),
