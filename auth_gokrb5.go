@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"sync"
-	"unsafe"
 
 	"github.com/jcmturner/gokrb5/v8/client"
 	"github.com/jcmturner/gokrb5/v8/config"
@@ -18,18 +17,15 @@ import (
 
 // Gokrb5TokenProvider uses the pure-Go gokrb5 library for SPNEGO token acquisition.
 // This is the fallback path used on non-macOS platforms or when -user is specified.
+//
+// Note: the gokrb5 client retains the password string in memory for the
+// lifetime of the process so it can re-authenticate when the TGT expires.
+// Go does not provide primitives to scrub string-backed memory, so the
+// password cannot be reliably zeroed. Use a keytab instead of a password
+// in environments where this is a concern.
 type Gokrb5TokenProvider struct {
 	spnegoClient *spnego.SPNEGO
 	mu           sync.Mutex
-	passwd       []byte // retained so Close can zero the backing memory
-}
-
-// zeroBytes overwrites a byte slice with zeros to minimize how long
-// sensitive material (passwords) remains in memory.
-func zeroBytes(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
 }
 
 func getPassword(passwordFile string) ([]byte, error) {
@@ -98,15 +94,10 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 	if debug {
 		opts = append(opts, client.Logger(logger))
 	}
-	// Use unsafe.String so the string shares the passwd byte slice's backing
-	// memory instead of creating a separate heap copy that cannot be zeroed.
-	// The byte slice is retained in the struct and zeroed in Close().
-	passwdStr := unsafe.String(unsafe.SliceData(passwd), len(passwd))
-	cli := client.NewWithPassword(user, realm, passwdStr, cfg, opts...)
+	cli := client.NewWithPassword(user, realm, string(passwd), cfg, opts...)
 
 	return &Gokrb5TokenProvider{
 		spnegoClient: spnego.SPNEGOClient(cli, spnVal),
-		passwd:       passwd,
 	}, nil
 }
 
@@ -128,6 +119,5 @@ func (p *Gokrb5TokenProvider) GetToken() (string, error) {
 }
 
 func (p *Gokrb5TokenProvider) Close() error {
-	zeroBytes(p.passwd)
 	return nil
 }
