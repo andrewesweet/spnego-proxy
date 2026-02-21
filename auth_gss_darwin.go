@@ -31,6 +31,8 @@ func NewGSSTokenProvider(proxyHost, explicitSPN string) (*GSSTokenProvider, erro
 	spn := explicitSPN
 	if spn == "" {
 		spn = "HTTP@" + extractHost(proxyHost)
+	} else {
+		spn = normalizeSPN(spn, '@', '/')
 	}
 	logger.Printf("using macOS GSS-API with SPN: %s", spn)
 	return &GSSTokenProvider{spn: spn}, nil

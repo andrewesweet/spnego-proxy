@@ -42,6 +42,20 @@ func TestGSSTokenProviderNoPort(t *testing.T) {
 	}
 }
 
+func TestGSSTokenProviderNormalizesKrb5SPN(t *testing.T) {
+	// A user passing the Kerberos principal format should have it automatically
+	// converted to the GSS-API hostbased service name format (HTTP@host).
+	provider, err := NewGSSTokenProvider("proxy.example.com:8080", "HTTP/custom.example.com")
+	if err != nil {
+		t.Fatalf("Failed to create GSSTokenProvider: %v", err)
+	}
+	defer func() { _ = provider.Close() }()
+
+	if provider.spn != "HTTP@custom.example.com" {
+		t.Errorf("Expected SPN HTTP@custom.example.com, got %s", provider.spn)
+	}
+}
+
 func TestGSSTokenAcquisitionWithoutTickets(t *testing.T) {
 	// This test verifies the GSS-API call path works even when no tickets
 	// are available. It should return an error (no credentials) rather than crash.
