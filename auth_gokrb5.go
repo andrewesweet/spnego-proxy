@@ -77,6 +77,8 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 		spnVal = "HTTP/" + extractHost(proxy)
 		logger.Println("inferred service principal name:", spnVal)
 		logger.Println("if it's not correct use the -spn flag")
+	} else {
+		spnVal = normalizeSPN(spnVal, '/', '@')
 	}
 
 	cfg, err := config.Load(cfgFile)

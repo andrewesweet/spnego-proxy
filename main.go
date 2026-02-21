@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -29,6 +30,21 @@ func extractHost(addr string) string {
 		return h
 	}
 	return addr
+}
+
+// normalizeSPN converts an explicit SPN between GSS-API hostbased format
+// (service@host) and Kerberos principal format (service/host) so the user
+// need not know which backend is active. targetSep is the separator the
+// active backend expects ('@' for GSS-API, '/' for gokrb5); alternateSep
+// is the other backend's separator.
+func normalizeSPN(spn string, targetSep, alternateSep byte) string {
+	if strings.IndexByte(spn, targetSep) >= 0 {
+		return spn // already contains the target separator
+	}
+	if i := strings.IndexByte(spn, alternateSep); i >= 0 {
+		return spn[:i] + string(targetSep) + spn[i+1:]
+	}
+	return spn // no recognized separator; return as-is
 }
 
 // TokenProvider acquires SPNEGO tokens for proxy authentication.
@@ -100,7 +116,7 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "bind address")
 	proxy := flag.String("proxy", "", "proxy address")
-	spn := flag.String("spn", "", "service principal name (default: HTTP@<proxy-host>)")
+	spn := flag.String("spn", "", "service principal name; accepts service@host or service/host (default: derived from -proxy)")
 	debug := flag.Bool("debug", false, "turn on debugging")
 
 	dialTimeout := flag.Duration("dial-timeout", 30*time.Second, "timeout for connecting to upstream proxy")
