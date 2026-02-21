@@ -24,6 +24,7 @@ import (
 // password cannot be reliably zeroed. Use a keytab instead of a password
 // in environments where this is a concern.
 type Gokrb5TokenProvider struct {
+	krbClient    *client.Client
 	spnegoClient *spnego.SPNEGO
 	mu           sync.Mutex
 }
@@ -97,6 +98,7 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 	cli := client.NewWithPassword(user, realm, string(passwd), cfg, opts...)
 
 	return &Gokrb5TokenProvider{
+		krbClient:    cli,
 		spnegoClient: spnego.SPNEGOClient(cli, spnVal),
 	}, nil
 }
@@ -119,5 +121,11 @@ func (p *Gokrb5TokenProvider) GetToken() (string, error) {
 }
 
 func (p *Gokrb5TokenProvider) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.krbClient != nil {
+		p.krbClient.Destroy()
+		p.krbClient = nil
+	}
 	return nil
 }
