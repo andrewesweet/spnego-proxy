@@ -16,6 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/net/netutil"
 )
 
 var logger = log.New(os.Stderr, "", log.LstdFlags)
@@ -104,6 +106,7 @@ func main() {
 	dialTimeout := flag.Duration("dial-timeout", 30*time.Second, "timeout for connecting to upstream proxy")
 	readTimeout := flag.Duration("read-timeout", 30*time.Second, "timeout for reading client HTTP request")
 	drainTimeout := flag.Duration("drain-timeout", 30*time.Second, "timeout for draining in-flight connections on shutdown")
+	maxConns := flag.Int("max-conns", 512, "maximum number of concurrent connections (0 for unlimited)")
 
 	// Flags for gokrb5 password-based auth (optional on macOS, required on other platforms)
 	cfgFile := flag.String("config", "", "kerberos config file")
@@ -138,7 +141,12 @@ func main() {
 	if err != nil {
 		logger.Fatal(err)
 	}
-	logger.Printf("listening on %s, proxying to %s", *addr, *proxy)
+	if *maxConns > 0 {
+		l = netutil.LimitListener(l, *maxConns)
+		logger.Printf("listening on %s, proxying to %s (max connections: %d)", *addr, *proxy, *maxConns)
+	} else {
+		logger.Printf("listening on %s, proxying to %s", *addr, *proxy)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
