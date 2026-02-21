@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"flag"
 	"io"
@@ -11,7 +12,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -100,6 +103,7 @@ func main() {
 
 	dialTimeout := flag.Duration("dial-timeout", 30*time.Second, "timeout for connecting to upstream proxy")
 	readTimeout := flag.Duration("read-timeout", 30*time.Second, "timeout for reading client HTTP request")
+	drainTimeout := flag.Duration("drain-timeout", 30*time.Second, "timeout for draining in-flight connections on shutdown")
 
 	// Flags for gokrb5 password-based auth (optional on macOS, required on other platforms)
 	cfgFile := flag.String("config", "", "kerberos config file")
@@ -129,21 +133,48 @@ func main() {
 		logger.Fatal(err)
 	}
 	provider = NewCircuitBreakerTokenProvider(provider)
-	defer func() { _ = provider.Close() }()
 
 	l, err := net.Listen("tcp", *addr)
 	if err != nil {
 		logger.Fatal(err)
 	}
-	defer func() { _ = l.Close() }()
 	logger.Printf("listening on %s, proxying to %s", *addr, *proxy)
 
-	for {
-		conn, err := l.Accept()
-		if err != nil {
-			logger.Printf("accept error: %v", err)
-			continue
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	var wg sync.WaitGroup
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				logger.Printf("accept error: %v", err)
+				continue
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				handleClient(conn, *proxy, provider, *debug, *dialTimeout, *readTimeout)
+			}()
 		}
-		go handleClient(conn, *proxy, provider, *debug, *dialTimeout, *readTimeout)
+	}()
+
+	<-ctx.Done()
+	logger.Println("shutting down, draining connections...")
+	_ = l.Close()
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		logger.Println("all connections drained")
+	case <-time.After(*drainTimeout):
+		logger.Println("drain timeout exceeded, forcing exit")
 	}
+	_ = provider.Close()
 }
