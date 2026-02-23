@@ -89,7 +89,7 @@ All flags:
 | ---- | ----------- | -------- |
 | `-addr` | Listen address (default: `127.0.0.1:8080`) | No |
 | `-proxy` | Upstream proxy address | Yes |
-| `-spn` | Service principal name (default: `HTTP/<proxy-host>`) | No |
+| `-spn` | Service principal name (default: `HTTP@<proxy-host>` on macOS, `HTTP/<proxy-host>` on Linux) | No |
 | `-debug` | Enable debug logging | No |
 | `-config` | Kerberos config file path | Password mode only |
 | `-user` | Kerberos username (triggers password-based auth on macOS) | Password mode only |
