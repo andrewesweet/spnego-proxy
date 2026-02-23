@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"fmt"
 	"net"
 	"net/http"
 	"sync"
@@ -360,8 +359,7 @@ func TestShutdownDrainTimeout(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer func() { _ = conn.Close() }()
-	req := fmt.Sprintf("GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n")
-	_, _ = conn.Write([]byte(req))
+	_, _ = conn.Write([]byte("GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n"))
 	// Wait briefly for the handler to start processing.
 	time.Sleep(100 * time.Millisecond)
 
