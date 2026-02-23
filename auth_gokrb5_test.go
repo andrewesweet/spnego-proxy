@@ -37,14 +37,18 @@ func newTestGokrb5TokenProvider(t *testing.T) *Gokrb5TokenProvider {
 }
 
 // writePasswordFile creates a temporary file with the given content and
-// permissions, returning its path. The file is automatically removed when the
-// test finishes.
+// permissions, returning its path. It uses os.Chmod after writing to set
+// the exact permissions regardless of the process umask. The file is
+// automatically removed when the test finishes.
 func writePasswordFile(t *testing.T, content string, perm os.FileMode) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "password")
-	if err := os.WriteFile(path, []byte(content), perm); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("failed to write password file: %v", err)
+	}
+	if err := os.Chmod(path, perm); err != nil {
+		t.Fatalf("failed to chmod password file: %v", err)
 	}
 	return path
 }
