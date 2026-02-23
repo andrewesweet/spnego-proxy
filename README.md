@@ -87,7 +87,7 @@ All flags:
 
 | Flag | Description | Required |
 | ---- | ----------- | -------- |
-| `-addr` | Listen address (default: `127.0.0.1:8080`) | Yes |
+| `-addr` | Listen address (default: `127.0.0.1:8080`) | No |
 | `-proxy` | Upstream proxy address | Yes |
 | `-spn` | Service principal name (default: `HTTP/<proxy-host>`) | No |
 | `-debug` | Enable debug logging | No |
