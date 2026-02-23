@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"net"
+	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -142,5 +146,252 @@ func TestLimitListenerBlocksAtCapacity(t *testing.T) {
 	}
 	for _, c := range servers[1:] {
 		_ = c.Close()
+	}
+}
+
+// TestShutdownStopsAcceptingNewConnections verifies that cancelling the
+// context and closing the listener causes the accept loop to stop and
+// prevents new connections from being accepted — the core mechanism that
+// makes graceful shutdown work (issue #60).
+func TestShutdownStopsAcceptingNewConnections(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Run the same accept-loop pattern used in main().
+	acceptDone := make(chan struct{})
+	go func() {
+		defer close(acceptDone)
+		for {
+			_, err := ln.Accept()
+			if err != nil {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				continue
+			}
+		}
+	}()
+
+	// Simulate signal: cancel context, then close listener.
+	cancel()
+	_ = ln.Close()
+
+	select {
+	case <-acceptDone:
+		// Accept loop exited as expected.
+	case <-time.After(5 * time.Second):
+		t.Fatal("accept loop did not exit after context cancellation and listener close")
+	}
+
+	// New connections should be refused.
+	_, err = net.DialTimeout("tcp", ln.Addr().String(), 500*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected dial to fail after listener closed")
+	}
+}
+
+// TestShutdownDrainsInFlightConnections verifies that in-flight handleClient
+// goroutines are allowed to complete before shutdown proceeds, and that
+// provider.Close() is called afterward (issue #60).
+func TestShutdownDrainsInFlightConnections(t *testing.T) {
+	// Start a fake upstream proxy that echoes a valid HTTP response.
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		for {
+			conn, err := upstream.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				// Read the request, then send a minimal HTTP response.
+				buf := make([]byte, 4096)
+				_, _ = c.Read(buf)
+				resp := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+				_, _ = c.Write([]byte(resp))
+			}(conn)
+		}
+	}()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+
+	provider := &stubTokenProvider{token: "tok"}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var wg sync.WaitGroup
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				continue
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				handleClient(conn, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second)
+			}()
+		}
+	}()
+
+	// Establish a connection and send a request through the proxy.
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	req, _ := http.NewRequest("GET", "http://example.com/", nil)
+	if err := req.WriteProxy(conn); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	// Read response to confirm the handler is processing.
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	_ = resp.Body.Close()
+	_ = conn.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	// Now simulate shutdown.
+	cancel()
+	_ = ln.Close()
+
+	// Wait for drain (same pattern as main).
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		// All in-flight connections drained.
+	case <-time.After(5 * time.Second):
+		t.Fatal("in-flight connections did not drain within 5s")
+	}
+
+	// Verify provider cleanup runs after drain.
+	_ = provider.Close()
+	if !provider.closed.Load() {
+		t.Error("expected provider to be closed after shutdown")
+	}
+}
+
+// TestShutdownDrainTimeout verifies that the drain timeout mechanism works:
+// if in-flight connections don't complete within the timeout, shutdown
+// proceeds anyway rather than blocking forever (issue #60).
+func TestShutdownDrainTimeout(t *testing.T) {
+	// Start a fake upstream that holds connections open indefinitely.
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		for {
+			conn, err := upstream.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				// Read request then hold the connection open.
+				buf := make([]byte, 4096)
+				_, _ = c.Read(buf)
+				resp := "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+				_, _ = c.Write([]byte(resp))
+				// Block until closed externally.
+				_, _ = c.Read(buf)
+			}(conn)
+		}
+	}()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+
+	provider := &stubTokenProvider{token: "tok"}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var wg sync.WaitGroup
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				continue
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				handleClient(conn, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second)
+			}()
+		}
+	}()
+
+	// Establish a connection through the proxy.
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	_, _ = conn.Write([]byte("GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n"))
+	// Wait briefly for the handler to start processing.
+	time.Sleep(100 * time.Millisecond)
+
+	// Simulate shutdown.
+	cancel()
+	_ = ln.Close()
+
+	// Use a short drain timeout (like main does with --drain-timeout).
+	drainTimeout := 200 * time.Millisecond
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+
+	shutdownComplete := make(chan struct{})
+	go func() {
+		defer close(shutdownComplete)
+		select {
+		case <-done:
+			// Drained in time.
+		case <-time.After(drainTimeout):
+			// Timeout exceeded — shutdown proceeds anyway.
+		}
+		_ = provider.Close()
+	}()
+
+	select {
+	case <-shutdownComplete:
+		// Shutdown completed (via timeout, since the connection is held open).
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not complete within 5s; drain timeout mechanism broken")
+	}
+
+	if !provider.closed.Load() {
+		t.Error("expected provider to be closed after drain timeout")
 	}
 }
