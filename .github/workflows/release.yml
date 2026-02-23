@@ -54,8 +54,10 @@ jobs:
           files: |
             artifacts/spnego-proxy-darwin-amd64
             artifacts/spnego-proxy-darwin-arm64
+            artifacts/spnego-proxy-linux-amd64
             artifacts/spnego-proxy-darwin-amd64.sbom.spdx.json
             artifacts/spnego-proxy-darwin-arm64.sbom.spdx.json
+            artifacts/spnego-proxy-linux-amd64.sbom.spdx.json
             artifacts/checksums-sha256.txt
 
       - name: Publish release (makes it immutable)
