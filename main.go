@@ -55,6 +55,21 @@ type TokenProvider interface {
 	Close() error
 }
 
+// writeHTTPError sends a minimal HTTP error response to the client.
+// It is best-effort; write failures are silently ignored because the
+// connection is about to be closed.
+func writeHTTPError(conn net.Conn, statusCode int, reason string) {
+	resp := &http.Response{
+		StatusCode:    statusCode,
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        http.Header{"Content-Type": {"text/plain"}, "Connection": {"close"}},
+		Body:          io.NopCloser(strings.NewReader(reason)),
+		ContentLength: int64(len(reason)),
+	}
+	_ = resp.Write(conn)
+}
+
 func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug bool, dialTimeout, readTimeout time.Duration) {
 	defer func() { _ = conn.Close() }()
 	if debug {
@@ -80,6 +95,7 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 	token, err := provider.GetToken()
 	if err != nil {
 		logger.Printf("failed to get SPNEGO token: %v", err)
+		writeHTTPError(conn, http.StatusBadGateway, "proxy authentication failed\n")
 		return
 	}
 	if debug {
@@ -88,6 +104,7 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 	req.Header.Set("Proxy-Authorization", "Negotiate "+token)
 	if err := req.WriteProxy(proxyConn); err != nil {
 		logger.Printf("failed to write request to proxy: %v", err)
+		writeHTTPError(conn, http.StatusBadGateway, "failed to relay request to upstream proxy\n")
 		return
 	}
 	var wg sync.WaitGroup
