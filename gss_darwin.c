@@ -78,8 +78,8 @@ gss_token_result acquire_spnego_token(const char *spn) {
     result.error_code = 1;
     char gss_err[230];
     format_gss_error(major, minor, gss_err, sizeof(gss_err));
-    snprintf(result.error_msg, sizeof(result.error_msg),
-             "credential check: %s", gss_err);
+    snprintf(result.error_msg, sizeof(result.error_msg), "credential check: %s",
+             gss_err);
     gss_release_name(&minor, &server_name);
     return result;
   }
@@ -100,14 +100,6 @@ gss_token_result acquire_spnego_token(const char *spn) {
       NULL   // time_rec
   );
 
-  // Release credential handle — not needed after context initialization.
-  // Use a separate minor status to preserve the one from gss_init_sec_context
-  // for error reporting below.
-  {
-    OM_uint32 rel_minor;
-    gss_release_cred(&rel_minor, &cred);
-  }
-
   // GSS_S_CONTINUE_NEEDED is not checked here intentionally. For SPNEGO over
   // HTTP proxy auth, only the initiator token (first call) is needed. The HTTP
   // 407 challenge-response loop is handled at the protocol level; each proxy
@@ -115,12 +107,16 @@ gss_token_result acquire_spnego_token(const char *spn) {
   if (GSS_ERROR(major)) {
     result.error_code = 1;
     format_gss_error(major, minor, result.error_msg, sizeof(result.error_msg));
+    gss_release_cred(&minor, &cred);
     gss_release_name(&minor, &server_name);
     if (context != GSS_C_NO_CONTEXT) {
       gss_delete_sec_context(&minor, &context, GSS_C_NO_BUFFER);
     }
     return result;
   }
+
+  // Credential handle is no longer needed after successful context init.
+  gss_release_cred(&minor, &cred);
 
   // Copy output token to caller-owned memory
   if (output_token.length > 0) {
