@@ -3,8 +3,11 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
+	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -393,5 +396,133 @@ func TestShutdownDrainTimeout(t *testing.T) {
 
 	if !provider.closed.Load() {
 		t.Error("expected provider to be closed after drain timeout")
+	}
+}
+
+func TestHandleClientTokenErrorReturns502(t *testing.T) {
+	// Start a fake upstream that holds connections open.
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		for {
+			conn, err := upstream.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				buf := make([]byte, 4096)
+				_, _ = c.Read(buf)
+			}(conn)
+		}
+	}()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	provider := &stubTokenProvider{err: errors.New("GSS-API error: An unsupported mechanism was requested")}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleClient(server, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second)
+	}()
+
+	// Send a request through the client side of the pipe.
+	req, _ := http.NewRequest("GET", "http://example.com/", nil)
+	_ = req.WriteProxy(client)
+
+	// The proxy should respond with 502 instead of just closing.
+	resp, err := http.ReadResponse(bufio.NewReader(client), req)
+	if err != nil {
+		t.Fatalf("expected HTTP error response, got read error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("expected status 502, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "proxy authentication failed") {
+		t.Errorf("expected body to mention proxy authentication, got: %q", body)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return within 5s")
+	}
+}
+
+func TestHandleClientTokenErrorCONNECTReturns502(t *testing.T) {
+	// Verify CONNECT requests also get a 502 (this is the common case
+	// for HTTPS traffic through a proxy, and what curl uses).
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		for {
+			conn, err := upstream.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				buf := make([]byte, 4096)
+				_, _ = c.Read(buf)
+			}(conn)
+		}
+	}()
+
+	// Use a real TCP listener so the client and server are decoupled
+	// (net.Pipe has strict synchronous semantics that can interact
+	// poorly with CONNECT request parsing).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	provider := &stubTokenProvider{err: errors.New("GSS-API error: An unsupported mechanism was requested")}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		handleClient(conn, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second)
+	}()
+
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	// Send a CONNECT request (what curl does for HTTPS through a proxy).
+	_, err = io.WriteString(client, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+	if err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+	if err != nil {
+		t.Fatalf("expected HTTP error response, got read error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("expected status 502, got %d", resp.StatusCode)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return within 5s")
 	}
 }

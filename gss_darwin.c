@@ -48,6 +48,7 @@ gss_token_result acquire_spnego_token(const char *spn) {
   OM_uint32 major, minor;
   gss_buffer_desc name_buf;
   gss_name_t server_name = GSS_C_NO_NAME;
+  gss_cred_id_t cred = GSS_C_NO_CREDENTIAL;
   gss_ctx_id_t context = GSS_C_NO_CONTEXT;
   gss_buffer_desc output_token = GSS_C_EMPTY_BUFFER;
 
@@ -66,10 +67,27 @@ gss_token_result acquire_spnego_token(const char *spn) {
     return result;
   }
 
-  // Acquire SPNEGO token using default credentials from the ccache
+  // Pre-flight: verify credentials are available before attempting context
+  // initialization. Without this, a missing credential cache (e.g. expired
+  // macOS API: cache) produces the misleading "unsupported mechanism" error
+  // from gss_init_sec_context. Acquiring explicitly gives a clear diagnostic.
+  gss_OID_set_desc spnego_oid_set_desc = {1, &spnego_oid_desc};
+  major = gss_acquire_cred(&minor, GSS_C_NO_NAME, 0, &spnego_oid_set_desc,
+                           GSS_C_INITIATE, &cred, NULL, NULL);
+  if (GSS_ERROR(major)) {
+    result.error_code = 1;
+    char gss_err[230];
+    format_gss_error(major, minor, gss_err, sizeof(gss_err));
+    snprintf(result.error_msg, sizeof(result.error_msg), "credential check: %s",
+             gss_err);
+    gss_release_name(&minor, &server_name);
+    return result;
+  }
+
+  // Acquire SPNEGO token using the verified credentials
   major = gss_init_sec_context(
       &minor,
-      GSS_C_NO_CREDENTIAL,  // use default creds from kinit/Keychain
+      cred,  // use explicitly acquired creds (not GSS_C_NO_CREDENTIAL)
       &context, server_name,
       spnego_oid,  // SPNEGO mechanism
       GSS_C_MUTUAL_FLAG | GSS_C_REPLAY_FLAG,
@@ -89,12 +107,16 @@ gss_token_result acquire_spnego_token(const char *spn) {
   if (GSS_ERROR(major)) {
     result.error_code = 1;
     format_gss_error(major, minor, result.error_msg, sizeof(result.error_msg));
+    gss_release_cred(&minor, &cred);
     gss_release_name(&minor, &server_name);
     if (context != GSS_C_NO_CONTEXT) {
       gss_delete_sec_context(&minor, &context, GSS_C_NO_BUFFER);
     }
     return result;
   }
+
+  // Credential handle is no longer needed after successful context init.
+  gss_release_cred(&minor, &cred);
 
   // Copy output token to caller-owned memory
   if (output_token.length > 0) {
