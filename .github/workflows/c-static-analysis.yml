@@ -72,6 +72,7 @@ jobs:
           cppcheck \
             --enable=all \
             --error-exitcode=1 \
+            --check-level=exhaustive \
             --suppress=missingIncludeSystem \
             --suppress=unusedFunction \
             gss_darwin.c
