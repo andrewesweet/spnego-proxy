@@ -13,6 +13,7 @@ import "C"
 import (
 	"encoding/base64"
 	"fmt"
+	"os"
 	"sync"
 	"unsafe"
 )
@@ -35,7 +36,17 @@ func NewGSSTokenProvider(proxyHost, explicitSPN string) (*GSSTokenProvider, erro
 		spn = normalizeSPN(spn, '@', '/')
 	}
 	logger.Printf("using macOS GSS-API with SPN: %s", spn)
-	return &GSSTokenProvider{spn: spn}, nil
+	g := &GSSTokenProvider{spn: spn}
+
+	// Validate credentials are available at startup. This is a warning,
+	// not a fatal error, because credentials may become available later
+	// (e.g. kinit run after the proxy starts).
+	if _, err := g.GetToken(); err != nil {
+		logger.Printf("WARNING: initial credential check failed: %v", err)
+		logger.Printf("the proxy will retry on each request; run 'kinit' to obtain credentials")
+	}
+
+	return g, nil
 }
 
 func (g *GSSTokenProvider) GetToken() (string, error) {
@@ -47,7 +58,11 @@ func (g *GSSTokenProvider) GetToken() (string, error) {
 
 	result := C.acquire_spnego_token(cspn)
 	if result.error_code != 0 {
-		return "", fmt.Errorf("GSS-API error: %s", C.GoString(&result.error_msg[0]))
+		msg := C.GoString(&result.error_msg[0])
+		if ccname := os.Getenv("KRB5CCNAME"); ccname != "" {
+			return "", fmt.Errorf("GSS-API error: %s (KRB5CCNAME=%s; try 'klist' to check credentials or 'kinit' to refresh)", msg, ccname)
+		}
+		return "", fmt.Errorf("GSS-API error: %s (try 'klist' to check credentials or 'kinit' to refresh)", msg)
 	}
 	if result.data == nil || result.length == 0 {
 		return "", fmt.Errorf("GSS-API returned empty token")

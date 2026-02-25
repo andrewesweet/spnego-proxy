@@ -48,12 +48,14 @@ gss_token_result acquire_spnego_token(const char *spn) {
   OM_uint32 major, minor;
   gss_buffer_desc name_buf;
   gss_name_t server_name = GSS_C_NO_NAME;
+  gss_cred_id_t cred = GSS_C_NO_CREDENTIAL;
   gss_ctx_id_t context = GSS_C_NO_CONTEXT;
   gss_buffer_desc output_token = GSS_C_EMPTY_BUFFER;
 
   // SPNEGO mechanism OID: 1.3.6.1.5.5.2
   gss_OID_desc spnego_oid_desc = {6, (void *)"\x2b\x06\x01\x05\x05\x02"};
   gss_OID spnego_oid = &spnego_oid_desc;
+  gss_OID_set_desc spnego_oid_set_desc = {1, &spnego_oid_desc};
 
   // Import server name
   name_buf.value = (void *)spn;
@@ -66,10 +68,26 @@ gss_token_result acquire_spnego_token(const char *spn) {
     return result;
   }
 
-  // Acquire SPNEGO token using default credentials from the ccache
+  // Pre-flight: verify credentials are available before attempting context
+  // initialization. Without this, a missing credential cache (e.g. expired
+  // macOS API: cache) produces the misleading "unsupported mechanism" error
+  // from gss_init_sec_context. Acquiring explicitly gives a clear diagnostic.
+  major = gss_acquire_cred(&minor, GSS_C_NO_NAME, 0, &spnego_oid_set_desc,
+                           GSS_C_INITIATE, &cred, NULL, NULL);
+  if (GSS_ERROR(major)) {
+    result.error_code = 1;
+    char gss_err[230];
+    format_gss_error(major, minor, gss_err, sizeof(gss_err));
+    snprintf(result.error_msg, sizeof(result.error_msg),
+             "credential check: %s", gss_err);
+    gss_release_name(&minor, &server_name);
+    return result;
+  }
+
+  // Acquire SPNEGO token using the verified credentials
   major = gss_init_sec_context(
       &minor,
-      GSS_C_NO_CREDENTIAL,  // use default creds from kinit/Keychain
+      cred,  // use explicitly acquired creds (not GSS_C_NO_CREDENTIAL)
       &context, server_name,
       spnego_oid,  // SPNEGO mechanism
       GSS_C_MUTUAL_FLAG | GSS_C_REPLAY_FLAG,
@@ -81,6 +99,14 @@ gss_token_result acquire_spnego_token(const char *spn) {
       NULL,  // ret_flags
       NULL   // time_rec
   );
+
+  // Release credential handle — not needed after context initialization.
+  // Use a separate minor status to preserve the one from gss_init_sec_context
+  // for error reporting below.
+  {
+    OM_uint32 rel_minor;
+    gss_release_cred(&rel_minor, &cred);
+  }
 
   // GSS_S_CONTINUE_NEEDED is not checked here intentionally. For SPNEGO over
   // HTTP proxy auth, only the initiator token (first call) is needed. The HTTP
