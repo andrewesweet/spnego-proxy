@@ -172,6 +172,22 @@ func NewEphemeralKDC(t *testing.T) *EphemeralKDC {
 		t.Fatalf("kinit failed: %v\noutput: %s", err, kinitOut)
 	}
 
+	// Verify the credential cache was populated. This also serves as a
+	// synchronization point: Apple Heimdal's GSS-API reads the FILE: cache
+	// produced by MIT kinit, so confirming klist succeeds ensures the cache
+	// is fully written and readable before tests proceed.
+	klistBin := filepath.Join(binDir, "klist")
+	klistCmd := exec.Command(klistBin) //nolint:gosec // G204: binary path from Homebrew krb5
+	klistCmd.Env = append(os.Environ(),
+		"KRB5_CONFIG="+kdc.KRB5Conf,
+		"KRB5CCNAME=FILE:"+kdc.CCachePath,
+	)
+	klistOut, err := klistCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("klist failed after kinit: %v\noutput: %s", err, klistOut)
+	}
+	t.Logf("credential cache populated:\n%s", klistOut)
+
 	return kdc
 }
 
