@@ -58,18 +58,37 @@ func newCircuitBreakerTokenProvider(inner TokenProvider, settings gobreaker.Sett
 	return &CircuitBreakerTokenProvider{inner: inner, cb: cb}
 }
 
+// CircuitBreakerError indicates that the circuit breaker rejected a request.
+// The Unwrap method returns the underlying gobreaker sentinel so callers can
+// further distinguish open vs half-open states with errors.Is if needed.
+type CircuitBreakerError struct {
+	msg   string
+	cause error
+}
+
+func (e *CircuitBreakerError) Error() string { return e.msg }
+func (e *CircuitBreakerError) Unwrap() error { return e.cause }
+
 // GetToken acquires a token from the wrapped provider, subject to circuit
-// breaker policy. Returns a descriptive error when the circuit is open.
+// breaker policy. Returns a *CircuitBreakerError when the circuit is open
+// or half-open, allowing callers to distinguish circuit breaker rejections
+// from other token acquisition failures using errors.As.
 func (p *CircuitBreakerTokenProvider) GetToken() (string, error) {
 	token, err := p.cb.Execute(func() (string, error) {
 		return p.inner.GetToken()
 	})
 	if err != nil {
 		if errors.Is(err, gobreaker.ErrOpenState) {
-			return "", fmt.Errorf("circuit breaker open: token acquisition disabled after %d consecutive failures", cbConsecutiveFailures)
+			return "", &CircuitBreakerError{
+				msg:   fmt.Sprintf("circuit breaker open: token acquisition disabled after %d consecutive failures", cbConsecutiveFailures),
+				cause: err,
+			}
 		}
 		if errors.Is(err, gobreaker.ErrTooManyRequests) {
-			return "", fmt.Errorf("circuit breaker half-open: probe in progress, rejecting concurrent request")
+			return "", &CircuitBreakerError{
+				msg:   "circuit breaker half-open: probe in progress, rejecting concurrent request",
+				cause: err,
+			}
 		}
 		return "", err
 	}
