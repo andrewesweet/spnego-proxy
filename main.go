@@ -227,7 +227,6 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 		writeHTTPError(conn, pe)
 		return
 	}
-	slog.Debug("proxy request", "method", req.Method, "uri", req.RequestURI, "proto", req.Proto, "headers", len(req.Header), "client_addr", clientAddr, "upstream_addr", proxy)
 	req.Header.Set("Proxy-Authorization", "Negotiate "+token)
 
 	// RFC 9110 §7.6.3: intermediaries MUST add a Via entry identifying
@@ -239,6 +238,7 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 		req.Header.Set("Via", viaEntry)
 	}
 
+	slog.Debug("proxy request", "method", req.Method, "uri", req.RequestURI, "proto", req.Proto, "headers", len(req.Header), "client_addr", clientAddr, "upstream_addr", proxy, "via", req.Header.Get("Via"))
 	if err := req.WriteProxy(proxyConn); err != nil {
 		slog.Error("failed to write request to proxy", "error", err, "error_type", errConnectionTerminated.errorType, "client_addr", clientAddr, "upstream_addr", proxy, "method", req.Method, "host", req.Host)
 		writeHTTPError(conn, errConnectionTerminated)
