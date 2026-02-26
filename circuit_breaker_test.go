@@ -126,10 +126,14 @@ func TestCircuitBreakerOpenRejectsWithoutCallingInner(t *testing.T) {
 }
 
 func TestCircuitBreakerHalfOpenRejectsConcurrentRequests(t *testing.T) {
-	// Use a very short timeout so the circuit transitions to half-open quickly,
-	// and a slow inner provider so the probe is still in-flight when concurrent
-	// requests arrive.
-	inner := &stubTokenProvider{err: errors.New("fail")}
+	// Use a single stub that starts in "fail" mode to trip the breaker, then
+	// switches to "slow success" mode for the half-open probe. This avoids
+	// directly mutating cb.inner and keeps the test decoupled from field names.
+	inner := &stubTokenProvider{
+		err:   errors.New("fail"),
+		token: "recovered",
+		delay: 200 * time.Millisecond,
+	}
 	cb := newCircuitBreakerTokenProvider(inner, gobreaker.Settings{
 		Name:        "test-concurrent",
 		MaxRequests: 1,
@@ -152,9 +156,10 @@ func TestCircuitBreakerHalfOpenRejectsConcurrentRequests(t *testing.T) {
 		}
 	}
 
-	// Now make inner slow so the probe blocks while concurrent callers fire
-	slowInner := &slowTokenProvider{delay: 200 * time.Millisecond, token: "recovered"}
-	cb.inner = slowInner
+	// Switch the stub to succeed slowly so the probe blocks while concurrent
+	// callers arrive. No goroutines are running at this point, so the
+	// unsynchronised write is safe.
+	inner.err = nil
 
 	const concurrency = 5
 	errs := make([]error, concurrency)
@@ -186,20 +191,4 @@ func TestCircuitBreakerHalfOpenRejectsConcurrentRequests(t *testing.T) {
 	if tooMany != concurrency-1 {
 		t.Errorf("expected %d ErrTooManyRequests rejections, got %d", concurrency-1, tooMany)
 	}
-}
-
-// slowTokenProvider introduces a delay before returning, used to keep the
-// half-open probe in-flight while concurrent requests arrive.
-type slowTokenProvider struct {
-	delay time.Duration
-	token string
-}
-
-func (s *slowTokenProvider) GetToken() (string, error) {
-	time.Sleep(s.delay)
-	return s.token, nil
-}
-
-func (s *slowTokenProvider) Close() error {
-	return nil
 }
