@@ -128,7 +128,7 @@ func NewEphemeralKDC(t *testing.T) *EphemeralKDC {
 
 	// Start krb5kdc in foreground mode (-n prevents daemonizing).
 	kdcLogPath := filepath.Join(tmpDir, "krb5kdc.log")
-	kdcLogFile, err := os.Create(kdcLogPath)
+	kdcLogFile, err := os.Create(kdcLogPath) //nolint:gosec // G304: path built from t.TempDir()
 	if err != nil {
 		t.Fatalf("create KDC log file: %v", err)
 	}
@@ -144,7 +144,7 @@ func NewEphemeralKDC(t *testing.T) *EphemeralKDC {
 	t.Cleanup(func() {
 		kdc.Close()
 		_ = kdcLogFile.Close()
-		if logData, err := os.ReadFile(kdcLogPath); err == nil && len(logData) > 0 {
+		if logData, err := os.ReadFile(kdcLogPath); err == nil && len(logData) > 0 { //nolint:gosec // G304: path built from t.TempDir()
 			t.Logf("krb5kdc log:\n%s", logData)
 		}
 	})
