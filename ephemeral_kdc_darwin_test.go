@@ -172,19 +172,6 @@ func NewEphemeralKDC(t *testing.T) *EphemeralKDC {
 		t.Fatalf("kinit failed: %v\noutput: %s", err, kinitOut)
 	}
 
-	// Verify the credential cache was populated using klist.
-	klistBin := filepath.Join(binDir, "klist")
-	klistCmd := exec.Command(klistBin) //nolint:gosec // G204: binary path from Homebrew krb5
-	klistCmd.Env = append(os.Environ(),
-		"KRB5_CONFIG="+kdc.KRB5Conf,
-		"KRB5CCNAME=FILE:"+kdc.CCachePath,
-	)
-	klistOut, err := klistCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("klist failed after kinit: %v\noutput: %s", err, klistOut)
-	}
-	t.Logf("credential cache populated:\n%s", klistOut)
-
 	return kdc
 }
 

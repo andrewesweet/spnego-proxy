@@ -55,14 +55,7 @@ jobs:
         run: |
           KRB5_PREFIX="$(brew --prefix krb5)"
           export PATH="${KRB5_PREFIX}/bin:${KRB5_PREFIX}/sbin:$PATH"
-          go test -v -count=1 ./... 2>&1 | tee test-output.txt
-
-      - name: Upload test output
-        if: matrix.arch == 'arm64' && always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: test-output-darwin-arm64
-          path: test-output.txt
+          go test -v -count=1 ./...
 
       - name: Verify binary runs
         run: |
