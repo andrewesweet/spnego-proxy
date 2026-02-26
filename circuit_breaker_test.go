@@ -141,8 +141,16 @@ func TestCircuitBreakerHalfOpenRejectsConcurrentRequests(t *testing.T) {
 
 	tripBreaker(t, cb)
 
-	// Wait for the circuit to transition to half-open
-	time.Sleep(100 * time.Millisecond)
+	// Poll until the circuit transitions to half-open instead of using a
+	// fixed sleep, which is fragile on slow or overloaded CI systems.
+	deadline := time.After(2 * time.Second)
+	for cb.cb.State() != gobreaker.StateHalfOpen {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for circuit breaker to transition to half-open")
+		case <-time.After(1 * time.Millisecond):
+		}
+	}
 
 	// Now make inner slow so the probe blocks while concurrent callers fire
 	slowInner := &slowTokenProvider{delay: 200 * time.Millisecond, token: "recovered"}
