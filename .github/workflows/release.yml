@@ -27,9 +27,17 @@ jobs:
           path: artifacts/
           merge-multiple: true
 
-      - name: Generate checksums
+      - name: Generate checksums for all release artifacts
         working-directory: artifacts
-        run: shasum -a 256 spnego-proxy-* > checksums-sha256.txt
+        run: |
+          shasum -a 256 \
+            spnego-proxy-darwin-amd64 \
+            spnego-proxy-darwin-arm64 \
+            spnego-proxy-linux-amd64 \
+            spnego-proxy-darwin-amd64.sbom.spdx.json \
+            spnego-proxy-darwin-arm64.sbom.spdx.json \
+            spnego-proxy-linux-amd64.sbom.spdx.json \
+            > checksums-sha256.txt
 
       - name: Detect pre-release from SemVer tag
         id: semver
