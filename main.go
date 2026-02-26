@@ -67,10 +67,10 @@ func enableKeepAlive(conn net.Conn, period time.Duration) {
 // RFC 9209 Proxy-Status error tokens used by this proxy.
 // Only tokens that correspond to actual proxy error paths are defined.
 const (
-	proxyErrConnectionTimeout  = "connection_timeout"
-	proxyErrConnectionRefused  = "connection_refused"
-	proxyErrHTTPRequestError   = "http_request_error"
-	proxyErrProxyInternalError = "proxy_internal_error"
+	proxyErrConnectionTimeout    = "connection_timeout"
+	proxyErrConnectionRefused    = "connection_refused"
+	proxyErrHTTPRequestError     = "http_request_error"
+	proxyErrProxyInternalError   = "proxy_internal_error"
 	proxyErrConnectionTerminated = "connection_terminated"
 )
 
@@ -105,7 +105,8 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 	}
 	proxyConn, err := net.DialTimeout("tcp", proxy, dialTimeout)
 	if err != nil {
-		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
 			logger.Printf("failed to connect to proxy: %v", err)
 			writeHTTPError(conn, http.StatusGatewayTimeout, proxyErrConnectionTimeout, "failed to connect to upstream proxy\n")
 		} else {
