@@ -127,18 +127,37 @@ func NewEphemeralKDC(t *testing.T) *EphemeralKDC {
 		fmt.Sprintf("addprinc -randkey %s@%s", ephemeralKDCService, ephemeralKDCRealm))
 
 	// Start krb5kdc in foreground mode (-n prevents daemonizing).
+	kdcLogPath := filepath.Join(tmpDir, "krb5kdc.log")
+	kdcLogFile, err := os.Create(kdcLogPath)
+	if err != nil {
+		t.Fatalf("create KDC log file: %v", err)
+	}
 	kdc.kdcCmd = exec.Command(krb5kdcBin, "-n") //nolint:gosec // G204: binary path from Homebrew krb5
 	kdc.kdcCmd.Env = kdcEnv
-	kdc.kdcCmd.Stdout = os.Stderr
-	kdc.kdcCmd.Stderr = os.Stderr
+	kdc.kdcCmd.Stdout = kdcLogFile
+	kdc.kdcCmd.Stderr = kdcLogFile
 	if err := kdc.kdcCmd.Start(); err != nil {
 		t.Fatalf("start krb5kdc: %v", err)
 	}
+	t.Logf("krb5kdc started (pid %d, port %d)", kdc.kdcCmd.Process.Pid, port)
 
-	t.Cleanup(func() { kdc.Close() })
+	t.Cleanup(func() {
+		kdc.Close()
+		_ = kdcLogFile.Close()
+		if logData, err := os.ReadFile(kdcLogPath); err == nil && len(logData) > 0 {
+			t.Logf("krb5kdc log:\n%s", logData)
+		}
+	})
+
+	// Verify krb5kdc is still running after a brief pause.
+	time.Sleep(200 * time.Millisecond)
+	if kdc.kdcCmd.ProcessState != nil {
+		t.Fatalf("krb5kdc exited prematurely")
+	}
 
 	// Wait for the KDC to accept connections.
 	waitForPort(t, port, 5*time.Second)
+	t.Logf("krb5kdc is listening on port %d", port)
 
 	// Populate a FILE: credential cache using MIT kinit.
 	kdc.CCachePath = filepath.Join(tmpDir, "ccache")
@@ -148,11 +167,23 @@ func NewEphemeralKDC(t *testing.T) *EphemeralKDC {
 		"KRB5CCNAME=FILE:"+kdc.CCachePath,
 	)
 	kinitCmd.Stdin = strings.NewReader(ephemeralKDCPassword + "\n")
-	kinitCmd.Stdout = os.Stderr
-	kinitCmd.Stderr = os.Stderr
-	if err := kinitCmd.Run(); err != nil {
-		t.Fatalf("kinit failed: %v", err)
+	kinitOut, err := kinitCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("kinit failed: %v\noutput: %s", err, kinitOut)
 	}
+
+	// Verify the credential cache was populated using klist.
+	klistBin := filepath.Join(binDir, "klist")
+	klistCmd := exec.Command(klistBin) //nolint:gosec // G204: binary path from Homebrew krb5
+	klistCmd.Env = append(os.Environ(),
+		"KRB5_CONFIG="+kdc.KRB5Conf,
+		"KRB5CCNAME=FILE:"+kdc.CCachePath,
+	)
+	klistOut, err := klistCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("klist failed after kinit: %v\noutput: %s", err, klistOut)
+	}
+	t.Logf("credential cache populated:\n%s", klistOut)
 
 	return kdc
 }

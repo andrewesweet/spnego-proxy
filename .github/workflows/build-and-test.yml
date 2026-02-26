@@ -54,6 +54,9 @@ jobs:
           INTEGRATION: "1"
         run: |
           export PATH="$(brew --prefix krb5)/bin:$(brew --prefix krb5)/sbin:$PATH"
+          echo "MIT krb5 prefix: $(brew --prefix krb5)"
+          echo "krb5kdc: $(which krb5kdc)"
+          echo "kinit: $(which kinit)"
           go test -v -count=1 ./...
 
       - name: Verify binary runs
