@@ -43,11 +43,18 @@ jobs:
       - name: Verify GSS framework linkage
         run: otool -L spnego-proxy-darwin-${{ matrix.arch }} | grep -i GSS
 
-      - name: Run unit tests
+      - name: Install MIT Kerberos (for integration tests)
+        if: matrix.arch == 'arm64'
+        run: brew install krb5
+
+      - name: Run unit and integration tests
         if: matrix.arch == 'arm64'
         env:
           CGO_ENABLED: "1"
-        run: go test -v -count=1 ./...
+          INTEGRATION: "1"
+        run: |
+          export PATH="$(brew --prefix krb5)/bin:$(brew --prefix krb5)/sbin:$PATH"
+          go test -v -count=1 ./...
 
       - name: Verify binary runs
         run: |
