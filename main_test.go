@@ -44,7 +44,7 @@ func TestHandleClientDialTimeout(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, unreachable, provider, false, 50*time.Millisecond, time.Second)
+		handleClient(server, unreachable, provider, false, 50*time.Millisecond, time.Second, 0)
 	}()
 
 	// The proxy should respond with 502 when it can't reach the upstream.
@@ -95,7 +95,7 @@ func TestHandleClientReadTimeout(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, false, 5*time.Second, 50*time.Millisecond)
+		handleClient(server, upstream.Addr().String(), provider, false, 5*time.Second, 50*time.Millisecond, 0)
 	}()
 
 	// The proxy should respond with 400 when it can't read the client request.
@@ -298,7 +298,7 @@ func TestShutdownDrainsInFlightConnections(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second)
+				handleClient(conn, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second, 0)
 			}()
 		}
 	}()
@@ -399,7 +399,7 @@ func TestShutdownDrainTimeout(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second)
+				handleClient(conn, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second, 0)
 			}()
 		}
 	}()
@@ -475,7 +475,7 @@ func TestHandleClientTokenErrorReturns502(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second)
+		handleClient(server, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second, 0)
 	}()
 
 	// Send a request through the client side of the pipe.
@@ -543,7 +543,7 @@ func TestHandleClientTokenErrorCONNECTReturns502(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleClient(conn, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second)
+		handleClient(conn, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second, 0)
 	}()
 
 	client, err := net.Dial("tcp", ln.Addr().String())
@@ -636,7 +636,7 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleClient(conn, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second)
+		handleClient(conn, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second, 0)
 	}()
 
 	// Connect to the local proxy and send a CONNECT request followed
@@ -726,7 +726,7 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 			return
 		}
 		wrapped.Conn = conn
-		handleClient(wrapped, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second)
+		handleClient(wrapped, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second, 0)
 	}()
 
 	// Connect to the local proxy and send a request.
@@ -764,5 +764,123 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 	// conn, so CloseWrite must have been called on it at least once.
 	if n := wrapped.closeWriteCalls.Load(); n == 0 {
 		t.Error("expected CloseWrite to be called on the client connection, but it was not")
+	}
+}
+
+func TestEnableKeepAlive(t *testing.T) {
+	// enableKeepAlive should configure keepalive on real TCP connections
+	// without error.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		accepted <- c
+	}()
+
+	clientConn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = clientConn.Close() }()
+
+	select {
+	case serverConn := <-accepted:
+		defer func() { _ = serverConn.Close() }()
+		// Should succeed on TCP connections without panic.
+		enableKeepAlive(serverConn, 30*time.Second)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for accept")
+	}
+	enableKeepAlive(clientConn, 30*time.Second)
+
+	// Should be a silent no-op on non-TCP connections (e.g. net.Pipe).
+	a, b := net.Pipe()
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
+	enableKeepAlive(a, 30*time.Second)
+	enableKeepAlive(b, 30*time.Second)
+}
+
+// TestHandleClientKeepAlive verifies that handleClient works correctly
+// when TCP keepalive is enabled on forwarded connections (issue #74).
+func TestHandleClientKeepAlive(t *testing.T) {
+	// Start a fake upstream proxy that echoes a valid HTTP response.
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		for {
+			conn, err := upstream.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				buf := make([]byte, 4096)
+				_, _ = c.Read(buf)
+				resp := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+				_, _ = c.Write([]byte(resp))
+			}(conn)
+		}
+	}()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	provider := &stubTokenProvider{token: "tok"}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		// Pass a non-zero keepalive to exercise the keepalive code path.
+		handleClient(conn, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second, 30*time.Second)
+	}()
+
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	req, _ := http.NewRequest("GET", "http://example.com/", nil)
+	if err := req.WriteProxy(client); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(client), req)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "OK" {
+		t.Errorf("expected body %q, got %q", "OK", body)
+	}
+
+	_ = client.Close()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return within 5s")
 	}
 }
