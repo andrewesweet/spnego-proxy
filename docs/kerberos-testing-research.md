@@ -97,7 +97,8 @@ exist:
 | Image | Description | Notes |
 |-------|-------------|-------|
 | [godatadriven/krb5-kdc-server](https://hub.docker.com/r/godatadriven/krb5-kdc-server) | Purpose-built test KDC | Simple, widely used |
-| [gcavalcante8808/krb5-server](https://hub.docker.com/r/gcavalcante8808/krb5-server) | MIT krb5 server | Configurable via env vars |
+| [gcavalcante8808/krb5-server](https://hub.docker.com/r/gcavalcante8808/krb5-server) | Alpine-based MIT krb5 | Env var config (`KRB5_REALM`, `KRB5_KDC`, `KRB5_PASS`), amd64+arm64 |
+| [NORDUnet/krb5-docker](https://github.com/NORDUnet/krb5-docker) | **MIT and Heimdal** | Separate Dockerfiles; principals via `PRINCIPALS` env var (`name:password` pairs) |
 | [criteo/kerberos-docker](https://github.com/criteo/kerberos-docker) | Full Kerberos environment | Multi-container, CI-tested with GitHub Actions |
 | gokrb5's own images (`jcmturner/gokrb5:kdc-centos-default`, etc.) | Used by gokrb5 CI | Battle-tested, multiple KDC configurations |
 
@@ -145,6 +146,16 @@ services:
   accepted by a standards-compliant KDC/service.
 - **Regression testing**: Catch protocol-level bugs that a mock KDC would miss.
 
+### Gotcha: Docker Entropy
+
+Docker containers often have very low entropy, which can cause the KDC to hang
+during database initialization. The standard workaround is mapping
+`/dev/urandom` to `/dev/random`:
+
+```bash
+docker run -v /dev/urandom:/dev/random ...
+```
+
 ### Limitations
 
 - **Hostname sensitivity**: Kerberos is very sensitive to hostnames and DNS.
@@ -163,6 +174,14 @@ Write a `docker-compose.yml` for the test environment, create initialization
 scripts for the KDC (create realm, add principals, export keytabs), write a
 Go test file with `-tags=integration` that expects the Docker environment to
 be running.
+
+### Reference: gokrb5's CI workflow
+
+The gokrb5 library itself runs integration tests in GitHub Actions using 7
+Docker containers (DNS server, 5 KDC variants, HTTP service). See
+[testing.yml](https://github.com/jcmturner/gokrb5/blob/master/.github/workflows/testing.yml).
+This is the gold standard for Go Kerberos CI testing and the most natural
+pattern to adapt since spnego-proxy already depends on gokrb5.
 
 ### Recommendation: **Do this second, for CI.**
 
@@ -424,3 +443,21 @@ Even with all the above, some scenarios will still require manual testing:
 However, these are relatively narrow scenarios compared to the broad "does
 Kerberos auth work at all" testing that currently requires a full corporate
 setup.
+
+---
+
+## References
+
+- [jcmturner/krb5test](https://github.com/jcmturner/krb5test) — Pure Go mock KDC
+- [jcmturner/gokrb5 CI workflow](https://github.com/jcmturner/gokrb5/blob/master/.github/workflows/testing.yml) — GitHub Actions reference
+- [godatadriven/krb5-kdc-server](https://github.com/godatadriven-dockerhub/krb5-kdc-server) — Docker test KDC
+- [gcavalcante8808/krb5-server](https://hub.docker.com/r/gcavalcante8808/krb5-server) — Alpine-based Docker KDC
+- [NORDUnet/krb5-docker](https://github.com/NORDUnet/krb5-docker) — MIT + Heimdal Docker KDC
+- [criteo/kerberos-docker](https://github.com/criteo/kerberos-docker) — Full Docker Kerberos environment
+- [tillt/docker-kdc](https://github.com/tillt/docker-kdc) — Heimdal Docker KDC (macOS-friendly)
+- [pythongssapi/k5test](https://github.com/pythongssapi/k5test) — Python self-contained KDC (design reference)
+- [krb5/k5test.py](https://github.com/krb5/krb5/blob/master/src/util/k5test.py) — MIT krb5 test framework
+- [Apple Heimdal LKDC tests](https://github.com/aosm/Heimdal/blob/master/tests/apple/check-apple-lkdc.in) — macOS KRB5CCNAME override pattern
+- [Confluent: Containerized Kerberos Testing](https://www.confluent.io/blog/containerized-testing-with-kerberos-and-ssh/)
+- [adelton/webauthinfra](https://github.com/adelton/webauthinfra) — Full SPNEGO E2E with Apache + mod_auth_gssapi
+- [stnoonan/spnego-http-auth-nginx-module](https://github.com/stnoonan/spnego-http-auth-nginx-module) — Nginx SPNEGO module
