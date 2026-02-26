@@ -95,8 +95,9 @@ func TestProxyChainWithRealToken(t *testing.T) {
 	provider, cleanup := startMockKDC(t, "testuser", "HTTP/proxy.test.realm.com")
 	defer cleanup()
 
-	// Start a fake upstream proxy that captures the Proxy-Authorization header.
+	// Start a fake upstream proxy that captures the Proxy-Authorization and Via headers.
 	gotAuth := make(chan string, 1)
+	gotVia := make(chan string, 1)
 	upstream, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -113,10 +114,12 @@ func TestProxyChainWithRealToken(t *testing.T) {
 		req, err := http.ReadRequest(bufio.NewReader(conn))
 		if err != nil {
 			gotAuth <- "READ_ERR: " + err.Error()
+			gotVia <- "READ_ERR: " + err.Error()
 			return
 		}
 		_ = req.Body.Close()
 		gotAuth <- req.Header.Get("Proxy-Authorization")
+		gotVia <- req.Header.Get("Via")
 
 		resp := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
 		_, _ = conn.Write([]byte(resp))
@@ -136,7 +139,7 @@ func TestProxyChainWithRealToken(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleClient(conn, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
 	}()
 
 	// Connect and send a request through the proxy.
@@ -186,6 +189,17 @@ func TestProxyChainWithRealToken(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream to receive request")
+	}
+
+	// Validate the Via header was added to the forwarded request.
+	wantVia := "HTTP/1.1 " + testPseudonym
+	select {
+	case via := <-gotVia:
+		if via != wantVia {
+			t.Errorf("Via header = %q, want %q", via, wantVia)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream Via header")
 	}
 
 	select {

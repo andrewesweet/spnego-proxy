@@ -44,7 +44,7 @@ func TestHandleClientDialTimeout(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, unreachable, provider, 50*time.Millisecond, time.Second, 0)
+		handleClient(server, unreachable, provider, testPseudonym, 50*time.Millisecond, time.Second, 0)
 	}()
 
 	// The proxy should respond with 504 when the dial times out (RFC 9209 connection_timeout).
@@ -104,7 +104,7 @@ func TestHandleClientReadTimeout(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, 5*time.Second, 50*time.Millisecond, 0)
+		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 50*time.Millisecond, 0)
 	}()
 
 	// The proxy should respond with 400 when it can't read the client request.
@@ -316,7 +316,7 @@ func TestShutdownDrainsInFlightConnections(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
+				handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
 			}()
 		}
 	}()
@@ -417,7 +417,7 @@ func TestShutdownDrainTimeout(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
+				handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
 			}()
 		}
 	}()
@@ -493,7 +493,7 @@ func TestHandleClientTokenErrorReturns502(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
+		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
 	}()
 
 	// Send a request through the client side of the pipe.
@@ -564,7 +564,7 @@ func TestHandleClientCircuitBreakerErrorReturnsDistinctBody(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
+		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
 	}()
 
 	req, _ := http.NewRequest("GET", "http://example.com/", nil)
@@ -641,7 +641,7 @@ func TestHandleClientTokenErrorCONNECTReturns502(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleClient(conn, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
 	}()
 
 	client, err := net.Dial("tcp", ln.Addr().String())
@@ -698,6 +698,7 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 	// then reads and records everything the proxy sends after the
 	// initial request.
 	gotExtra := make(chan string, 1)
+	gotVia := make(chan string, 1)
 	upstream, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -715,8 +716,10 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 		req, err := http.ReadRequest(reader)
 		if err != nil {
 			gotExtra <- "READ_ERR: " + err.Error()
+			gotVia <- "READ_ERR: " + err.Error()
 			return
 		}
+		gotVia <- req.Header.Get("Via")
 		_ = req.Body.Close()
 
 		// Send 200 to complete the CONNECT handshake.
@@ -744,7 +747,7 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleClient(conn, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
 	}()
 
 	// Connect to the local proxy and send a CONNECT request followed
@@ -785,6 +788,17 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 		t.Fatal("timed out waiting for upstream to receive extra payload")
 	}
 
+	// Verify the Via header was added to the forwarded CONNECT request.
+	wantVia := "HTTP/1.1 " + testPseudonym
+	select {
+	case got := <-gotVia:
+		if got != wantVia {
+			t.Errorf("Via header = %q, want %q", got, wantVia)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream Via header")
+	}
+
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
@@ -799,6 +813,7 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 	// Start a fake upstream proxy that reads the request then sends
 	// a short response and closes.
+	gotVia := make(chan string, 1)
 	upstream, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -810,8 +825,13 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 			return
 		}
 		defer func() { _ = conn.Close() }()
-		buf := make([]byte, 4096)
-		_, _ = conn.Read(buf)
+		req, err := http.ReadRequest(bufio.NewReader(conn))
+		if err != nil {
+			gotVia <- "READ_ERR: " + err.Error()
+		} else {
+			gotVia <- req.Header.Get("Via")
+			_ = req.Body.Close()
+		}
 		resp := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
 		_, _ = conn.Write([]byte(resp))
 	}()
@@ -834,7 +854,7 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 			return
 		}
 		wrapped.Conn = conn
-		handleClient(wrapped, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
+		handleClient(wrapped, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
 	}()
 
 	// Connect to the local proxy and send a request.
@@ -861,6 +881,17 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 
 	// Close client to unblock forwarding goroutines.
 	_ = client.Close()
+
+	// Verify the Via header was added to the forwarded request.
+	wantVia := "HTTP/1.1 " + testPseudonym
+	select {
+	case got := <-gotVia:
+		if got != wantVia {
+			t.Errorf("Via header = %q, want %q", got, wantVia)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream Via header")
+	}
 
 	select {
 	case <-done:
@@ -921,6 +952,7 @@ func TestEnableKeepAlive(t *testing.T) {
 // when TCP keepalive is enabled on forwarded connections (issue #74).
 func TestHandleClientKeepAlive(t *testing.T) {
 	// Start a fake upstream proxy that echoes a valid HTTP response.
+	gotVia := make(chan string, 1)
 	upstream, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -934,8 +966,13 @@ func TestHandleClientKeepAlive(t *testing.T) {
 			}
 			go func(c net.Conn) {
 				defer func() { _ = c.Close() }()
-				buf := make([]byte, 4096)
-				_, _ = c.Read(buf)
+				req, err := http.ReadRequest(bufio.NewReader(c))
+				if err != nil {
+					gotVia <- "READ_ERR: " + err.Error()
+				} else {
+					gotVia <- req.Header.Get("Via")
+					_ = req.Body.Close()
+				}
 				resp := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
 				_, _ = c.Write([]byte(resp))
 			}(conn)
@@ -957,7 +994,7 @@ func TestHandleClientKeepAlive(t *testing.T) {
 			return
 		}
 		// Pass a non-zero keepalive to exercise the keepalive code path.
-		handleClient(conn, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 30*time.Second)
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 30*time.Second)
 	}()
 
 	client, err := net.Dial("tcp", ln.Addr().String())
@@ -986,6 +1023,351 @@ func TestHandleClientKeepAlive(t *testing.T) {
 	}
 
 	_ = client.Close()
+
+	// Verify the Via header was added to the forwarded request.
+	wantVia := "HTTP/1.1 " + testPseudonym
+	select {
+	case got := <-gotVia:
+		if got != wantVia {
+			t.Errorf("Via header = %q, want %q", got, wantVia)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream Via header")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return within 5s")
+	}
+}
+
+// TestHandleClientAddsViaHeader verifies that handleClient adds a Via header
+// to requests forwarded to the upstream proxy (RFC 9110 §7.6.3).
+func TestHandleClientAddsViaHeader(t *testing.T) {
+	gotVia := make(chan string, 1)
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		conn, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		req, err := http.ReadRequest(bufio.NewReader(conn))
+		if err != nil {
+			gotVia <- "READ_ERR: " + err.Error()
+			return
+		}
+		_ = req.Body.Close()
+		gotVia <- req.Header.Get("Via")
+		resp := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+		_, _ = conn.Write([]byte(resp))
+	}()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	provider := &stubTokenProvider{token: "tok"}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
+	}()
+
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	req, _ := http.NewRequest("GET", "http://example.com/", nil)
+	if err := req.WriteProxy(client); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(client), req)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	_ = client.Close()
+
+	want := "HTTP/1.1 " + testPseudonym
+	select {
+	case got := <-gotVia:
+		if got != want {
+			t.Errorf("Via header = %q, want %q", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream to receive request")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return within 5s")
+	}
+}
+
+// TestHandleClientAppendsToExistingVia verifies that handleClient appends to
+// an existing Via header rather than replacing it (RFC 9110 §7.6.3).
+func TestHandleClientAppendsToExistingVia(t *testing.T) {
+	gotVia := make(chan string, 1)
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		conn, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		req, err := http.ReadRequest(bufio.NewReader(conn))
+		if err != nil {
+			gotVia <- "READ_ERR: " + err.Error()
+			return
+		}
+		_ = req.Body.Close()
+		gotVia <- req.Header.Get("Via")
+		resp := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+		_, _ = conn.Write([]byte(resp))
+	}()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	provider := &stubTokenProvider{token: "tok"}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
+	}()
+
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	// Send a request that already has a Via header from a prior proxy.
+	_, err = io.WriteString(client, "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nVia: 1.0 other-proxy\r\n\r\n")
+	if err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	_ = client.Close()
+
+	want := "1.0 other-proxy, HTTP/1.1 " + testPseudonym
+	select {
+	case got := <-gotVia:
+		if got != want {
+			t.Errorf("Via header = %q, want %q", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream to receive request")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return within 5s")
+	}
+}
+
+// TestHandleClientLoopDetection verifies that handleClient detects routing
+// loops by checking whether its own pseudonym appears in an incoming Via
+// header, returning 502 with proxy_loop_detected (issue #114, Section 2).
+func TestHandleClientLoopDetection(t *testing.T) {
+	// Start a fake upstream that holds connections open.
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		for {
+			conn, err := upstream.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				buf := make([]byte, 4096)
+				_, _ = c.Read(buf)
+			}(conn)
+		}
+	}()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	provider := &stubTokenProvider{token: "tok"}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
+	}()
+
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	// Send a request with a Via header that already contains our pseudonym,
+	// simulating a routing loop.
+	_, err = io.WriteString(client, "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nVia: HTTP/1.1 "+testPseudonym+"\r\n\r\n")
+	if err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+	if err != nil {
+		t.Fatalf("expected HTTP error response, got read error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("expected status 502, got %d", resp.StatusCode)
+	}
+	if ps := resp.Header.Get("Proxy-Status"); ps != "spnego-proxy; error=proxy_loop_detected" {
+		t.Errorf("expected Proxy-Status header %q, got %q", "spnego-proxy; error=proxy_loop_detected", ps)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "spnego-proxy error: proxy_loop_detected") {
+		t.Errorf("expected body to contain %q, got: %q", "spnego-proxy error: proxy_loop_detected", body)
+	}
+	if !strings.Contains(string(body), "routing loop was detected") {
+		t.Errorf("expected body to describe loop detection, got: %q", body)
+	}
+
+	// Verify the token provider was NOT called (loop detected before token acquisition).
+	if calls := provider.calls.Load(); calls != 0 {
+		t.Errorf("expected 0 token provider calls, got %d", calls)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return within 5s")
+	}
+}
+
+// TestHandleClientNoLoopWithDifferentPseudonym verifies that a Via header
+// containing a different spnego-proxy instance's pseudonym does NOT trigger
+// loop detection — only our own pseudonym indicates a loop.
+func TestHandleClientNoLoopWithDifferentPseudonym(t *testing.T) {
+	gotVia := make(chan string, 1)
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		conn, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		req, err := http.ReadRequest(bufio.NewReader(conn))
+		if err != nil {
+			gotVia <- "READ_ERR: " + err.Error()
+			return
+		}
+		_ = req.Body.Close()
+		gotVia <- req.Header.Get("Via")
+		resp := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+		_, _ = conn.Write([]byte(resp))
+	}()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	provider := &stubTokenProvider{token: "tok"}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
+	}()
+
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	// Send a request with a Via header from a DIFFERENT spnego-proxy instance.
+	// This should NOT trigger loop detection.
+	_, err = io.WriteString(client, "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nVia: HTTP/1.1 spnego-proxy-other123\r\n\r\n")
+	if err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	_ = client.Close()
+
+	// Should get a 200 (request forwarded successfully), not a 502.
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	// Verify upstream received the request with both Via entries.
+	want := "HTTP/1.1 spnego-proxy-other123, HTTP/1.1 " + testPseudonym
+	select {
+	case got := <-gotVia:
+		if got != want {
+			t.Errorf("Via header = %q, want %q", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream to receive request")
+	}
+
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
