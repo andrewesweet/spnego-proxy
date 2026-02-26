@@ -108,7 +108,7 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 		return
 	}
 	var wg sync.WaitGroup
-	forward := func(from, to net.Conn) {
+	forward := func(from io.Reader, to net.Conn, fromAddr, toAddr net.Addr) {
 		defer wg.Done()
 		defer func() {
 			if cw, ok := to.(interface{ CloseWrite() error }); ok {
@@ -116,17 +116,16 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 			}
 		}()
 		if debug {
-			fromAddr, toAddr := from.RemoteAddr(), to.RemoteAddr()
 			logger.Printf("forward start %v -> %v", fromAddr, toAddr)
 			defer logger.Printf("forward done %v -> %v", fromAddr, toAddr)
 		}
 		if _, err := io.Copy(to, from); err != nil {
-			logger.Printf("forward error %v -> %v: %v", from.RemoteAddr(), to.RemoteAddr(), err)
+			logger.Printf("forward error %v -> %v: %v", fromAddr, toAddr, err)
 		}
 	}
 	wg.Add(2)
-	go forward(conn, proxyConn)
-	go forward(proxyConn, conn)
+	go forward(reqReader, proxyConn, conn.RemoteAddr(), proxyConn.RemoteAddr())
+	go forward(proxyConn, conn, proxyConn.RemoteAddr(), conn.RemoteAddr())
 	wg.Wait()
 }
 
