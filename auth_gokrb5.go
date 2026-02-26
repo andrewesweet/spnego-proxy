@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"sync"
 
@@ -75,8 +76,8 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 	spnVal := explicitSPN
 	if spnVal == "" {
 		spnVal = "HTTP/" + extractHost(proxy)
-		logger.Println("inferred service principal name:", spnVal)
-		logger.Println("if it's not correct use the -spn flag")
+		slog.Info("inferred service principal name", "spn", spnVal)
+		slog.Info("if it's not correct use the -spn flag")
 	} else {
 		spnVal = normalizeSPN(spnVal, '/', '@')
 	}
@@ -95,7 +96,7 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 		client.DisablePAFXFAST(true),
 	}
 	if debug {
-		opts = append(opts, client.Logger(logger))
+		opts = append(opts, client.Logger(slog.NewLogLogger(slog.Default().Handler(), slog.LevelDebug)))
 	}
 	cli := client.NewWithPassword(user, realm, string(passwd), cfg, opts...)
 

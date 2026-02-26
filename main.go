@@ -8,7 +8,7 @@ import (
 	"errors"
 	"flag"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -21,7 +21,13 @@ import (
 	"golang.org/x/net/netutil"
 )
 
-var logger = log.New(os.Stderr, "", log.LstdFlags)
+var logLevel = new(slog.LevelVar) // default Info
+
+func init() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+		Level: logLevel,
+	})))
+}
 
 // extractHost returns the host portion of addr, stripping any port suffix.
 // If addr has no port, it is returned unchanged.
@@ -64,31 +70,54 @@ func enableKeepAlive(conn net.Conn, period time.Duration) {
 	}
 }
 
-// writeHTTPError sends a minimal HTTP error response to the client.
-// It is best-effort; write failures are silently ignored because the
-// connection is about to be closed.
-func writeHTTPError(conn net.Conn, statusCode int, reason string) {
+// RFC 9209 Proxy-Status error tokens used by this proxy.
+// Only tokens that correspond to actual proxy error paths are defined.
+const (
+	proxyErrConnectionTimeout    = "connection_timeout"
+	proxyErrConnectionRefused    = "connection_refused"
+	proxyErrHTTPRequestError     = "http_request_error"
+	proxyErrProxyInternalError   = "proxy_internal_error"
+	proxyErrConnectionTerminated = "connection_terminated"
+)
+
+// writeHTTPError sends a minimal HTTP error response to the client with an
+// RFC 9209 Proxy-Status header indicating the error type. It is best-effort;
+// write failures are silently ignored because the connection is about to be
+// closed.
+func writeHTTPError(conn net.Conn, statusCode int, proxyStatusError string, reason string) {
+	header := http.Header{
+		"Content-Type": {"text/plain"},
+		"Connection":   {"close"},
+	}
+	// RFC 9209 Proxy-Status header with RFC 8941 Structured Fields syntax.
+	header.Set("Proxy-Status", "spnego-proxy; error="+proxyStatusError)
+
 	resp := &http.Response{
 		StatusCode:    statusCode,
 		ProtoMajor:    1,
 		ProtoMinor:    1,
-		Header:        http.Header{"Content-Type": {"text/plain"}, "Connection": {"close"}},
+		Header:        header,
 		Body:          io.NopCloser(strings.NewReader(reason)),
 		ContentLength: int64(len(reason)),
 	}
 	_ = resp.Write(conn)
 }
 
-func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug bool, dialTimeout, readTimeout, keepAlive time.Duration) {
+func handleClient(conn net.Conn, proxy string, provider TokenProvider, dialTimeout, readTimeout, keepAlive time.Duration) {
 	defer func() { _ = conn.Close() }()
-	if debug {
-		defer logger.Printf("stop processing request for client: %v", conn.RemoteAddr())
-		logger.Printf("new client: %v", conn.RemoteAddr())
-	}
+	clientAddr := conn.RemoteAddr().String()
+	slog.Debug("new client", "client_addr", clientAddr)
+	defer slog.Debug("stop processing request", "client_addr", clientAddr)
 	proxyConn, err := net.DialTimeout("tcp", proxy, dialTimeout)
 	if err != nil {
-		logger.Printf("failed to connect to proxy: %v", err)
-		writeHTTPError(conn, http.StatusBadGateway, "failed to connect to upstream proxy\n")
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			slog.Error("failed to connect to proxy", "error", err, "error_type", proxyErrConnectionTimeout, "client_addr", clientAddr, "upstream_addr", proxy)
+			writeHTTPError(conn, http.StatusGatewayTimeout, proxyErrConnectionTimeout, "failed to connect to upstream proxy\n")
+		} else {
+			slog.Error("failed to connect to proxy", "error", err, "error_type", proxyErrConnectionRefused, "client_addr", clientAddr, "upstream_addr", proxy)
+			writeHTTPError(conn, http.StatusBadGateway, proxyErrConnectionRefused, "failed to connect to upstream proxy\n")
+		}
 		return
 	}
 	defer func() { _ = proxyConn.Close() }()
@@ -98,24 +127,22 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 	_ = conn.SetReadDeadline(time.Time{}) // clear after read
 	if err != nil {
 		if !errors.Is(err, io.EOF) {
-			logger.Printf("failed to read request: %v", err)
-			writeHTTPError(conn, http.StatusBadRequest, "failed to read client request\n")
+			slog.Error("failed to read request", "error", err, "error_type", proxyErrHTTPRequestError, "client_addr", clientAddr)
+			writeHTTPError(conn, http.StatusBadRequest, proxyErrHTTPRequestError, "failed to read client request\n")
 		}
 		return
 	}
 	token, err := provider.GetToken()
 	if err != nil {
-		logger.Printf("failed to get SPNEGO token: %v", err)
-		writeHTTPError(conn, http.StatusBadGateway, "proxy authentication failed\n")
+		slog.Error("failed to get SPNEGO token", "error", err, "error_type", proxyErrProxyInternalError, "client_addr", clientAddr, "upstream_addr", proxy, "method", req.Method, "host", req.Host)
+		writeHTTPError(conn, http.StatusBadGateway, proxyErrProxyInternalError, "proxy authentication failed\n")
 		return
 	}
-	if debug {
-		logger.Printf("proxy request: %s %s %s (headers: %d)", req.Method, req.RequestURI, req.Proto, len(req.Header))
-	}
+	slog.Debug("proxy request", "method", req.Method, "uri", req.RequestURI, "proto", req.Proto, "headers", len(req.Header), "client_addr", clientAddr, "upstream_addr", proxy)
 	req.Header.Set("Proxy-Authorization", "Negotiate "+token)
 	if err := req.WriteProxy(proxyConn); err != nil {
-		logger.Printf("failed to write request to proxy: %v", err)
-		writeHTTPError(conn, http.StatusBadGateway, "failed to relay request to upstream proxy\n")
+		slog.Error("failed to write request to proxy", "error", err, "error_type", proxyErrConnectionTerminated, "client_addr", clientAddr, "upstream_addr", proxy, "method", req.Method, "host", req.Host)
+		writeHTTPError(conn, http.StatusBadGateway, proxyErrConnectionTerminated, "failed to relay request to upstream proxy\n")
 		return
 	}
 	if keepAlive > 0 {
@@ -130,12 +157,10 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 				_ = cw.CloseWrite()
 			}
 		}()
-		if debug {
-			logger.Printf("forward start %v -> %v", fromAddr, toAddr)
-			defer logger.Printf("forward done %v -> %v", fromAddr, toAddr)
-		}
+		slog.Debug("forward start", "from", fromAddr, "to", toAddr)
+		defer slog.Debug("forward done", "from", fromAddr, "to", toAddr)
 		if _, err := io.Copy(to, from); err != nil {
-			logger.Printf("forward error %v -> %v: %v", fromAddr, toAddr, err)
+			slog.Error("forward error", "error", err, "from", fromAddr, "to", toAddr)
 		}
 	}
 	wg.Add(2)
@@ -163,8 +188,12 @@ func main() {
 	passwordFile := flag.String("password-file", "", "password file path")
 	flag.Parse()
 
+	if *debug {
+		logLevel.Set(slog.LevelDebug)
+	}
+
 	if *addr == "" || *proxy == "" {
-		logger.Println("-addr and -proxy are required")
+		slog.Error("-addr and -proxy are required")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -181,19 +210,21 @@ func main() {
 	}
 	if err != nil {
 		// codeql[go/clear-text-logging]
-		logger.Fatal(err)
+		slog.Error("failed to create token provider", "error", err)
+		os.Exit(1)
 	}
 	provider = NewCircuitBreakerTokenProvider(provider)
 
 	l, err := net.Listen("tcp", *addr)
 	if err != nil {
-		logger.Fatal(err)
+		slog.Error("failed to listen", "error", err, "addr", *addr)
+		os.Exit(1)
 	}
 	if *maxConns > 0 {
 		l = netutil.LimitListener(l, *maxConns)
-		logger.Printf("listening on %s, proxying to %s (max connections: %d)", *addr, *proxy, *maxConns)
+		slog.Info("listening", "addr", *addr, "proxy", *proxy, "max_conns", *maxConns)
 	} else {
-		logger.Printf("listening on %s, proxying to %s", *addr, *proxy)
+		slog.Info("listening", "addr", *addr, "proxy", *proxy)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -209,28 +240,28 @@ func main() {
 					return
 				default:
 				}
-				logger.Printf("accept error: %v", err)
+				slog.Error("accept error", "error", err)
 				continue
 			}
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, *proxy, provider, *debug, *dialTimeout, *readTimeout, *keepAlive)
+				handleClient(conn, *proxy, provider, *dialTimeout, *readTimeout, *keepAlive)
 			}()
 		}
 	}()
 
 	<-ctx.Done()
-	logger.Println("shutting down, draining connections...")
+	slog.Info("shutting down, draining connections...")
 	_ = l.Close()
 
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
 	select {
 	case <-done:
-		logger.Println("all connections drained")
+		slog.Info("all connections drained")
 	case <-time.After(*drainTimeout):
-		logger.Println("drain timeout exceeded, forcing exit")
+		slog.Warn("drain timeout exceeded, forcing exit")
 	}
 	_ = provider.Close()
 }
