@@ -23,6 +23,10 @@ jobs:
         with:
           go-version-file: .go-version
 
+      - name: Ensure Rosetta 2 is available
+        if: matrix.arch == 'amd64'
+        run: arch -x86_64 /usr/bin/true
+
       - name: Build (darwin/${{ matrix.arch }})
         env:
           GOARCH: ${{ matrix.arch }}
@@ -45,8 +49,12 @@ jobs:
         run: go test -v -count=1 ./...
 
       - name: Verify binary runs
-        if: matrix.arch == 'arm64'
-        run: ./spnego-proxy-darwin-${{ matrix.arch }} -h 2>&1 || true
+        run: |
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            arch -x86_64 ./spnego-proxy-darwin-${{ matrix.arch }} -h 2>&1 || true
+          else
+            ./spnego-proxy-darwin-${{ matrix.arch }} -h 2>&1 || true
+          fi
 
       - name: Upload binary
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
