@@ -23,6 +23,12 @@ jobs:
         with:
           go-version-file: .go-version
 
+      - name: Run unit tests
+        if: matrix.arch == 'arm64'
+        env:
+          CGO_ENABLED: "1"
+        run: go test -v -count=1 ./...
+
       - name: Build (darwin/${{ matrix.arch }})
         env:
           GOARCH: ${{ matrix.arch }}
@@ -84,6 +90,11 @@ jobs:
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
         with:
           go-version-file: .go-version
+
+      - name: Run unit tests
+        env:
+          CGO_ENABLED: "0"
+        run: go test -v -count=1 ./...
 
       - name: Build (linux/amd64)
         env:
