@@ -9,11 +9,29 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"golang.org/x/net/netutil"
 )
+
+// closeWriteConn wraps a net.Conn and adds a CloseWrite method so the
+// type assertion in the forward() half-close path succeeds.
+type closeWriteConn struct {
+	net.Conn
+	closeWriteCalls atomic.Int32
+}
+
+func (c *closeWriteConn) CloseWrite() error {
+	c.closeWriteCalls.Add(1)
+	// Delegate to the underlying conn's CloseWrite if available,
+	// otherwise just return nil.
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
 
 func TestHandleClientDialTimeout(t *testing.T) {
 	// Use an unreachable address (RFC 5737 TEST-NET) to trigger a dial timeout.
@@ -663,5 +681,88 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("handleClient did not return within 5s")
+	}
+}
+
+// TestCloseWriteCalledOnForwardCompletion verifies that the half-close
+// path (CloseWrite) is exercised when forwarding completes. net.Pipe
+// does not implement CloseWrite, so this test uses a wrapper that
+// tracks invocations (issue #75).
+func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
+	// Start a fake upstream proxy that reads the request then sends
+	// a short response and closes.
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		conn, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		buf := make([]byte, 4096)
+		_, _ = conn.Read(buf)
+		resp := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+		_, _ = conn.Write([]byte(resp))
+	}()
+
+	// Set up the local proxy listener.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	provider := &stubTokenProvider{token: "tok"}
+	wrapped := &closeWriteConn{}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		wrapped.Conn = conn
+		handleClient(wrapped, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second)
+	}()
+
+	// Connect to the local proxy and send a request.
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	req, _ := http.NewRequest("GET", "http://example.com/", nil)
+	if err := req.WriteProxy(client); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(client), req)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	// Close client to unblock forwarding goroutines.
+	_ = client.Close()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return within 5s")
+	}
+
+	// The forward() function sends data proxy→client via the wrapped
+	// conn, so CloseWrite must have been called on it at least once.
+	if n := wrapped.closeWriteCalls.Load(); n == 0 {
+		t.Error("expected CloseWrite to be called on the client connection, but it was not")
 	}
 }
