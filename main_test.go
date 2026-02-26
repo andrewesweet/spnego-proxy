@@ -698,6 +698,7 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 	// then reads and records everything the proxy sends after the
 	// initial request.
 	gotExtra := make(chan string, 1)
+	gotVia := make(chan string, 1)
 	upstream, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -715,8 +716,10 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 		req, err := http.ReadRequest(reader)
 		if err != nil {
 			gotExtra <- "READ_ERR: " + err.Error()
+			gotVia <- "READ_ERR: " + err.Error()
 			return
 		}
+		gotVia <- req.Header.Get("Via")
 		_ = req.Body.Close()
 
 		// Send 200 to complete the CONNECT handshake.
@@ -785,6 +788,17 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 		t.Fatal("timed out waiting for upstream to receive extra payload")
 	}
 
+	// Verify the Via header was added to the forwarded CONNECT request.
+	wantVia := "HTTP/1.1 " + testPseudonym
+	select {
+	case got := <-gotVia:
+		if got != wantVia {
+			t.Errorf("Via header = %q, want %q", got, wantVia)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream Via header")
+	}
+
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
@@ -799,6 +813,7 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 	// Start a fake upstream proxy that reads the request then sends
 	// a short response and closes.
+	gotVia := make(chan string, 1)
 	upstream, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -810,8 +825,13 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 			return
 		}
 		defer func() { _ = conn.Close() }()
-		buf := make([]byte, 4096)
-		_, _ = conn.Read(buf)
+		req, err := http.ReadRequest(bufio.NewReader(conn))
+		if err != nil {
+			gotVia <- "READ_ERR: " + err.Error()
+		} else {
+			gotVia <- req.Header.Get("Via")
+			_ = req.Body.Close()
+		}
 		resp := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
 		_, _ = conn.Write([]byte(resp))
 	}()
@@ -861,6 +881,17 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 
 	// Close client to unblock forwarding goroutines.
 	_ = client.Close()
+
+	// Verify the Via header was added to the forwarded request.
+	wantVia := "HTTP/1.1 " + testPseudonym
+	select {
+	case got := <-gotVia:
+		if got != wantVia {
+			t.Errorf("Via header = %q, want %q", got, wantVia)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream Via header")
+	}
 
 	select {
 	case <-done:
@@ -921,6 +952,7 @@ func TestEnableKeepAlive(t *testing.T) {
 // when TCP keepalive is enabled on forwarded connections (issue #74).
 func TestHandleClientKeepAlive(t *testing.T) {
 	// Start a fake upstream proxy that echoes a valid HTTP response.
+	gotVia := make(chan string, 1)
 	upstream, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -934,8 +966,13 @@ func TestHandleClientKeepAlive(t *testing.T) {
 			}
 			go func(c net.Conn) {
 				defer func() { _ = c.Close() }()
-				buf := make([]byte, 4096)
-				_, _ = c.Read(buf)
+				req, err := http.ReadRequest(bufio.NewReader(c))
+				if err != nil {
+					gotVia <- "READ_ERR: " + err.Error()
+				} else {
+					gotVia <- req.Header.Get("Via")
+					_ = req.Body.Close()
+				}
 				resp := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
 				_, _ = c.Write([]byte(resp))
 			}(conn)
@@ -986,6 +1023,18 @@ func TestHandleClientKeepAlive(t *testing.T) {
 	}
 
 	_ = client.Close()
+
+	// Verify the Via header was added to the forwarded request.
+	wantVia := "HTTP/1.1 " + testPseudonym
+	select {
+	case got := <-gotVia:
+		if got != wantVia {
+			t.Errorf("Via header = %q, want %q", got, wantVia)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream Via header")
+	}
+
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
