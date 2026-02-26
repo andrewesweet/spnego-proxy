@@ -30,6 +30,7 @@ jobs:
       - name: Build (darwin/${{ matrix.arch }})
         env:
           GOARCH: ${{ matrix.arch }}
+          GOOS: darwin
           CGO_ENABLED: "1"
           CC: ${{ matrix.arch == 'amd64' && 'clang -arch x86_64' || 'clang -arch arm64' }}
         run: go build -v -o spnego-proxy-darwin-${{ matrix.arch }} .
