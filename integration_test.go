@@ -18,13 +18,6 @@ import (
 	"github.com/jcmturner/krb5test"
 )
 
-func skipIfNoIntegration(t *testing.T) {
-	t.Helper()
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("skipping integration test; set INTEGRATION=1 to run")
-	}
-}
-
 // writeMockKDCKrb5Conf writes a minimal krb5.conf pointing to the mock KDC's
 // ephemeral address, forcing TCP and restricting enctypes to aes256.
 func writeMockKDCKrb5Conf(t *testing.T, kdcAddr, realm string) string {
@@ -95,52 +88,10 @@ func startMockKDC(t *testing.T, user, servicePrincipal string) (*Gokrb5TokenProv
 // spnegoOID is the DER-encoded SPNEGO mechanism OID (1.3.6.1.5.5.2).
 var spnegoOID = []byte{0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02}
 
-// ---------------------------------------------------------------------------
-// Test A: Gokrb5TokenProvider.GetToken() returns a valid SPNEGO token
-// ---------------------------------------------------------------------------
-
-// TestGokrb5TokenProviderGetToken verifies that GetToken returns a valid
-// base64-encoded SPNEGO token when backed by a real mock KDC.
-func TestGokrb5TokenProviderGetToken(t *testing.T) {
-	skipIfNoIntegration(t)
-
-	provider, cleanup := startMockKDC(t, "testuser", "HTTP/proxy.test.realm.com")
-	defer cleanup()
-
-	token, err := provider.GetToken()
-	if err != nil {
-		t.Fatalf("GetToken() failed: %v", err)
-	}
-	if token == "" {
-		t.Fatal("GetToken() returned empty token")
-	}
-
-	// Verify valid base64.
-	decoded, err := base64.StdEncoding.DecodeString(token)
-	if err != nil {
-		t.Fatalf("token is not valid base64: %v", err)
-	}
-
-	// Verify SPNEGO structure: starts with ASN.1 Application[0] tag (0x60).
-	if len(decoded) == 0 || decoded[0] != 0x60 {
-		t.Errorf("expected SPNEGO token to start with 0x60 (Application[0]), got 0x%02x", decoded[0])
-	}
-
-	// Verify token contains the SPNEGO OID.
-	if !bytes.Contains(decoded, spnegoOID) {
-		t.Error("SPNEGO token does not contain the SPNEGO OID (1.3.6.1.5.5.2)")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Test B: Full proxy chain with real SPNEGO token
-// ---------------------------------------------------------------------------
-
 // TestProxyChainWithRealToken verifies the full proxy chain: mock KDC →
-// Gokrb5TokenProvider → handleClient → upstream receives a valid SPNEGO token.
+// Gokrb5TokenProvider → handleClient → upstream receives a valid SPNEGO token
+// in the Proxy-Authorization header.
 func TestProxyChainWithRealToken(t *testing.T) {
-	skipIfNoIntegration(t)
-
 	provider, cleanup := startMockKDC(t, "testuser", "HTTP/proxy.test.realm.com")
 	defer cleanup()
 
@@ -244,15 +195,9 @@ func TestProxyChainWithRealToken(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Test C: Token acquisition failure modes
-// ---------------------------------------------------------------------------
-
 // TestGokrb5TokenProviderWrongPassword verifies that GetToken returns a
 // meaningful error when the provider is configured with an incorrect password.
 func TestGokrb5TokenProviderWrongPassword(t *testing.T) {
-	skipIfNoIntegration(t)
-
 	l := log.New(os.Stderr, "KDC: ", log.LstdFlags)
 	principals := map[string][]string{
 		"testuser":                  {"testgroup"},
@@ -290,8 +235,6 @@ func TestGokrb5TokenProviderWrongPassword(t *testing.T) {
 // TestGokrb5TokenProviderWrongRealm verifies that GetToken returns a
 // meaningful error when the provider is configured with a mismatched realm.
 func TestGokrb5TokenProviderWrongRealm(t *testing.T) {
-	skipIfNoIntegration(t)
-
 	l := log.New(os.Stderr, "KDC: ", log.LstdFlags)
 	principals := map[string][]string{
 		"testuser":                  {"testgroup"},
@@ -327,16 +270,10 @@ func TestGokrb5TokenProviderWrongRealm(t *testing.T) {
 	t.Logf("got expected error: %v", err)
 }
 
-// ---------------------------------------------------------------------------
-// Test D: Circuit breaker integration with real provider
-// ---------------------------------------------------------------------------
-
 // TestCircuitBreakerWithRealProvider verifies the circuit breaker works with
 // a real Gokrb5TokenProvider: successful calls pass through, and when the KDC
 // becomes unavailable, the circuit opens after consecutive failures.
 func TestCircuitBreakerWithRealProvider(t *testing.T) {
-	skipIfNoIntegration(t)
-
 	// Phase 1: Verify successful token acquisition passes through.
 	provider, cleanup := startMockKDC(t, "testuser", "HTTP/proxy.test.realm.com")
 
