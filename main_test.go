@@ -526,3 +526,112 @@ func TestHandleClientTokenErrorCONNECTReturns502(t *testing.T) {
 		t.Fatal("handleClient did not return within 5s")
 	}
 }
+
+// TestHandleClientForwardsBufferedData verifies that data buffered by
+// bufio.NewReader beyond the initial HTTP request is forwarded to the
+// upstream proxy (issue #67). This simulates an HTTP pipelining scenario
+// where the client sends additional bytes in the same segment as the
+// request headers.
+func TestHandleClientForwardsBufferedData(t *testing.T) {
+	// extraPayload is additional data sent immediately after the HTTP
+	// request, in the same write — it will be buffered by bufio.NewReader
+	// but never consumed by http.ReadRequest.
+	const extraPayload = "EXTRA-PIPELINED-DATA"
+
+	// Start a fake upstream proxy that echoes back the CONNECT 200,
+	// then reads and records everything the proxy sends after the
+	// initial request.
+	gotExtra := make(chan string, 1)
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		conn, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		// Read the initial CONNECT request forwarded by handleClient.
+		reader := bufio.NewReader(conn)
+		req, err := http.ReadRequest(reader)
+		if err != nil {
+			gotExtra <- "READ_ERR: " + err.Error()
+			return
+		}
+		_ = req.Body.Close()
+
+		// Send 200 to complete the CONNECT handshake.
+		_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+
+		// Now read whatever comes next — this should include extraPayload
+		// that was buffered by the proxy's bufio.NewReader.
+		buf := make([]byte, 4096)
+		n, _ := reader.Read(buf)
+		gotExtra <- string(buf[:n])
+	}()
+
+	// Set up the local proxy listener.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	provider := &stubTokenProvider{token: "tok"}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		handleClient(conn, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second)
+	}()
+
+	// Connect to the local proxy and send a CONNECT request followed
+	// immediately by extra data in the same write, so it lands in the
+	// same bufio buffer as the request headers.
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	connectReq := "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n" + extraPayload
+	if _, err := io.WriteString(client, connectReq); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Read the 200 response relayed back from upstream.
+	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	// Close client side to unblock forwarding goroutines.
+	_ = client.Close()
+
+	// Verify upstream received the extra payload.
+	select {
+	case got := <-gotExtra:
+		if got != extraPayload {
+			t.Errorf("upstream received %q, want %q", got, extraPayload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream to receive extra payload")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return within 5s")
+	}
+}
