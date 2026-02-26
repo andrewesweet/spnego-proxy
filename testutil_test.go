@@ -5,6 +5,10 @@ import (
 	"time"
 )
 
+// testPseudonym is a fixed Via pseudonym used across tests for deterministic
+// assertions on the Via header value.
+const testPseudonym = "spnego-proxy-test"
+
 // stubTokenProvider is a controllable TokenProvider for testing.
 // It lives in a dedicated file so the cross-file dependency between
 // test files that use it is explicit and discoverable.

@@ -44,7 +44,7 @@ func TestHandleClientDialTimeout(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, unreachable, provider, 50*time.Millisecond, time.Second, 0)
+		handleClient(server, unreachable, provider, testPseudonym, 50*time.Millisecond, time.Second, 0)
 	}()
 
 	// The proxy should respond with 504 when the dial times out (RFC 9209 connection_timeout).
@@ -104,7 +104,7 @@ func TestHandleClientReadTimeout(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, 5*time.Second, 50*time.Millisecond, 0)
+		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 50*time.Millisecond, 0)
 	}()
 
 	// The proxy should respond with 400 when it can't read the client request.
@@ -316,7 +316,7 @@ func TestShutdownDrainsInFlightConnections(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
+				handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
 			}()
 		}
 	}()
@@ -417,7 +417,7 @@ func TestShutdownDrainTimeout(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
+				handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
 			}()
 		}
 	}()
@@ -493,7 +493,7 @@ func TestHandleClientTokenErrorReturns502(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
+		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
 	}()
 
 	// Send a request through the client side of the pipe.
@@ -564,7 +564,7 @@ func TestHandleClientCircuitBreakerErrorReturnsDistinctBody(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
+		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
 	}()
 
 	req, _ := http.NewRequest("GET", "http://example.com/", nil)
@@ -641,7 +641,7 @@ func TestHandleClientTokenErrorCONNECTReturns502(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleClient(conn, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
 	}()
 
 	client, err := net.Dial("tcp", ln.Addr().String())
@@ -744,7 +744,7 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleClient(conn, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
 	}()
 
 	// Connect to the local proxy and send a CONNECT request followed
@@ -834,7 +834,7 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 			return
 		}
 		wrapped.Conn = conn
-		handleClient(wrapped, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
+		handleClient(wrapped, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
 	}()
 
 	// Connect to the local proxy and send a request.
@@ -957,7 +957,7 @@ func TestHandleClientKeepAlive(t *testing.T) {
 			return
 		}
 		// Pass a non-zero keepalive to exercise the keepalive code path.
-		handleClient(conn, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 30*time.Second)
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 30*time.Second)
 	}()
 
 	client, err := net.Dial("tcp", ln.Addr().String())
@@ -986,6 +986,165 @@ func TestHandleClientKeepAlive(t *testing.T) {
 	}
 
 	_ = client.Close()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return within 5s")
+	}
+}
+
+// TestHandleClientAddsViaHeader verifies that handleClient adds a Via header
+// to requests forwarded to the upstream proxy (RFC 9110 §7.6.3).
+func TestHandleClientAddsViaHeader(t *testing.T) {
+	gotVia := make(chan string, 1)
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		conn, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		req, err := http.ReadRequest(bufio.NewReader(conn))
+		if err != nil {
+			gotVia <- "READ_ERR: " + err.Error()
+			return
+		}
+		_ = req.Body.Close()
+		gotVia <- req.Header.Get("Via")
+		resp := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+		_, _ = conn.Write([]byte(resp))
+	}()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	provider := &stubTokenProvider{token: "tok"}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
+	}()
+
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	req, _ := http.NewRequest("GET", "http://example.com/", nil)
+	if err := req.WriteProxy(client); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(client), req)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	_ = client.Close()
+
+	want := "HTTP/1.1 " + testPseudonym
+	select {
+	case got := <-gotVia:
+		if got != want {
+			t.Errorf("Via header = %q, want %q", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream to receive request")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return within 5s")
+	}
+}
+
+// TestHandleClientAppendsToExistingVia verifies that handleClient appends to
+// an existing Via header rather than replacing it (RFC 9110 §7.6.3).
+func TestHandleClientAppendsToExistingVia(t *testing.T) {
+	gotVia := make(chan string, 1)
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		conn, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		req, err := http.ReadRequest(bufio.NewReader(conn))
+		if err != nil {
+			gotVia <- "READ_ERR: " + err.Error()
+			return
+		}
+		_ = req.Body.Close()
+		gotVia <- req.Header.Get("Via")
+		resp := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+		_, _ = conn.Write([]byte(resp))
+	}()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	provider := &stubTokenProvider{token: "tok"}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
+	}()
+
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	// Send a request that already has a Via header from a prior proxy.
+	_, err = io.WriteString(client, "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nVia: 1.0 other-proxy\r\n\r\n")
+	if err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	_ = client.Close()
+
+	want := "1.0 other-proxy, HTTP/1.1 " + testPseudonym
+	select {
+	case got := <-gotVia:
+		if got != want {
+			t.Errorf("Via header = %q, want %q", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream to receive request")
+	}
+
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):

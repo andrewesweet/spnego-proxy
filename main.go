@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"context"
+	crand "crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -52,6 +53,18 @@ func normalizeSPN(spn string, targetSep, alternateSep byte) string {
 		return spn[:i] + string(targetSep) + spn[i+1:]
 	}
 	return spn // no recognized separator; return as-is
+}
+
+// generateViaPseudonym returns a unique pseudonym for this proxy instance,
+// used in the Via header to identify this specific process. The format is
+// "spnego-proxy-<8-hex-chars>", providing 2^32 unique identifiers — sufficient
+// for loop detection across chains of spnego-proxy instances.
+func generateViaPseudonym() string {
+	b := make([]byte, 4)
+	if _, err := crand.Read(b); err != nil {
+		return fmt.Sprintf("spnego-proxy-%08x", time.Now().UnixNano()&0xffffffff)
+	}
+	return fmt.Sprintf("spnego-proxy-%x", b)
 }
 
 // TokenProvider acquires SPNEGO tokens for proxy authentication.
@@ -160,7 +173,7 @@ func writeHTTPError(conn net.Conn, pe *proxyError) {
 	_ = resp.Write(conn)
 }
 
-func handleClient(conn net.Conn, proxy string, provider TokenProvider, dialTimeout, readTimeout, keepAlive time.Duration) {
+func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym string, dialTimeout, readTimeout, keepAlive time.Duration) {
 	defer func() { _ = conn.Close() }()
 	clientAddr := conn.RemoteAddr().String()
 	slog.Debug("new client", "client_addr", clientAddr)
@@ -202,6 +215,16 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, dialTimeo
 	}
 	slog.Debug("proxy request", "method", req.Method, "uri", req.RequestURI, "proto", req.Proto, "headers", len(req.Header), "client_addr", clientAddr, "upstream_addr", proxy)
 	req.Header.Set("Proxy-Authorization", "Negotiate "+token)
+
+	// RFC 9110 §7.6.3: intermediaries MUST add a Via entry identifying
+	// the protocol version received and the proxy instance.
+	viaEntry := req.Proto + " " + pseudonym
+	if prior := req.Header.Get("Via"); prior != "" {
+		req.Header.Set("Via", prior+", "+viaEntry)
+	} else {
+		req.Header.Set("Via", viaEntry)
+	}
+
 	if err := req.WriteProxy(proxyConn); err != nil {
 		slog.Error("failed to write request to proxy", "error", err, "error_type", errConnectionTerminated.errorType, "client_addr", clientAddr, "upstream_addr", proxy, "method", req.Method, "host", req.Host)
 		writeHTTPError(conn, errConnectionTerminated)
@@ -282,11 +305,13 @@ func main() {
 		slog.Error("failed to listen", "error", err, "addr", *addr)
 		os.Exit(1)
 	}
+	pseudonym := generateViaPseudonym()
+
 	if *maxConns > 0 {
 		l = netutil.LimitListener(l, *maxConns)
-		slog.Info("listening", "addr", *addr, "proxy", *proxy, "max_conns", *maxConns)
+		slog.Info("listening", "addr", *addr, "proxy", *proxy, "max_conns", *maxConns, "via_pseudonym", pseudonym)
 	} else {
-		slog.Info("listening", "addr", *addr, "proxy", *proxy)
+		slog.Info("listening", "addr", *addr, "proxy", *proxy, "via_pseudonym", pseudonym)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -308,7 +333,7 @@ func main() {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, *proxy, provider, *dialTimeout, *readTimeout, *keepAlive)
+				handleClient(conn, *proxy, provider, pseudonym, *dialTimeout, *readTimeout, *keepAlive)
 			}()
 		}
 	}()
