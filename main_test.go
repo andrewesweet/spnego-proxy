@@ -29,6 +29,21 @@ func TestHandleClientDialTimeout(t *testing.T) {
 		handleClient(server, unreachable, provider, false, 50*time.Millisecond, time.Second)
 	}()
 
+	// The proxy should respond with 502 when it can't reach the upstream.
+	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+	if err != nil {
+		t.Fatalf("expected HTTP error response, got read error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("expected status 502, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "failed to connect to upstream proxy") {
+		t.Errorf("expected body to mention upstream proxy connection failure, got: %q", body)
+	}
+
 	select {
 	case <-done:
 		// handleClient returned promptly — dial timed out as expected.
@@ -64,6 +79,21 @@ func TestHandleClientReadTimeout(t *testing.T) {
 		defer close(done)
 		handleClient(server, upstream.Addr().String(), provider, false, 5*time.Second, 50*time.Millisecond)
 	}()
+
+	// The proxy should respond with 400 when it can't read the client request.
+	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+	if err != nil {
+		t.Fatalf("expected HTTP error response, got read error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected status 400, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "failed to read client request") {
+		t.Errorf("expected body to mention client request read failure, got: %q", body)
+	}
 
 	select {
 	case <-done:

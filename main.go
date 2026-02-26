@@ -79,6 +79,7 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 	proxyConn, err := net.DialTimeout("tcp", proxy, dialTimeout)
 	if err != nil {
 		logger.Printf("failed to connect to proxy: %v", err)
+		writeHTTPError(conn, http.StatusBadGateway, "failed to connect to upstream proxy\n")
 		return
 	}
 	defer func() { _ = proxyConn.Close() }()
@@ -89,6 +90,7 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 	if err != nil {
 		if !errors.Is(err, io.EOF) {
 			logger.Printf("failed to read request: %v", err)
+			writeHTTPError(conn, http.StatusBadRequest, "failed to read client request\n")
 		}
 		return
 	}
