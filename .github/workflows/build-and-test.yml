@@ -8,10 +8,14 @@ on:
 
 jobs:
   build-macos:
-    runs-on: macos-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        arch: ['amd64', 'arm64']
+        include:
+          - arch: amd64
+            runner: macos-13
+          - arch: arm64
+            runner: macos-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -24,7 +28,7 @@ jobs:
         env:
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: "1"
-          CC: ${{ matrix.arch == 'amd64' && 'clang -arch x86_64' || 'clang -arch arm64' }}
+          CC: clang
         run: go build -v -o spnego-proxy-darwin-${{ matrix.arch }} .
 
       - name: Verify binary architecture
@@ -36,13 +40,11 @@ jobs:
         run: otool -L spnego-proxy-darwin-${{ matrix.arch }} | grep -i GSS
 
       - name: Run unit tests
-        if: matrix.arch == 'arm64'
         env:
           CGO_ENABLED: "1"
         run: go test -v -count=1 ./...
 
       - name: Verify binary runs
-        if: matrix.arch == 'arm64'
         run: ./spnego-proxy-darwin-${{ matrix.arch }} -h 2>&1 || true
 
       - name: Upload binary
