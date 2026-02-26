@@ -55,6 +55,15 @@ type TokenProvider interface {
 	Close() error
 }
 
+// enableKeepAlive enables TCP keepalive on conn with the given period.
+// Non-TCP connections (e.g. net.Pipe in tests) are silently skipped.
+func enableKeepAlive(conn net.Conn, period time.Duration) {
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetKeepAlive(true)
+		_ = tc.SetKeepAlivePeriod(period)
+	}
+}
+
 // writeHTTPError sends a minimal HTTP error response to the client.
 // It is best-effort; write failures are silently ignored because the
 // connection is about to be closed.
@@ -70,7 +79,7 @@ func writeHTTPError(conn net.Conn, statusCode int, reason string) {
 	_ = resp.Write(conn)
 }
 
-func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug bool, dialTimeout, readTimeout time.Duration) {
+func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug bool, dialTimeout, readTimeout, keepAlive time.Duration) {
 	defer func() { _ = conn.Close() }()
 	if debug {
 		defer logger.Printf("stop processing request for client: %v", conn.RemoteAddr())
@@ -109,6 +118,10 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 		writeHTTPError(conn, http.StatusBadGateway, "failed to relay request to upstream proxy\n")
 		return
 	}
+	if keepAlive > 0 {
+		enableKeepAlive(conn, keepAlive)
+		enableKeepAlive(proxyConn, keepAlive)
+	}
 	var wg sync.WaitGroup
 	forward := func(from io.Reader, to net.Conn, fromAddr, toAddr net.Addr) {
 		defer wg.Done()
@@ -140,6 +153,7 @@ func main() {
 	dialTimeout := flag.Duration("dial-timeout", 30*time.Second, "timeout for connecting to upstream proxy")
 	readTimeout := flag.Duration("read-timeout", 30*time.Second, "timeout for reading client HTTP request")
 	drainTimeout := flag.Duration("drain-timeout", 30*time.Second, "timeout for draining in-flight connections on shutdown")
+	keepAlive := flag.Duration("keepalive", 30*time.Second, "TCP keepalive period for idle connection detection (0 to disable)")
 	maxConns := flag.Int("max-conns", 512, "maximum number of concurrent connections (0 for unlimited)")
 
 	// Flags for gokrb5 password-based auth (optional on macOS, required on other platforms)
@@ -201,7 +215,7 @@ func main() {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, *proxy, provider, *debug, *dialTimeout, *readTimeout)
+				handleClient(conn, *proxy, provider, *debug, *dialTimeout, *readTimeout, *keepAlive)
 			}()
 		}
 	}()
