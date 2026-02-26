@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	gobreaker "github.com/sony/gobreaker/v2"
@@ -45,7 +46,7 @@ func NewCircuitBreakerTokenProvider(inner TokenProvider) *CircuitBreakerTokenPro
 			return counts.ConsecutiveFailures >= cbConsecutiveFailures
 		},
 		OnStateChange: func(name string, from gobreaker.State, to gobreaker.State) {
-			logger.Printf("circuit breaker %q: %s -> %s", name, from, to)
+			slog.Warn("circuit breaker state change", "name", name, "from", from.String(), "to", to.String())
 		},
 	})
 }

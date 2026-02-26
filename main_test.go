@@ -44,7 +44,7 @@ func TestHandleClientDialTimeout(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, unreachable, provider, false, 50*time.Millisecond, time.Second, 0)
+		handleClient(server, unreachable, provider, 50*time.Millisecond, time.Second, 0)
 	}()
 
 	// The proxy should respond with 504 when the dial times out (RFC 9209 connection_timeout).
@@ -98,7 +98,7 @@ func TestHandleClientReadTimeout(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, false, 5*time.Second, 50*time.Millisecond, 0)
+		handleClient(server, upstream.Addr().String(), provider, 5*time.Second, 50*time.Millisecond, 0)
 	}()
 
 	// The proxy should respond with 400 when it can't read the client request.
@@ -304,7 +304,7 @@ func TestShutdownDrainsInFlightConnections(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second, 0)
+				handleClient(conn, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
 			}()
 		}
 	}()
@@ -405,7 +405,7 @@ func TestShutdownDrainTimeout(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second, 0)
+				handleClient(conn, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
 			}()
 		}
 	}()
@@ -481,7 +481,7 @@ func TestHandleClientTokenErrorReturns502(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second, 0)
+		handleClient(server, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
 	}()
 
 	// Send a request through the client side of the pipe.
@@ -552,7 +552,7 @@ func TestHandleClientTokenErrorCONNECTReturns502(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleClient(conn, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second, 0)
+		handleClient(conn, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
 	}()
 
 	client, err := net.Dial("tcp", ln.Addr().String())
@@ -648,7 +648,7 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleClient(conn, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second, 0)
+		handleClient(conn, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
 	}()
 
 	// Connect to the local proxy and send a CONNECT request followed
@@ -738,7 +738,7 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 			return
 		}
 		wrapped.Conn = conn
-		handleClient(wrapped, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second, 0)
+		handleClient(wrapped, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
 	}()
 
 	// Connect to the local proxy and send a request.
@@ -861,7 +861,7 @@ func TestHandleClientKeepAlive(t *testing.T) {
 			return
 		}
 		// Pass a non-zero keepalive to exercise the keepalive code path.
-		handleClient(conn, upstream.Addr().String(), provider, false, 5*time.Second, 5*time.Second, 30*time.Second)
+		handleClient(conn, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 30*time.Second)
 	}()
 
 	client, err := net.Dial("tcp", ln.Addr().String())
