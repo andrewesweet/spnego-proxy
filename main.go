@@ -285,9 +285,12 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 		upstreamReader := bufio.NewReader(proxyConn)
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
-			// Fallback: relay raw bytes if response parsing fails.
-			// This preserves current behavior — the worst case is Via
-			// is missing from the response.
+			// Deviation from RFC 9110 §7.6.3 (MUST add Via): when the
+			// upstream response is unparseable, injecting a Via header is
+			// impossible. We relay raw bytes instead of returning an error
+			// so the client still receives whatever the upstream sent.
+			// The warning log ensures operator visibility. See README.md
+			// for the full rationale.
 			slog.Warn("failed to parse upstream response, falling back to raw relay",
 				"error", err, "client_addr", conn.RemoteAddr())
 			if _, err := io.Copy(conn, upstreamReader); err != nil {

@@ -111,6 +111,51 @@ password-based path instead of the native GSS-API:
     -password-file /path/to/password
 ```
 
+## Standards compliance
+
+`spnego-proxy` implements RFC 9110 (HTTP Semantics) and RFC 9209
+(Proxy-Status) throughout its request and response handling:
+
+- **Via header (RFC 9110 §7.6.3):** The proxy appends a `Via` entry to
+  both forwarded requests and responses, using a randomly generated
+  pseudonym to identify each proxy instance. Incoming requests whose
+  `Via` header already contains the proxy's own pseudonym are rejected
+  with `502 proxy_loop_detected` to prevent routing loops.
+
+- **Proxy-Status header (RFC 9209):** All error responses include a
+  structured `Proxy-Status` header (e.g.,
+  `spnego-proxy; error=connection_timeout`) for machine-readable
+  diagnostics.
+
+### Known deviation: response Via fallback
+
+RFC 9110 §7.6.3 states that a proxy **MUST** add a `Via` header to each
+message it forwards. `spnego-proxy` complies with this requirement for
+all parseable HTTP responses. However, if the upstream proxy sends a
+response that cannot be parsed as valid HTTP (e.g., a severely malformed
+status line or truncated headers), injecting a `Via` header is
+impossible because there are no structured headers to modify.
+
+In this edge case the proxy falls back to raw byte relay — forwarding
+the unparseable data to the client without a `Via` header. This
+trade-off was chosen deliberately:
+
+1. **Client impact:** Returning a `502` error would discard whatever
+   data the upstream sent. Raw relay preserves the original bytes, which
+   may still be useful to the client or to downstream debugging tools.
+2. **Impossibility of injection:** Without parseable headers there is no
+   safe byte offset at which to insert a header line. Attempting to
+   splice bytes could corrupt the stream.
+3. **Operator visibility:** The proxy emits a `slog.Warn`-level log
+   entry whenever the fallback triggers, including the parse error and
+   client address, so the condition is always visible in operational
+   monitoring.
+
+In practice, this fallback should rarely (if ever) fire because
+conforming HTTP proxies always send well-formed responses. If it does
+fire, the log entry provides the information needed to investigate the
+upstream proxy.
+
 ## Architecture
 
 The project uses Go build tags to separate platform-specific authentication:
