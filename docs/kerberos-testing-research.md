@@ -3,6 +3,7 @@
 ## Context
 
 Testing spnego-proxy currently requires:
+
 - Linux x64, macOS Intel x64, and macOS aarch64 hosts
 - That sit behind a proxy requiring Kerberos authentication
 - Have valid Kerberos tickets or username/password credentials
@@ -16,7 +17,7 @@ development and (2) CI, without requiring corporate-style Kerberos DC setups.
 The existing test suite (~1,395 lines across 5 files) covers:
 
 | Area | What's Tested | What's NOT Tested |
-|------|---------------|-------------------|
+| ------ | --------------- | ------------------- |
 | Proxy mechanics | Dial timeout, read timeout, token injection, bidirectional forwarding, half-close, keepalive, connection limiting, graceful shutdown | Full end-to-end proxy chain with real Kerberos auth |
 | gokrb5 path | Password file handling (perms, size, CRLF), provider construction, SPN inference/normalization, error handling | Actual TGT acquisition, SPNEGO token generation against a real KDC |
 | macOS GSS-API | SPN derivation, SPN normalization, graceful error without credentials | Actual token acquisition via Heimdal GSS-API |
@@ -30,7 +31,7 @@ upstream proxy. This is where all manual testing effort is concentrated.
 
 ## Option 1: Pure Go Mock KDC (`jcmturner/krb5test`)
 
-### How it works
+### Overview
 
 [jcmturner/krb5test](https://github.com/jcmturner/krb5test) is a pure Go mock
 KDC written by the same author as gokrb5 (the library this project uses). It
@@ -40,6 +41,7 @@ implements:
 - **TGS Exchange**: Grants service tickets
 
 Usage:
+
 ```go
 principals := map[string][]string{
     "testuser1": {"testgroup1"},
@@ -89,13 +91,13 @@ gap (gokrb5 token acquisition) with zero infrastructure overhead.
 
 ## Option 2: Docker-Based MIT KDC for Integration Tests
 
-### How it works
+### Docker KDC images
 
 Run a real MIT Kerberos KDC inside a Docker container. Several mature options
 exist:
 
 | Image | Description | Notes |
-|-------|-------------|-------|
+| ------- | ------------- | ------- |
 | [godatadriven/krb5-kdc-server](https://hub.docker.com/r/godatadriven/krb5-kdc-server) | Purpose-built test KDC | Simple, widely used |
 | [gcavalcante8808/krb5-server](https://hub.docker.com/r/gcavalcante8808/krb5-server) | Alpine-based MIT krb5 | Env var config (`KRB5_REALM`, `KRB5_KDC`, `KRB5_PASS`), amd64+arm64 |
 | [NORDUnet/krb5-docker](https://github.com/NORDUnet/krb5-docker) | **MIT and Heimdal** | Separate Dockerfiles; principals via `PRINCIPALS` env var (`name:password` pairs) |
@@ -136,7 +138,7 @@ services:
         -password-file /run/secrets/password
 ```
 
-### What it enables
+### What Docker testing enables
 
 - **Real Kerberos protocol testing**: TGT acquisition, service ticket
   requests, and SPNEGO token generation against a genuine MIT KDC.
@@ -156,7 +158,7 @@ during database initialization. The standard workaround is mapping
 docker run -v /dev/urandom:/dev/random ...
 ```
 
-### Limitations
+### Docker testing limitations
 
 - **Hostname sensitivity**: Kerberos is very sensitive to hostnames and DNS.
   All containers must be on a shared Docker network with correct DNS
@@ -192,7 +194,7 @@ Actions as a separate integration test job alongside the existing unit tests.
 
 ## Option 3: Ephemeral MIT KDC Process (k5test-style)
 
-### How it works
+### Ephemeral KDC approach
 
 Instead of Docker, spawn a real `krb5kdc` process directly on the test host,
 following the pattern established by MIT krb5's own test framework
@@ -209,7 +211,7 @@ the Python [k5test](https://github.com/pythongssapi/k5test) library:
 8. Run tests
 9. Kill `krb5kdc` and clean up temp directory
 
-### What it enables
+### What an ephemeral KDC enables
 
 - **Real KDC, no Docker**: Useful if Docker is unavailable or undesirable.
 - **macOS testing potential**: On macOS, if MIT krb5 is installed via Homebrew
@@ -220,7 +222,7 @@ the Python [k5test](https://github.com/pythongssapi/k5test) library:
   realm configuration. (This needs verification.)
 - **Fast startup**: No container overhead.
 
-### Limitations
+### Ephemeral KDC limitations
 
 - **Requires MIT krb5 packages installed**: `krb5-kdc`, `krb5-admin-server`
   on Ubuntu, or `krb5` via Homebrew on macOS.
@@ -295,7 +297,7 @@ calls themselves. The unit tests already cover the surrounding logic.
 
 ### Architecture
 
-```
+```text
 ┌──────────┐     ┌──────────────┐     ┌─────────────────┐     ┌─────────┐
 │  Client   │────▶│ spnego-proxy │────▶│ Upstream Proxy   │────▶│ Backend │
 │  (curl)   │     │ (under test) │     │ (SPNEGO-authed) │     │ (httpbin)│
@@ -349,14 +351,14 @@ networks:
         - subnet: 10.5.0.0/24
 ```
 
-### What it enables
+### What full E2E enables
 
 - **True end-to-end validation**: The generated SPNEGO token is validated by
   a real service, not just a mock.
 - **Catches interoperability bugs**: Protocol-level issues between gokrb5's
   SPNEGO implementation and standard Kerberos services.
 
-### Limitations
+### Full E2E limitations
 
 - **Linux/gokrb5 path only**: Same Docker limitation as Option 2.
 - **Complex setup**: Need to build and maintain the upstream proxy container
@@ -373,7 +375,7 @@ networks:
 ## Comparison Matrix
 
 | Criterion | Option 1: Mock KDC | Option 2: Docker KDC | Option 3: Ephemeral KDC | Option 4: macOS GSS | Option 5: Full E2E |
-|-----------|--------------------|-----------------------|-------------------------|---------------------|---------------------|
+| ----------- | -------------------- | ----------------------- | ------------------------- | --------------------- | --------------------- |
 | **Effort** | Low | Medium | Medium-High | High | High |
 | **Tests gokrb5 token gen** | Yes (mock) | Yes (real) | Yes (real) | No | Yes (real) |
 | **Tests macOS GSS-API** | No | No | Maybe | Yes | No |
