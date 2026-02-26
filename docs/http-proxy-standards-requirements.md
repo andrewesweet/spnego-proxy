@@ -178,18 +178,72 @@ Defined error types relevant to spnego-proxy:
 - **White-box integration test**: Send a request with a custom header `X-Exotic-Widget: foo`. Assert it arrives at the upstream unchanged.
 - **Traceability**: RFC 9110 §5.1.
 
-#### C3. Host Header Reconciliation
+#### C3. Host Header Regeneration from Request-Target
 
-> "If the target URI's authority component is not the same as the host field value, a proxy MUST update the host field value before forwarding."
+> "When a proxy receives a request with an absolute-form of request-target, the proxy MUST ignore the received Host header field (if any) and instead replace it with the host information of the request-target."
 >
-> — RFC 9110, §7.2
+> — RFC 9112, §3.2.2
 
 **Level**: MUST
-**Details**: When a proxy receives a request where the Request-URI authority and the Host header disagree, the proxy must reconcile them — typically by updating Host to match the URI.
+**Details**: When a client sends a request to a forward proxy, it uses absolute-form (e.g., `GET http://example.com/path HTTP/1.1`). The proxy MUST regenerate the Host header from the request-target URI, ignoring any Host header the client sent. This is stronger than mere "reconciliation" — the request-target is authoritative.
 
 **Testing strategy**:
 - **White-box integration test**: Send `GET http://example.com/path HTTP/1.1` with `Host: other.com`. Assert the upstream receives `Host: example.com`.
-- **Traceability**: RFC 9110 §7.2 ¶5.
+- **Test with matching Host**: Send with `Host: example.com`. Assert Host is still correctly set.
+- **Traceability**: RFC 9112 §3.2.2.
+
+#### C4. Preserve Request-Target Path and Query
+
+> "A proxy MUST NOT modify the 'absolute-path' and 'query' parts of the received request-target when forwarding it to the next inbound server, except to replace an empty path with '/' or '*'."
+>
+> — RFC 9112, §3.2.2
+
+**Level**: MUST NOT
+**Details**: The proxy must forward the path and query string exactly as received. Only an empty path may be replaced with `/`.
+
+**Testing strategy**:
+- **White-box integration test**: Send `GET http://example.com/path?q=1&r=2%20 HTTP/1.1`. Assert the upstream receives the path and query unmodified.
+- **Test empty path**: Send `GET http://example.com HTTP/1.1`. Assert the upstream receives `/` as the path.
+- **Traceability**: RFC 9112 §3.2.2.
+
+#### C5. Do Not Forward Authorization Header (Pass-Through)
+
+> "A proxy forwarding a request MUST NOT modify any Authorization header fields in that request."
+>
+> — RFC 9110, §11.7.2
+
+**Level**: MUST NOT modify
+**Details**: The `Authorization` header is end-to-end (unlike `Proxy-Authorization`). The proxy must pass it through unaltered to the origin server.
+
+**Testing strategy**:
+- **White-box integration test**: Send a request with `Authorization: Bearer token123`. Assert the upstream receives it unchanged.
+- **Traceability**: RFC 9110 §11.7.2.
+
+#### C6. Remove Whitespace Between Header Name and Colon
+
+> "A proxy MUST remove any whitespace between a header field name and colon in a response message before forwarding the message downstream."
+>
+> — RFC 9112, §5.2
+
+**Level**: MUST
+**Details**: If the upstream sends a response with `Header : value` (space before colon), the proxy must normalize it to `Header: value` before forwarding to the client.
+
+**Testing strategy**:
+- **White-box integration test**: Mock upstream sends a response with `Content-Type : text/plain` (space before colon). Assert the client receives `Content-Type: text/plain` (no space).
+- **Traceability**: RFC 9112 §5.2.
+
+#### C7. No-Transform Content Integrity
+
+> "A proxy MUST NOT transform the content of a message that contains a no-transform cache directive."
+>
+> — RFC 9110, §7.7
+
+**Level**: MUST NOT
+**Details**: When `Cache-Control: no-transform` is present, the proxy must not modify the message body in any way (compression, encoding changes, etc.). Since spnego-proxy is transparent by design, this is likely already satisfied, but should be tested.
+
+**Testing strategy**:
+- **White-box integration test**: Send a request with `Cache-Control: no-transform`. Assert the response body arrives at the client byte-for-byte identical to what the upstream sent.
+- **Traceability**: RFC 9110 §7.7.
 
 ---
 
@@ -249,6 +303,46 @@ Defined error types relevant to spnego-proxy:
 - **White-box integration test**: Attempt CONNECT to a disallowed port (e.g., 25/SMTP). Assert the proxy returns 403 Forbidden.
 - **Test allowed ports**: CONNECT to 443. Assert tunnel is established.
 - **Traceability**: RFC 9110 §9.3.6 ¶10.
+
+#### D5. CONNECT — Close Connection on Rejection
+
+> "Proxy servers MUST close the underlying connection when rejecting a CONNECT request, without processing any further requests on that connection."
+>
+> — RFC 9112, §11.2
+
+**Level**: MUST
+**Details**: When the proxy rejects a CONNECT request (e.g., forbidden port, auth failure), it must close the TCP connection after sending the error response. It must not attempt to read further requests on the same connection.
+
+**Testing strategy**:
+- **White-box integration test**: Send a CONNECT request that the proxy rejects (e.g., bad port). Assert the connection is closed after the error response. Attempt to send another request on the same connection; assert it fails.
+- **Traceability**: RFC 9112 §11.2.
+
+#### D6. CONNECT — Wait for 2xx Before Forwarding Payload
+
+> "Proxy clients that send CONNECT requests on behalf of untrusted TCP clients MUST wait for a 2xx (Successful) response before forwarding any TCP payload data."
+>
+> — RFC 9112, §11.2
+
+**Level**: MUST
+**Details**: When spnego-proxy sends a CONNECT request to the upstream proxy, it must not forward any client data until it has received a 2xx response from the upstream. Premature forwarding can lead to request smuggling.
+
+**Testing strategy**:
+- **White-box integration test**: Client sends CONNECT followed immediately by payload data. Assert that spnego-proxy holds the payload and only forwards it after receiving 200 from upstream.
+- **Traceability**: RFC 9112 §11.2.
+
+#### D7. CONNECT — No 2xx Without Established Connection
+
+> "A proxy MUST NOT respond with any 2xx (Successful) status code unless it has either a direct or tunnel connection established to the authority."
+>
+> — RFC 9110, §9.3.6
+
+**Level**: MUST NOT
+**Details**: The proxy must not send 200 to the client until the upstream TCP connection (or upstream tunnel) is actually established.
+
+**Testing strategy**:
+- **White-box integration test**: Mock upstream that delays TCP connection acceptance. Assert the client does not receive 200 until the upstream connection is established.
+- **Test upstream refusal**: Mock upstream that refuses connection. Assert the client receives an error (not 200).
+- **Traceability**: RFC 9110 §9.3.6 + RFC 2817 §5.2.
 
 ---
 
@@ -404,9 +498,40 @@ Syntax constraints:
 
 ---
 
-### Group I: Protocol Version and Upgrade
+### Group I: Connection Management
 
-#### I1. Advertise HTTP/1.1
+#### I1. No Persistent Connection with HTTP/1.0 Clients
+
+> "A proxy server MUST NOT maintain a persistent connection with an HTTP/1.0 client."
+>
+> — RFC 9112, §9.3
+
+**Level**: MUST NOT
+**Details**: If a client identifies as HTTP/1.0, the proxy must close the connection after the response. HTTP/1.0 does not support persistent connections by default (the `Connection: keep-alive` extension is non-standard and unreliable through proxies).
+
+**Testing strategy**:
+- **White-box integration test**: Send an HTTP/1.0 request. Assert the proxy closes the connection after the response.
+- **Test HTTP/1.0 with Connection: keep-alive**: Assert the proxy still closes the connection (keep-alive is not reliable for HTTP/1.0 through proxies).
+- **Traceability**: RFC 9112 §9.3.
+
+#### I2. Honor Connection: close
+
+> "A server that receives a 'close' connection option MUST initiate closure of the connection after it sends the final response to the request that contained the 'close'. The server MUST NOT process any further requests on that connection."
+>
+> — RFC 9112, §9.6
+
+**Level**: MUST
+**Details**: When a client sends `Connection: close`, the proxy must close the connection after sending the response.
+
+**Testing strategy**:
+- **White-box integration test**: Client sends a request with `Connection: close`. Assert the proxy closes the connection after the response.
+- **Traceability**: RFC 9112 §9.6.
+
+---
+
+### Group J: Protocol Version and Upgrade
+
+#### J1. Advertise HTTP/1.1
 
 > "An HTTP intermediary that advertises conformance to HTTP/1.1 MUST advertise HTTP/1.1 in the responses it generates."
 >
@@ -419,7 +544,7 @@ Syntax constraints:
 - **White-box integration test**: Send an HTTP/1.0 request. Assert the proxy's own error responses (e.g., 502) use `HTTP/1.1` in the status line.
 - **Traceability**: RFC 9112 §2.1.
 
-#### I2. Upgrade Header Handling
+#### J2. Upgrade Header Handling
 
 > "A proxy or gateway MUST NOT forward the Upgrade header field to the next inbound server unless the proxy or gateway supports the protocol indicated by the Upgrade header field."
 >
@@ -434,9 +559,9 @@ Syntax constraints:
 
 ---
 
-### Group J: Security and Access Control
+### Group K: Security and Access Control
 
-#### J1. Request Smuggling Prevention
+#### K1. Request Smuggling Prevention
 
 > See Group E (E1, E2) for Transfer-Encoding/Content-Length handling.
 >
@@ -445,13 +570,13 @@ Syntax constraints:
 **Level**: MUST
 **Details**: Covered by E1 and E2. This is cross-referenced here for completeness. The proxy must rigorously handle message framing to prevent request smuggling.
 
-#### J2. CONNECT Port Restriction
+#### K2. CONNECT Port Restriction
 
 > See D4 above.
 >
 > — RFC 9110, §9.3.6
 
-#### J3. Proxy-Connection Stripping
+#### K3. Proxy-Connection Stripping
 
 **Level**: MUST (de facto requirement; never forward non-standard hop-by-hop headers)
 **Details**: The non-standard `Proxy-Connection` header was introduced by Netscape and is sometimes sent by older clients. It must not be forwarded as it can confuse upstream servers and other intermediaries.
@@ -464,9 +589,9 @@ Per RFC 9113, §8.2.2: "intermediaries SHOULD also remove other connection-speci
 
 ---
 
-### Group K: Error Response Generation
+### Group L: Error Response Generation
 
-#### K1. 502 Bad Gateway for Upstream Failures
+#### L1. 502 Bad Gateway for Upstream Failures
 
 > "If the response received by a proxy is invalid or cannot be forwarded, the proxy MUST close the connection to the server, discard the received response, and send a 502 (Bad Gateway) response to the client."
 >
@@ -480,7 +605,7 @@ Per RFC 9113, §8.2.2: "intermediaries SHOULD also remove other connection-speci
 - **Test with malformed response**: Mock upstream sends invalid HTTP. Assert 502.
 - **Traceability**: RFC 9112 §6.1.
 
-#### K2. 504 Gateway Timeout for Upstream Timeouts
+#### L2. 504 Gateway Timeout for Upstream Timeouts
 
 **Level**: SHOULD (implied by HTTP status code semantics)
 **Details**: When the upstream connection times out, the proxy should return 504 rather than a generic error. RFC 9110, §15.6.5 defines 504.
@@ -491,9 +616,9 @@ Per RFC 9113, §8.2.2: "intermediaries SHOULD also remove other connection-speci
 
 ---
 
-### Group L: HTTP/2 and HTTP/3 Considerations
+### Group M: HTTP/2 and HTTP/3 Considerations
 
-#### L1. HTTP/2 Connection-Specific Header Removal
+#### M1. HTTP/2 Connection-Specific Header Removal
 
 > "An intermediary transforming an HTTP/1.x message to HTTP/2 MUST remove connection-specific header fields as discussed in Section 7.6.1 of [HTTP], or their messages will be treated by other HTTP/3 endpoints as malformed."
 >
@@ -502,7 +627,7 @@ Per RFC 9113, §8.2.2: "intermediaries SHOULD also remove other connection-speci
 **Level**: MUST (when doing HTTP/1.x to HTTP/2 translation)
 **Details**: Not currently applicable since spnego-proxy operates at TCP level with HTTP/1.x only. Becomes relevant if HTTP/2 support is added.
 
-#### L2. HTTP/2 CONNECT Pseudo-Header Requirements
+#### M2. HTTP/2 CONNECT Pseudo-Header Requirements
 
 > "In HTTP/2, the CONNECT method: the :method pseudo-header field is set to CONNECT; the :scheme and :path pseudo-header fields MUST be omitted; the :authority pseudo-header field contains the host and port to connect to."
 >
@@ -511,16 +636,16 @@ Per RFC 9113, §8.2.2: "intermediaries SHOULD also remove other connection-speci
 **Level**: MUST (when implementing HTTP/2)
 **Details**: Not currently applicable. Relevant if HTTP/2 client-facing or upstream support is added.
 
-#### L3. HTTP/3 Support
+#### M3. HTTP/3 Support
 
 **Level**: N/A currently
 **Details**: HTTP/3 uses QUIC (UDP) transport. spnego-proxy uses TCP. HTTP/3 support would require a fundamentally different transport layer. This is included for completeness.
 
 ---
 
-### Group M: Early Data (0-RTT)
+### Group N: Early Data (0-RTT)
 
-#### M1. Early-Data Header for Intermediaries
+#### N1. Early-Data Header for Intermediaries
 
 > "An intermediary that forwards a request prior to the completion of the TLS handshake with its client MUST send it with the Early-Data header field set to '1'."
 >
@@ -529,7 +654,7 @@ Per RFC 9113, §8.2.2: "intermediaries SHOULD also remove other connection-speci
 **Level**: MUST (when forwarding early data)
 **Details**: If spnego-proxy accepts TLS connections and forwards requests received during 0-RTT, it must add `Early-Data: 1`. Not currently applicable (spnego-proxy listens on plain TCP).
 
-#### M2. Must Not Remove Early-Data Header
+#### N2. Must Not Remove Early-Data Header
 
 > "An intermediary MUST NOT remove this header field if it is present in a request."
 >
@@ -557,23 +682,32 @@ Per RFC 9113, §8.2.2: "intermediaries SHOULD also remove other connection-speci
 | B3 | Proxy-Authenticate — don't forward upstream's challenges | MUST NOT forward |
 | C1 | Preserve header field order | MUST NOT reorder |
 | C2 | Forward unrecognized headers | MUST |
-| C3 | Host header reconciliation | MUST |
+| C3 | Host header regeneration from request-target | MUST |
+| C4 | Preserve request-target path and query | MUST NOT modify |
+| C5 | Pass through Authorization header unmodified | MUST NOT modify |
+| C6 | Remove whitespace between header name and colon | MUST |
+| C7 | No-transform content integrity | MUST NOT transform |
 | D1 | CONNECT tunnel establishment | Already implemented |
 | D2 | CONNECT tunnel closure / data draining | Partially implemented |
 | D3 | No Transfer-Encoding in CONNECT 2xx | MUST NOT |
 | D4 | CONNECT port restriction | SHOULD |
+| D5 | Close connection on CONNECT rejection | MUST |
+| D6 | Wait for 2xx before forwarding CONNECT payload | MUST |
+| D7 | No 2xx without established upstream connection | MUST NOT |
 | E1 | TE/CL conflict resolution | MUST |
 | E2 | Invalid Content-Length → 502 | MUST |
 | E3 | obs-fold handling | MUST |
 | F1 | Forward Expect: 100-continue | MUST |
 | F2 | Don't forward 100 to HTTP/1.0 clients | MUST NOT |
 | G1 | Max-Forwards for TRACE/OPTIONS | MUST |
-| I1 | Advertise HTTP/1.1 | MUST |
-| I2 | Strip Upgrade unless supported | MUST NOT forward |
-| J3 | Strip Proxy-Connection | SHOULD |
-| K1 | 502 for upstream failures | MUST |
-| K2 | 504 for upstream timeouts | SHOULD |
-| M2 | Preserve Early-Data header | MUST NOT remove |
+| I1 | No persistent connection with HTTP/1.0 clients | MUST NOT |
+| I2 | Honor Connection: close | MUST |
+| J1 | Advertise HTTP/1.1 | MUST |
+| J2 | Strip Upgrade unless supported | MUST NOT forward |
+| K3 | Strip Proxy-Connection | SHOULD |
+| L1 | 502 for upstream failures | MUST |
+| L2 | 504 for upstream timeouts | SHOULD |
+| N2 | Preserve Early-Data header | MUST NOT remove |
 
 ### Tier 2: Valuable Additions (optional but high value)
 
@@ -589,10 +723,10 @@ Per RFC 9113, §8.2.2: "intermediaries SHOULD also remove other connection-speci
 
 | ID | Requirement | Level |
 |----|-------------|-------|
-| L1 | HTTP/2 connection-specific header removal | MUST (when HTTP/2) |
-| L2 | HTTP/2 CONNECT pseudo-headers | MUST (when HTTP/2) |
-| L3 | HTTP/3 support | N/A |
-| M1 | Early-Data header injection | MUST (when TLS) |
+| M1 | HTTP/2 connection-specific header removal | MUST (when HTTP/2) |
+| M2 | HTTP/2 CONNECT pseudo-headers | MUST (when HTTP/2) |
+| M3 | HTTP/3 support | N/A |
+| N1 | Early-Data header injection | MUST (when TLS) |
 
 ---
 
@@ -616,8 +750,8 @@ This harness will be reused by all subsequent requirement implementations and it
 |----------|-----|-------------|-----------|
 | 1 | B1 | Connection header / hop-by-hop removal | **Security**: prevents request smuggling, hop-by-hop header leakage; most fundamental proxy requirement |
 | 2 | B2 | Consume client Proxy-Authorization | **Security**: prevents credential leakage to upstream |
-| 3 | J3 | Strip Proxy-Connection | **Security**: prevents confusion with non-standard hop-by-hop header |
-| 4 | I2 | Strip Upgrade unless supported | **Security**: prevents protocol confusion |
+| 3 | K3 | Strip Proxy-Connection | **Security**: prevents confusion with non-standard hop-by-hop header |
+| 4 | J2 | Strip Upgrade unless supported | **Security**: prevents protocol confusion |
 | 5 | E1 | TE/CL conflict → remove CL | **Security**: prevents request smuggling |
 | 6 | E2 | Invalid CL → 502 | **Security**: prevents message framing attacks |
 
@@ -627,10 +761,10 @@ This harness will be reused by all subsequent requirement implementations and it
 |----------|-----|-------------|-----------|
 | 7 | A1 | Via header | **Compliance**: MUST-level RFC 9110 requirement; enables loop detection |
 | 8 | A2 | Via loop detection | **Reliability**: prevents infinite proxy loops |
-| 9 | K1 | 502 for upstream failures | **Compliance**: proper error status codes |
-| 10 | K2 | 504 for timeouts | **Compliance**: distinguishes timeout from failure |
+| 9 | L1 | 502 for upstream failures | **Compliance**: proper error status codes |
+| 10 | L2 | 504 for timeouts | **Compliance**: distinguishes timeout from failure |
 | 11 | D3 | No TE in CONNECT 2xx | **Compliance**: MUST NOT violation is easy to fix |
-| 12 | I1 | Advertise HTTP/1.1 | **Compliance**: version advertisement |
+| 12 | J1 | Advertise HTTP/1.1 | **Compliance**: version advertisement |
 
 ### Phase 4: Correctness — Request Forwarding Fidelity
 
@@ -638,44 +772,58 @@ This harness will be reused by all subsequent requirement implementations and it
 |----------|-----|-------------|-----------|
 | 13 | C1 | Preserve header order | **Correctness**: MUST NOT reorder |
 | 14 | C2 | Forward unrecognized headers | **Correctness**: MUST forward (likely already works, needs test) |
-| 15 | C3 | Host header reconciliation | **Correctness**: MUST fix disagreements |
-| 16 | B3 | Don't forward Proxy-Authenticate | **Correctness**: consume upstream auth challenges |
-| 17 | E3 | obs-fold handling | **Correctness**: MUST handle legacy headers |
+| 15 | C3 | Host header regeneration from request-target | **Correctness**: MUST regenerate from URI |
+| 16 | C4 | Preserve request-target path and query | **Correctness**: MUST NOT modify |
+| 17 | C5 | Pass through Authorization header | **Correctness**: MUST NOT modify end-to-end auth |
+| 18 | C6 | Remove whitespace before colon in responses | **Correctness**: MUST normalize |
+| 19 | C7 | No-transform content integrity | **Correctness**: MUST NOT transform with no-transform |
+| 20 | B3 | Don't forward Proxy-Authenticate | **Correctness**: consume upstream auth challenges |
+| 21 | E3 | obs-fold handling | **Correctness**: MUST handle legacy headers |
 
-### Phase 5: Correctness — Protocol Edge Cases
-
-| Priority | ID | Requirement | Rationale |
-|----------|-----|-------------|-----------|
-| 18 | F1 | Forward Expect: 100-continue | **Correctness**: prevents client hangs |
-| 19 | F2 | Suppress 100 for HTTP/1.0 | **Correctness**: version-dependent behavior |
-| 20 | G1 | Max-Forwards for TRACE/OPTIONS | **Correctness**: MUST decrement |
-| 21 | D2 | CONNECT data draining on close | **Correctness**: partially implemented, needs hardening |
-| 22 | D4 | CONNECT port restriction | **Security**: SHOULD restrict |
-| 23 | M2 | Preserve Early-Data header | **Correctness**: MUST NOT remove |
-
-### Phase 6: Observability — Proxy-Status
+### Phase 5: Correctness — CONNECT Hardening
 
 | Priority | ID | Requirement | Rationale |
 |----------|-----|-------------|-----------|
-| 24 | A3 | Proxy-Status header | **Observability**: structured error reporting aids debugging |
+| 22 | D5 | Close connection on CONNECT rejection | **Security**: MUST close to prevent smuggling |
+| 23 | D6 | Wait for 2xx before forwarding CONNECT payload | **Security**: MUST prevent premature forwarding |
+| 24 | D7 | No 2xx without established upstream connection | **Correctness**: MUST NOT send premature 200 |
+| 25 | D2 | CONNECT data draining on close | **Correctness**: partially implemented, needs hardening |
+| 26 | D4 | CONNECT port restriction | **Security**: SHOULD restrict |
 
-### Phase 7: Client Identity Forwarding
-
-| Priority | ID | Requirement | Rationale |
-|----------|-----|-------------|-----------|
-| 25 | H1 | Forwarded header (RFC 7239) | **Observability**: standardized client identity |
-| 26 | H2 | X-Forwarded-For | **Compatibility**: widely expected de facto header |
-| 27 | H3 | X-Forwarded-Proto | **Compatibility**: scheme preservation |
-| 28 | H4 | X-Forwarded-Host | **Compatibility**: host preservation |
-
-### Phase 8: Future — HTTP/2 and HTTP/3
+### Phase 6: Correctness — Protocol Edge Cases
 
 | Priority | ID | Requirement | Rationale |
 |----------|-----|-------------|-----------|
-| 29 | L1 | HTTP/2 header cleanup | **Future**: when HTTP/2 support is added |
-| 30 | L2 | HTTP/2 CONNECT | **Future**: when HTTP/2 support is added |
-| 31 | L3 | HTTP/3 support | **Future**: requires QUIC transport |
-| 32 | M1 | Early-Data injection | **Future**: when TLS listener is added |
+| 27 | F1 | Forward Expect: 100-continue | **Correctness**: prevents client hangs |
+| 28 | F2 | Suppress 100 for HTTP/1.0 | **Correctness**: version-dependent behavior |
+| 29 | G1 | Max-Forwards for TRACE/OPTIONS | **Correctness**: MUST decrement |
+| 30 | I1 | No persistent connection with HTTP/1.0 | **Correctness**: MUST NOT maintain |
+| 31 | I2 | Honor Connection: close | **Correctness**: MUST close when requested |
+| 32 | N2 | Preserve Early-Data header | **Correctness**: MUST NOT remove |
+
+### Phase 7: Observability — Proxy-Status
+
+| Priority | ID | Requirement | Rationale |
+|----------|-----|-------------|-----------|
+| 33 | A3 | Proxy-Status header | **Observability**: structured error reporting aids debugging |
+
+### Phase 8: Client Identity Forwarding
+
+| Priority | ID | Requirement | Rationale |
+|----------|-----|-------------|-----------|
+| 34 | H1 | Forwarded header (RFC 7239) | **Observability**: standardized client identity |
+| 35 | H2 | X-Forwarded-For | **Compatibility**: widely expected de facto header |
+| 36 | H3 | X-Forwarded-Proto | **Compatibility**: scheme preservation |
+| 37 | H4 | X-Forwarded-Host | **Compatibility**: host preservation |
+
+### Phase 9: Future — HTTP/2 and HTTP/3
+
+| Priority | ID | Requirement | Rationale |
+|----------|-----|-------------|-----------|
+| 38 | M1 | HTTP/2 header cleanup | **Future**: when HTTP/2 support is added |
+| 39 | M2 | HTTP/2 CONNECT | **Future**: when HTTP/2 support is added |
+| 40 | M3 | HTTP/3 support | **Future**: requires QUIC transport |
+| 41 | N1 | Early-Data injection | **Future**: when TLS listener is added |
 
 ---
 
