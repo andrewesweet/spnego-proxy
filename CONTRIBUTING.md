@@ -6,6 +6,11 @@
 - [clang-format](https://clang.llvm.org/docs/ClangFormat.html) (for C code
   formatting)
 
+Optional (for running macOS GSS-API integration tests):
+
+- [MIT Kerberos](https://web.mit.edu/kerberos/) via Homebrew: `brew install krb5`
+  (macOS only)
+
 Optional (for running the full lint suite locally):
 
 - [golangci-lint v2](https://golangci-lint.run/welcome/install/)
@@ -30,12 +35,46 @@ CGO_ENABLED=0 go build -o spnego-proxy .
 
 ## Testing
 
+### Unit tests
+
 ```bash
 go test -v -count=1 ./...
 ```
 
 On macOS with CGO enabled, this includes the GSS-API unit tests. On Linux
 (`CGO_ENABLED=0`), only the gokrb5 path is tested.
+
+### macOS GSS-API integration tests
+
+The integration tests exercise the real Apple Heimdal GSS-API code path against
+an ephemeral MIT Kerberos KDC. They require macOS and MIT krb5 from Homebrew.
+
+#### Install MIT Kerberos
+
+```bash
+brew install krb5
+```
+
+This installs MIT Kerberos utilities alongside (not replacing) the built-in
+macOS Heimdal. The system GSS framework is unaffected.
+
+#### Run integration tests
+
+```bash
+export PATH="$(brew --prefix krb5)/bin:$(brew --prefix krb5)/sbin:$PATH"
+INTEGRATION=1 go test -v -count=1 ./...
+```
+
+To run only the GSS-API integration tests:
+
+```bash
+export PATH="$(brew --prefix krb5)/bin:$(brew --prefix krb5)/sbin:$PATH"
+INTEGRATION=1 go test -v -count=1 -run 'Test.*KDC\|Test.*GSS.*KDC' ./...
+```
+
+The tests are gated by `//go:build darwin` and the `INTEGRATION` environment
+variable — they skip automatically on Linux and when `INTEGRATION` is unset.
+They also skip if MIT krb5 is not installed.
 
 ## Formatting
 
@@ -140,4 +179,5 @@ Pull requests run the following checks automatically:
 | Markdown linting | markdownlint-cli2 | `*.md` |
 | Workflow linting | actionlint | `.github/workflows/` |
 | Security analysis | CodeQL | Go, C, Actions |
-| Build + test | go build, go test | macOS (CGO) + Linux |
+| Build + unit tests | go build, go test | macOS (CGO) + Linux |
+| GSS-API integration tests | go test (INTEGRATION=1) | macOS arm64 only |
