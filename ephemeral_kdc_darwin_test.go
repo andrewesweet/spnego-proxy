@@ -127,7 +127,7 @@ func NewEphemeralKDC(t *testing.T) *EphemeralKDC {
 		fmt.Sprintf("addprinc -randkey %s@%s", ephemeralKDCService, ephemeralKDCRealm))
 
 	// Start krb5kdc in foreground mode (-n prevents daemonizing).
-	kdc.kdcCmd = exec.Command(krb5kdcBin, "-n")
+	kdc.kdcCmd = exec.Command(krb5kdcBin, "-n") //nolint:gosec // G204: binary path from Homebrew krb5
 	kdc.kdcCmd.Env = kdcEnv
 	kdc.kdcCmd.Stdout = os.Stderr
 	kdc.kdcCmd.Stderr = os.Stderr
@@ -142,7 +142,7 @@ func NewEphemeralKDC(t *testing.T) *EphemeralKDC {
 
 	// Populate a FILE: credential cache using MIT kinit.
 	kdc.CCachePath = filepath.Join(tmpDir, "ccache")
-	kinitCmd := exec.Command(kinitBin, ephemeralKDCUser+"@"+ephemeralKDCRealm)
+	kinitCmd := exec.Command(kinitBin, ephemeralKDCUser+"@"+ephemeralKDCRealm) //nolint:gosec // G204: binary path from Homebrew krb5
 	kinitCmd.Env = append(os.Environ(),
 		"KRB5_CONFIG="+kdc.KRB5Conf,
 		"KRB5CCNAME=FILE:"+kdc.CCachePath,
@@ -193,7 +193,7 @@ func findKrb5Prefix(t *testing.T) string {
 	// Fallback to well-known Homebrew paths.
 	for _, prefix := range []string{
 		"/opt/homebrew/opt/krb5", // Apple Silicon
-		"/usr/local/opt/krb5",   // Intel
+		"/usr/local/opt/krb5",    // Intel
 	} {
 		if _, err := os.Stat(filepath.Join(prefix, "sbin", "krb5kdc")); err == nil {
 			return prefix
@@ -243,7 +243,7 @@ func mustWriteFile(t *testing.T, path, content string) {
 // mustRunCmd runs a command with the given environment, failing the test on error.
 func mustRunCmd(t *testing.T, name string, env []string, args ...string) {
 	t.Helper()
-	cmd := exec.Command(name, args...)
+	cmd := exec.Command(name, args...) //nolint:gosec // G204: test helper launching MIT krb5 utilities
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if err != nil {
