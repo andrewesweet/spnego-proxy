@@ -55,7 +55,7 @@ jobs:
         run: |
           KRB5_PREFIX="$(brew --prefix krb5)"
           export PATH="${KRB5_PREFIX}/bin:${KRB5_PREFIX}/sbin:$PATH"
-          go test -v -count=1 ./...
+          go test -v -count=1 ./... 2>&1
 
       - name: Verify binary runs
         run: |
