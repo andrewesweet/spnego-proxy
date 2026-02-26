@@ -61,8 +61,14 @@ func TestHandleClientDialTimeout(t *testing.T) {
 		t.Errorf("expected Proxy-Status header %q, got %q", "spnego-proxy; error=connection_timeout", ps)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "failed to connect to upstream proxy") {
-		t.Errorf("expected body to mention upstream proxy connection failure, got: %q", body)
+	if !strings.Contains(string(body), "spnego-proxy error: connection_timeout") {
+		t.Errorf("expected body to contain %q, got: %q", "spnego-proxy error: connection_timeout", body)
+	}
+	if !strings.Contains(string(body), "timed out connecting to the upstream proxy") {
+		t.Errorf("expected body to describe timeout, got: %q", body)
+	}
+	if !strings.Contains(string(body), "Suggested action:") {
+		t.Errorf("expected body to contain suggested action, got: %q", body)
 	}
 
 	select {
@@ -115,8 +121,14 @@ func TestHandleClientReadTimeout(t *testing.T) {
 		t.Errorf("expected Proxy-Status header %q, got %q", "spnego-proxy; error=http_request_error", ps)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "failed to read client request") {
-		t.Errorf("expected body to mention client request read failure, got: %q", body)
+	if !strings.Contains(string(body), "spnego-proxy error: http_request_error") {
+		t.Errorf("expected body to contain %q, got: %q", "spnego-proxy error: http_request_error", body)
+	}
+	if !strings.Contains(string(body), "could not read or parse the HTTP request") {
+		t.Errorf("expected body to describe request read failure, got: %q", body)
+	}
+	if !strings.Contains(string(body), "Suggested action:") {
+		t.Errorf("expected body to contain suggested action, got: %q", body)
 	}
 
 	select {
@@ -502,8 +514,14 @@ func TestHandleClientTokenErrorReturns502(t *testing.T) {
 		t.Errorf("expected Proxy-Status header %q, got %q", "spnego-proxy; error=proxy_internal_error", ps)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "proxy authentication failed") {
-		t.Errorf("expected body to mention proxy authentication, got: %q", body)
+	if !strings.Contains(string(body), "spnego-proxy error: proxy_internal_error") {
+		t.Errorf("expected body to contain %q, got: %q", "spnego-proxy error: proxy_internal_error", body)
+	}
+	if !strings.Contains(string(body), "failed to acquire a SPNEGO authentication token") {
+		t.Errorf("expected body to describe token acquisition failure, got: %q", body)
+	}
+	if !strings.Contains(string(body), "Suggested action:") {
+		t.Errorf("expected body to contain suggested action, got: %q", body)
 	}
 
 	select {
@@ -578,6 +596,13 @@ func TestHandleClientTokenErrorCONNECTReturns502(t *testing.T) {
 	}
 	if ps := resp.Header.Get("Proxy-Status"); ps != "spnego-proxy; error=proxy_internal_error" {
 		t.Errorf("expected Proxy-Status header %q, got %q", "spnego-proxy; error=proxy_internal_error", ps)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "spnego-proxy error: proxy_internal_error") {
+		t.Errorf("expected CONNECT body to contain %q, got: %q", "spnego-proxy error: proxy_internal_error", body)
+	}
+	if !strings.Contains(string(body), "failed to acquire a SPNEGO authentication token") {
+		t.Errorf("expected CONNECT body to describe token acquisition failure, got: %q", body)
 	}
 
 	select {

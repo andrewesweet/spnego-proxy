@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -70,35 +71,91 @@ func enableKeepAlive(conn net.Conn, period time.Duration) {
 	}
 }
 
-// RFC 9209 Proxy-Status error tokens used by this proxy.
-// Only tokens that correspond to actual proxy error paths are defined.
-const (
-	proxyErrConnectionTimeout    = "connection_timeout"
-	proxyErrConnectionRefused    = "connection_refused"
-	proxyErrHTTPRequestError     = "http_request_error"
-	proxyErrProxyInternalError   = "proxy_internal_error"
-	proxyErrConnectionTerminated = "connection_terminated"
+// proxyError describes a structured error response that the proxy sends to
+// clients. Each field maps to part of the human-readable body format:
+//
+//	spnego-proxy error: <errorType>
+//
+//	<message>
+//
+//	Suggested action: <action>
+type proxyError struct {
+	statusCode int    // HTTP status code (e.g. 502, 504)
+	errorType  string // RFC 9209 Proxy-Status token
+	message    string // human-readable description
+	action     string // suggested remediation
+}
+
+// body renders the structured plain-text response body.
+func (e *proxyError) body() string {
+	var buf strings.Builder
+	fmt.Fprintf(&buf, "spnego-proxy error: %s\n\n%s\n", e.errorType, e.message)
+	if e.action != "" {
+		fmt.Fprintf(&buf, "\nSuggested action: %s\n", e.action)
+	}
+	return buf.String()
+}
+
+// Pre-defined proxy errors for each scenario the proxy can encounter.
+var (
+	errConnectionTimeout = &proxyError{
+		statusCode: http.StatusGatewayTimeout,
+		errorType:  "connection_timeout",
+		message:    "The proxy timed out connecting to the upstream proxy.",
+		action:     "Verify the upstream proxy address and that it is reachable from this host. Check for network connectivity issues or firewall rules.",
+	}
+	errConnectionRefused = &proxyError{
+		statusCode: http.StatusBadGateway,
+		errorType:  "connection_refused",
+		message:    "The upstream proxy refused the connection.",
+		action:     "Verify the upstream proxy is running and listening on the configured address. Check firewall rules and network connectivity.",
+	}
+	errTokenAcquisition = &proxyError{
+		statusCode: http.StatusBadGateway,
+		errorType:  "proxy_internal_error",
+		message:    "The proxy failed to acquire a SPNEGO authentication token.",
+		action:     "Check Kerberos credentials. Run 'klist' to verify a valid ticket exists, or 'kinit' to obtain a new one.",
+	}
+	errCircuitBreakerOpen = &proxyError{
+		statusCode: http.StatusBadGateway,
+		errorType:  "proxy_internal_error",
+		message:    "Token acquisition is temporarily disabled after repeated failures (circuit breaker open).",
+		action:     "The proxy will automatically retry after a cooldown period. Check Kerberos credentials and the KDC. Run 'klist' to verify ticket status.",
+	}
+	errHTTPRequestError = &proxyError{
+		statusCode: http.StatusBadRequest,
+		errorType:  "http_request_error",
+		message:    "The proxy could not read or parse the HTTP request.",
+		action:     "Verify the client is sending a well-formed HTTP request to the proxy.",
+	}
+	errConnectionTerminated = &proxyError{
+		statusCode: http.StatusBadGateway,
+		errorType:  "connection_terminated",
+		message:    "The connection to the upstream proxy was lost while relaying the request.",
+		action:     "The upstream proxy may have closed the connection unexpectedly. Retry the request.",
+	}
 )
 
-// writeHTTPError sends a minimal HTTP error response to the client with an
+// writeHTTPError sends a structured HTTP error response to the client with an
 // RFC 9209 Proxy-Status header indicating the error type. It is best-effort;
 // write failures are silently ignored because the connection is about to be
 // closed.
-func writeHTTPError(conn net.Conn, statusCode int, proxyStatusError string, reason string) {
+func writeHTTPError(conn net.Conn, pe *proxyError) {
+	body := pe.body()
 	header := http.Header{
-		"Content-Type": {"text/plain"},
+		"Content-Type": {"text/plain; charset=utf-8"},
 		"Connection":   {"close"},
 	}
 	// RFC 9209 Proxy-Status header with RFC 8941 Structured Fields syntax.
-	header.Set("Proxy-Status", "spnego-proxy; error="+proxyStatusError)
+	header.Set("Proxy-Status", "spnego-proxy; error="+pe.errorType)
 
 	resp := &http.Response{
-		StatusCode:    statusCode,
+		StatusCode:    pe.statusCode,
 		ProtoMajor:    1,
 		ProtoMinor:    1,
 		Header:        header,
-		Body:          io.NopCloser(strings.NewReader(reason)),
-		ContentLength: int64(len(reason)),
+		Body:          io.NopCloser(strings.NewReader(body)),
+		ContentLength: int64(len(body)),
 	}
 	_ = resp.Write(conn)
 }
@@ -112,11 +169,11 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, dialTimeo
 	if err != nil {
 		var ne net.Error
 		if errors.As(err, &ne) && ne.Timeout() {
-			slog.Error("failed to connect to proxy", "error", err, "error_type", proxyErrConnectionTimeout, "client_addr", clientAddr, "upstream_addr", proxy)
-			writeHTTPError(conn, http.StatusGatewayTimeout, proxyErrConnectionTimeout, "failed to connect to upstream proxy\n")
+			slog.Error("failed to connect to proxy", "error", err, "error_type", errConnectionTimeout.errorType, "client_addr", clientAddr, "upstream_addr", proxy)
+			writeHTTPError(conn, errConnectionTimeout)
 		} else {
-			slog.Error("failed to connect to proxy", "error", err, "error_type", proxyErrConnectionRefused, "client_addr", clientAddr, "upstream_addr", proxy)
-			writeHTTPError(conn, http.StatusBadGateway, proxyErrConnectionRefused, "failed to connect to upstream proxy\n")
+			slog.Error("failed to connect to proxy", "error", err, "error_type", errConnectionRefused.errorType, "client_addr", clientAddr, "upstream_addr", proxy)
+			writeHTTPError(conn, errConnectionRefused)
 		}
 		return
 	}
@@ -127,22 +184,22 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, dialTimeo
 	_ = conn.SetReadDeadline(time.Time{}) // clear after read
 	if err != nil {
 		if !errors.Is(err, io.EOF) {
-			slog.Error("failed to read request", "error", err, "error_type", proxyErrHTTPRequestError, "client_addr", clientAddr)
-			writeHTTPError(conn, http.StatusBadRequest, proxyErrHTTPRequestError, "failed to read client request\n")
+			slog.Error("failed to read request", "error", err, "error_type", errHTTPRequestError.errorType, "client_addr", clientAddr)
+			writeHTTPError(conn, errHTTPRequestError)
 		}
 		return
 	}
 	token, err := provider.GetToken()
 	if err != nil {
-		slog.Error("failed to get SPNEGO token", "error", err, "error_type", proxyErrProxyInternalError, "client_addr", clientAddr, "upstream_addr", proxy, "method", req.Method, "host", req.Host)
-		writeHTTPError(conn, http.StatusBadGateway, proxyErrProxyInternalError, "proxy authentication failed\n")
+		slog.Error("failed to get SPNEGO token", "error", err, "error_type", errTokenAcquisition.errorType, "client_addr", clientAddr, "upstream_addr", proxy, "method", req.Method, "host", req.Host)
+		writeHTTPError(conn, errTokenAcquisition)
 		return
 	}
 	slog.Debug("proxy request", "method", req.Method, "uri", req.RequestURI, "proto", req.Proto, "headers", len(req.Header), "client_addr", clientAddr, "upstream_addr", proxy)
 	req.Header.Set("Proxy-Authorization", "Negotiate "+token)
 	if err := req.WriteProxy(proxyConn); err != nil {
-		slog.Error("failed to write request to proxy", "error", err, "error_type", proxyErrConnectionTerminated, "client_addr", clientAddr, "upstream_addr", proxy, "method", req.Method, "host", req.Host)
-		writeHTTPError(conn, http.StatusBadGateway, proxyErrConnectionTerminated, "failed to relay request to upstream proxy\n")
+		slog.Error("failed to write request to proxy", "error", err, "error_type", errConnectionTerminated.errorType, "client_addr", clientAddr, "upstream_addr", proxy, "method", req.Method, "host", req.Host)
+		writeHTTPError(conn, errConnectionTerminated)
 		return
 	}
 	if keepAlive > 0 {
