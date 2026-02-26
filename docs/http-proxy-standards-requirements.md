@@ -5,7 +5,7 @@
 ### De Jure Standards (IETF RFCs)
 
 | RFC | Title | Status | Relevance to spnego-proxy |
-|-----|-------|--------|---------------------------|
+| ----- | ------- | -------- | --------------------------- |
 | [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html) | HTTP Semantics | Internet Standard | Core proxy behavior: Via, Connection, CONNECT, Max-Forwards, Expect, proxy auth |
 | [RFC 9112](https://www.rfc-editor.org/rfc/rfc9112.html) | HTTP/1.1 | Internet Standard | Message framing, Transfer-Encoding/Content-Length handling, CONNECT tunneling |
 | [RFC 9113](https://www.rfc-editor.org/rfc/rfc9113.html) | HTTP/2 | Internet Standard | HTTP/2 proxy semantics, pseudo-headers, connection-specific header removal |
@@ -19,7 +19,7 @@
 ### De Facto Standards
 
 | Header/Convention | Origin | Relevance |
-|-------------------|--------|-----------|
+| ------------------- | -------- | ----------- |
 | `X-Forwarded-For` | Squid proxy (1990s) | Client IP preservation; widely expected by upstream proxies |
 | `X-Forwarded-Proto` | De facto convention | Original protocol scheme preservation |
 | `X-Forwarded-Host` | De facto convention | Original Host header preservation |
@@ -30,6 +30,7 @@
 ## 2. Requirements Extracted from Standards
 
 Each requirement is tagged with:
+
 - **Normative level**: MUST, SHOULD, or MAY (per RFC 2119)
 - **Source**: Exact RFC and section
 - **Applicability**: Whether it applies to the current spnego-proxy architecture (forward proxy, HTTP/1.1, TCP transport)
@@ -53,6 +54,7 @@ Each requirement is tagged with:
 **Privacy note**: An intermediary used as a portal through a network firewall SHOULD NOT forward the names and ports of hosts within the firewall region unless explicitly enabled to do so. An intermediary MAY replace the received-by with a pseudonym (RFC 9110, §7.6.3).
 
 **Testing strategy**:
+
 - **White-box integration test**: Send a request through spnego-proxy to a test upstream that echoes back received headers. Assert the request arriving at upstream contains a `Via` header with the correct protocol version and identifier.
 - **Test chained Via**: Send a request that already has a `Via` header. Assert the proxy appends (not replaces) its entry.
 - **Test pseudonym mode**: When configured for privacy, assert the Via entry uses a pseudonym rather than hostname.
@@ -68,6 +70,7 @@ Each requirement is tagged with:
 **Details**: A proxy SHOULD detect its own identifier in an incoming Via header and return `502 Bad Gateway` (or use `Proxy-Status: proxy_loop_detected` per RFC 9209, §2.3.2.8).
 
 **Testing strategy**:
+
 - **White-box integration test**: Construct a request with a `Via` header already containing the proxy's identifier. Assert the proxy returns 502 or a loop-detection error response.
 - **Traceability**: RFC 9110 §7.6.3 + RFC 9209 §2.3.2.8.
 
@@ -81,8 +84,9 @@ Each requirement is tagged with:
 **Details**: When the proxy generates an error response (e.g., upstream connection failure, auth failure, timeout), it SHOULD include a `Proxy-Status` header with a structured value identifying the proxy and the error type. The intermediary identifier MUST have a type of either String or Token (RFC 9209, §2).
 
 Defined error types relevant to spnego-proxy:
+
 | Error Type | Description | HTTP Status | RFC 9209 Section |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `destination_not_found` | Cannot determine next hop | 502 | §2.3.2.1 |
 | `destination_unavailable` | Next hop refuses connection | 502 | §2.3.2.2 |
 | `connection_timeout` | Connecting to next hop timed out | 504 | §2.3.2.4 |
@@ -96,6 +100,7 @@ Defined error types relevant to spnego-proxy:
 | `http_request_error` | Malformed request | 400 | §2.3.2.16 |
 
 **Testing strategy**:
+
 - **White-box integration test**: For each error scenario (upstream unreachable, DNS failure, timeout, auth failure), trigger the condition and assert the error response includes a correctly-formatted `Proxy-Status` header with the appropriate error type.
 - **Test structured field format**: Assert the Proxy-Status value parses as a valid Structured Field (RFC 8941).
 - **Traceability**: Each error type maps 1:1 to RFC 9209 §2.3.2.x.
@@ -112,12 +117,14 @@ Defined error types relevant to spnego-proxy:
 
 **Level**: MUST
 **Details**: Before forwarding, the proxy MUST:
+
 1. Parse the `Connection` header to find all listed field names
 2. Remove each header field named in Connection
 3. Remove the Connection header itself
 4. Also remove these well-known hop-by-hop headers even if not listed: `Keep-Alive`, `Transfer-Encoding` (when translating versions), `TE`, `Trailer`, `Upgrade`, `Proxy-Connection`
 
 **Testing strategy**:
+
 - **White-box integration test**: Send a request with `Connection: X-Custom-Hop\r\nX-Custom-Hop: value\r\nKeep-Alive: timeout=5`. Assert the upstream receives neither `Connection`, `X-Custom-Hop`, nor `Keep-Alive`.
 - **Test Proxy-Connection removal**: Send a request with `Proxy-Connection: keep-alive`. Assert it is not forwarded.
 - **Traceability**: RFC 9110 §7.6.1 ¶5–7.
@@ -132,6 +139,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: The `Proxy-Authorization` header is hop-by-hop. A proxy MUST consume it (for its own authentication) and NOT forward it to the next hop unless the next hop explicitly requires it with its own 407 challenge. spnego-proxy already injects its own `Proxy-Authorization: Negotiate` header; it must ensure it does not also forward any `Proxy-Authorization` sent by the original client.
 
 **Testing strategy**:
+
 - **White-box integration test**: Send a request with `Proxy-Authorization: Basic dXNlcjpwYXNz` from the client. Assert the upstream receives `Proxy-Authorization: Negotiate <token>` (injected by spnego-proxy) and NOT the client's original Basic auth header.
 - **Traceability**: RFC 9110 §11.7.1.
 
@@ -145,6 +153,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: If the upstream proxy returns `407 Proxy Authentication Required` with a `Proxy-Authenticate` header, spnego-proxy must consume this for its own SPNEGO negotiation and NOT forward the 407/Proxy-Authenticate to the downstream client. The client should not see the upstream's authentication challenges.
 
 **Testing strategy**:
+
 - **White-box integration test**: Configure a mock upstream that returns 407 with `Proxy-Authenticate: Negotiate`. Assert spnego-proxy handles this internally and does not forward the 407 to the client.
 - **Traceability**: RFC 9110 §11.7.2.
 
@@ -162,6 +171,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: When multiple header fields share the same name, their relative order is semantically significant. The proxy must preserve this ordering when forwarding.
 
 **Testing strategy**:
+
 - **White-box integration test**: Send a request with multiple `Cookie` headers (or other repeated headers) in a specific order. Assert the upstream receives them in the same order.
 - **Traceability**: RFC 9110 §5.3 ¶1.
 
@@ -175,6 +185,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: The proxy must be transparent to headers it does not understand. Only hop-by-hop headers (listed in Connection) or explicitly blocked headers may be removed.
 
 **Testing strategy**:
+
 - **White-box integration test**: Send a request with a custom header `X-Exotic-Widget: foo`. Assert it arrives at the upstream unchanged.
 - **Traceability**: RFC 9110 §5.1.
 
@@ -188,6 +199,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: When a client sends a request to a forward proxy, it uses absolute-form (e.g., `GET http://example.com/path HTTP/1.1`). The proxy MUST regenerate the Host header from the request-target URI, ignoring any Host header the client sent. This is stronger than mere "reconciliation" — the request-target is authoritative.
 
 **Testing strategy**:
+
 - **White-box integration test**: Send `GET http://example.com/path HTTP/1.1` with `Host: other.com`. Assert the upstream receives `Host: example.com`.
 - **Test with matching Host**: Send with `Host: example.com`. Assert Host is still correctly set.
 - **Traceability**: RFC 9112 §3.2.2.
@@ -202,6 +214,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: The proxy must forward the path and query string exactly as received. Only an empty path may be replaced with `/`.
 
 **Testing strategy**:
+
 - **White-box integration test**: Send `GET http://example.com/path?q=1&r=2%20 HTTP/1.1`. Assert the upstream receives the path and query unmodified.
 - **Test empty path**: Send `GET http://example.com HTTP/1.1`. Assert the upstream receives `/` as the path.
 - **Traceability**: RFC 9112 §3.2.2.
@@ -216,6 +229,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: The `Authorization` header is end-to-end (unlike `Proxy-Authorization`). The proxy must pass it through unaltered to the origin server.
 
 **Testing strategy**:
+
 - **White-box integration test**: Send a request with `Authorization: Bearer token123`. Assert the upstream receives it unchanged.
 - **Traceability**: RFC 9110 §11.7.2.
 
@@ -229,6 +243,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: If the upstream sends a response with `Header : value` (space before colon), the proxy must normalize it to `Header: value` before forwarding to the client.
 
 **Testing strategy**:
+
 - **White-box integration test**: Mock upstream sends a response with `Content-Type : text/plain` (space before colon). Assert the client receives `Content-Type: text/plain` (no space).
 - **Traceability**: RFC 9112 §5.2.
 
@@ -242,6 +257,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: When `Cache-Control: no-transform` is present, the proxy must not modify the message body in any way (compression, encoding changes, etc.). Since spnego-proxy is transparent by design, this is likely already satisfied, but should be tested.
 
 **Testing strategy**:
+
 - **White-box integration test**: Send a request with `Cache-Control: no-transform`. Assert the response body arrives at the client byte-for-byte identical to what the upstream sent.
 - **Traceability**: RFC 9110 §7.7.
 
@@ -259,6 +275,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: spnego-proxy already implements CONNECT tunneling. The request-target MUST be `host:port` only — no path, no query. A 2xx response indicates tunnel mode is active.
 
 **Testing strategy**:
+
 - **Existing tests** already cover basic CONNECT tunneling.
 - **Additional test**: Assert that a CONNECT request without a port is rejected (RFC 9110 §9.3.6 ¶2: "There is no default port; a client MUST send the port number").
 - **Traceability**: RFC 9110 §9.3.6 ¶1–3.
@@ -273,6 +290,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: When one side of the tunnel closes, the proxy must drain buffered data to the other side before closing. spnego-proxy already implements half-close support via `CloseWrite()`.
 
 **Testing strategy**:
+
 - **Existing tests** (`TestHandleClientForwardsBufferedData`) partially cover this.
 - **Additional test**: Close the upstream side with pending data. Assert all pending bytes are delivered to the client before the client connection is closed.
 - **Traceability**: RFC 9110 §9.3.6 ¶8.
@@ -287,6 +305,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: When generating the 200 response to a CONNECT request, spnego-proxy must not include Transfer-Encoding.
 
 **Testing strategy**:
+
 - **White-box integration test**: Perform a CONNECT request. Assert the 200 response contains no `Transfer-Encoding` header.
 - **Traceability**: RFC 9112 §6.1.
 
@@ -300,6 +319,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: To prevent abuse, the proxy should allow CONNECT only to commonly expected ports (e.g., 443 for HTTPS, 80). This is a security hardening measure.
 
 **Testing strategy**:
+
 - **White-box integration test**: Attempt CONNECT to a disallowed port (e.g., 25/SMTP). Assert the proxy returns 403 Forbidden.
 - **Test allowed ports**: CONNECT to 443. Assert tunnel is established.
 - **Traceability**: RFC 9110 §9.3.6 ¶10.
@@ -314,6 +334,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: When the proxy rejects a CONNECT request (e.g., forbidden port, auth failure), it must close the TCP connection after sending the error response. It must not attempt to read further requests on the same connection.
 
 **Testing strategy**:
+
 - **White-box integration test**: Send a CONNECT request that the proxy rejects (e.g., bad port). Assert the connection is closed after the error response. Attempt to send another request on the same connection; assert it fails.
 - **Traceability**: RFC 9112 §11.2.
 
@@ -327,6 +348,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: When spnego-proxy sends a CONNECT request to the upstream proxy, it must not forward any client data until it has received a 2xx response from the upstream. Premature forwarding can lead to request smuggling.
 
 **Testing strategy**:
+
 - **White-box integration test**: Client sends CONNECT followed immediately by payload data. Assert that spnego-proxy holds the payload and only forwards it after receiving 200 from upstream.
 - **Traceability**: RFC 9112 §11.2.
 
@@ -340,6 +362,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: The proxy must not send 200 to the client until the upstream TCP connection (or upstream tunnel) is actually established.
 
 **Testing strategy**:
+
 - **White-box integration test**: Mock upstream that delays TCP connection acceptance. Assert the client does not receive 200 until the upstream connection is established.
 - **Test upstream refusal**: Mock upstream that refuses connection. Assert the client receives an error (not 200).
 - **Traceability**: RFC 9110 §9.3.6 + RFC 2817 §5.2.
@@ -360,6 +383,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: When both `Transfer-Encoding` and `Content-Length` are present, the proxy MUST remove `Content-Length` before forwarding to prevent request smuggling attacks.
 
 **Testing strategy**:
+
 - **White-box integration test**: Send a request with both `Transfer-Encoding: chunked` and `Content-Length: 100`. Assert the upstream receives `Transfer-Encoding: chunked` but NOT `Content-Length`.
 - **Test response direction**: Mock an upstream response with both headers. Assert the client receives only `Transfer-Encoding`.
 - **Traceability**: RFC 9112 §6.1, RFC 9112 §11.2 (request smuggling).
@@ -374,6 +398,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: If the upstream sends a response with an invalid Content-Length (and no Transfer-Encoding), the proxy must reject it with 502.
 
 **Testing strategy**:
+
 - **White-box integration test**: Mock upstream sends a response with `Content-Length: abc` (non-numeric). Assert the proxy returns 502 to the client.
 - **Traceability**: RFC 9112 §6.1.
 
@@ -387,6 +412,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: Obsolete line folding (continuation lines starting with whitespace) in response headers must be either normalized or rejected.
 
 **Testing strategy**:
+
 - **White-box integration test**: Mock upstream sends a response with an obs-fold header (`Header: value\r\n continued`). Assert the proxy either normalizes it to `Header: value continued` or returns 502.
 - **Traceability**: RFC 9112 §5.2.
 
@@ -404,6 +430,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: If a client sends `Expect: 100-continue`, the proxy must forward the Expect header to the upstream (unless the upstream is known to be HTTP/1.0).
 
 **Testing strategy**:
+
 - **White-box integration test**: Client sends `Expect: 100-continue`. Assert the upstream receives the `Expect` header.
 - **Test 100 response forwarding**: Upstream sends `100 Continue`. Assert the client receives it.
 - **Traceability**: RFC 9110 §10.1.1 ¶4.
@@ -418,6 +445,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: If the downstream client is HTTP/1.0, the proxy must suppress 100 Continue interim responses from the upstream.
 
 **Testing strategy**:
+
 - **White-box integration test**: Client sends an HTTP/1.0 request without `Expect`. Mock upstream sends `100 Continue`. Assert the client does NOT receive the 100 response.
 - **Traceability**: RFC 9110 §10.1.1 ¶5.
 
@@ -435,6 +463,7 @@ Defined error types relevant to spnego-proxy:
 **Details**: For TRACE and OPTIONS requests that include `Max-Forwards`, the proxy must decrement and stop forwarding at zero.
 
 **Testing strategy**:
+
 - **White-box integration test**: Send `OPTIONS * HTTP/1.1` with `Max-Forwards: 1`. Assert the proxy decrements to 0 and generates a 200 response itself (not forwarded).
 - **Send with Max-Forwards: 2**: Assert the upstream receives `Max-Forwards: 1`.
 - **Traceability**: RFC 9110 §7.6.2.
@@ -451,17 +480,20 @@ Defined error types relevant to spnego-proxy:
 
 **Level**: MAY (optional but standardized)
 **Details**: If configured, the proxy SHOULD add a `Forwarded` header with these parameters:
+
 - `for=<client-ip>` — the client's IP address (SHOULD be obfuscated by default, §6.3)
 - `by=<proxy-ip>` — the proxy's receiving interface (SHOULD be obfuscated by default, §5.1)
 - `host=<original-host>` — the Host header value from the client
 - `proto=<scheme>` — the protocol used (http or https)
 
 Syntax constraints:
+
 - IPv6 addresses and `node:port` MUST be quoted (RFC 7239, §4)
 - Obfuscated identifiers MUST have a leading underscore `_` (RFC 7239, §6.3)
 - Obfuscated identifiers SHOULD be randomly generated per request (RFC 7239, §6.3)
 
 **Testing strategy**:
+
 - **White-box integration test**: Enable Forwarded header support. Assert the upstream receives `Forwarded: for="<client-ip>";by=_obfuscated;proto=http`.
 - **Test IPv6 quoting**: Connect from an IPv6 address. Assert the `for` parameter is properly quoted.
 - **Test obfuscation**: Assert that by default, identifiers are obfuscated (not raw IPs).
@@ -474,6 +506,7 @@ Syntax constraints:
 **Details**: Widely expected by upstream servers and proxies. Contains the client's IP address. Multiple proxies append to a comma-separated list.
 
 **Testing strategy**:
+
 - **White-box integration test**: Enable X-Forwarded-For. Assert the upstream receives `X-Forwarded-For: <client-ip>`.
 - **Test chaining**: Send with existing `X-Forwarded-For: 1.2.3.4`. Assert upstream gets `X-Forwarded-For: 1.2.3.4, <client-ip>`.
 - **Traceability**: De facto convention; documented in MDN, Apache, nginx docs.
@@ -484,6 +517,7 @@ Syntax constraints:
 **Details**: Records the protocol used between the client and proxy.
 
 **Testing strategy**:
+
 - **White-box integration test**: Enable X-Forwarded-Proto. Assert upstream receives `X-Forwarded-Proto: http` (or `https` if TLS is used on the client-facing side).
 - **Traceability**: De facto convention.
 
@@ -493,6 +527,7 @@ Syntax constraints:
 **Details**: Records the original Host header from the client.
 
 **Testing strategy**:
+
 - **White-box integration test**: Enable X-Forwarded-Host. Client sends `Host: example.com`. Assert upstream receives `X-Forwarded-Host: example.com`.
 - **Traceability**: De facto convention.
 
@@ -510,6 +545,7 @@ Syntax constraints:
 **Details**: If a client identifies as HTTP/1.0, the proxy must close the connection after the response. HTTP/1.0 does not support persistent connections by default (the `Connection: keep-alive` extension is non-standard and unreliable through proxies).
 
 **Testing strategy**:
+
 - **White-box integration test**: Send an HTTP/1.0 request. Assert the proxy closes the connection after the response.
 - **Test HTTP/1.0 with Connection: keep-alive**: Assert the proxy still closes the connection (keep-alive is not reliable for HTTP/1.0 through proxies).
 - **Traceability**: RFC 9112 §9.3.
@@ -524,6 +560,7 @@ Syntax constraints:
 **Details**: When a client sends `Connection: close`, the proxy must close the connection after sending the response.
 
 **Testing strategy**:
+
 - **White-box integration test**: Client sends a request with `Connection: close`. Assert the proxy closes the connection after the response.
 - **Traceability**: RFC 9112 §9.6.
 
@@ -541,6 +578,7 @@ Syntax constraints:
 **Details**: The proxy should use `HTTP/1.1` in its response status line, even when communicating with HTTP/1.0 clients, as long as it implements HTTP/1.1 correctly (especially chunked encoding).
 
 **Testing strategy**:
+
 - **White-box integration test**: Send an HTTP/1.0 request. Assert the proxy's own error responses (e.g., 502) use `HTTP/1.1` in the status line.
 - **Traceability**: RFC 9112 §2.1.
 
@@ -554,6 +592,7 @@ Syntax constraints:
 **Details**: The proxy should strip the `Upgrade` header unless it can actually negotiate the protocol upgrade.
 
 **Testing strategy**:
+
 - **White-box integration test**: Client sends `Upgrade: websocket`. Assert the proxy strips it unless WebSocket tunneling is supported.
 - **Traceability**: RFC 9110 §7.8.
 
@@ -584,6 +623,7 @@ Syntax constraints:
 Per RFC 9113, §8.2.2: "intermediaries SHOULD also remove other connection-specific header fields, such as Keep-Alive, Proxy-Connection, Transfer-Encoding, and Upgrade."
 
 **Testing strategy**:
+
 - **White-box integration test**: Client sends `Proxy-Connection: keep-alive`. Assert it does not appear in the request forwarded to upstream.
 - **Traceability**: RFC 9113 §8.2.2, de facto best practice.
 
@@ -601,6 +641,7 @@ Per RFC 9113, §8.2.2: "intermediaries SHOULD also remove other connection-speci
 **Details**: When the upstream proxy is unreachable, returns malformed responses, or the connection fails, spnego-proxy must return 502. Currently, spnego-proxy generates plain-text error responses but doesn't consistently use 502.
 
 **Testing strategy**:
+
 - **White-box integration test**: Mock upstream that closes the connection immediately. Assert the proxy returns 502.
 - **Test with malformed response**: Mock upstream sends invalid HTTP. Assert 502.
 - **Traceability**: RFC 9112 §6.1.
@@ -611,6 +652,7 @@ Per RFC 9113, §8.2.2: "intermediaries SHOULD also remove other connection-speci
 **Details**: When the upstream connection times out, the proxy should return 504 rather than a generic error. RFC 9110, §15.6.5 defines 504.
 
 **Testing strategy**:
+
 - **White-box integration test**: Set a very short dial timeout. Mock upstream that delays beyond it. Assert the proxy returns 504.
 - **Traceability**: RFC 9110 §15.6.5.
 
@@ -664,6 +706,7 @@ Per RFC 9113, §8.2.2: "intermediaries SHOULD also remove other connection-speci
 **Details**: Even without TLS support, the proxy must pass through an `Early-Data` header if present.
 
 **Testing strategy**:
+
 - **White-box integration test**: Client sends `Early-Data: 1`. Assert the upstream receives it unchanged.
 - **Traceability**: RFC 8470 §5.1.
 
@@ -674,7 +717,7 @@ Per RFC 9113, §8.2.2: "intermediaries SHOULD also remove other connection-speci
 ### Tier 1: Immediately Applicable (HTTP/1.1, forward proxy, current architecture)
 
 | ID | Requirement | Level |
-|----|-------------|-------|
+| ---- | ------------- | ------- |
 | A1 | Via header — append on forwarded messages | MUST |
 | A2 | Via header — loop detection | SHOULD |
 | B1 | Connection header — remove hop-by-hop headers | MUST |
@@ -712,7 +755,7 @@ Per RFC 9113, §8.2.2: "intermediaries SHOULD also remove other connection-speci
 ### Tier 2: Valuable Additions (optional but high value)
 
 | ID | Requirement | Level |
-|----|-------------|-------|
+| ---- | ------------- | ------- |
 | A3 | Proxy-Status error reporting | MAY |
 | H1 | Forwarded header (RFC 7239) | MAY |
 | H2 | X-Forwarded-For | MAY |
@@ -722,7 +765,7 @@ Per RFC 9113, §8.2.2: "intermediaries SHOULD also remove other connection-speci
 ### Tier 3: Future / Not Applicable Yet
 
 | ID | Requirement | Level |
-|----|-------------|-------|
+| ---- | ------------- | ------- |
 | M1 | HTTP/2 connection-specific header removal | MUST (when HTTP/2) |
 | M2 | HTTP/2 CONNECT pseudo-headers | MUST (when HTTP/2) |
 | M3 | HTTP/3 support | N/A |
@@ -737,6 +780,7 @@ Ordered by value: correctness/security requirements first, then observability, t
 ### Phase 1: Test Infrastructure Foundation
 
 **Prerequisite**: Create a shared white-box integration test harness that can:
+
 - Start spnego-proxy with a mock `TokenProvider`
 - Start a programmable mock upstream proxy that can echo headers, delay, return errors, etc.
 - Capture requests arriving at the upstream
@@ -747,7 +791,7 @@ This harness will be reused by all subsequent requirement implementations and it
 ### Phase 2: Correctness — Hop-by-Hop Header Hygiene (Security-Critical)
 
 | Priority | ID | Requirement | Rationale |
-|----------|-----|-------------|-----------|
+| ---------- | ----- | ------------- | ----------- |
 | 1 | B1 | Connection header / hop-by-hop removal | **Security**: prevents request smuggling, hop-by-hop header leakage; most fundamental proxy requirement |
 | 2 | B2 | Consume client Proxy-Authorization | **Security**: prevents credential leakage to upstream |
 | 3 | K3 | Strip Proxy-Connection | **Security**: prevents confusion with non-standard hop-by-hop header |
@@ -758,7 +802,7 @@ This harness will be reused by all subsequent requirement implementations and it
 ### Phase 3: Correctness — Proxy Identity and Error Handling
 
 | Priority | ID | Requirement | Rationale |
-|----------|-----|-------------|-----------|
+| ---------- | ----- | ------------- | ----------- |
 | 7 | A1 | Via header | **Compliance**: MUST-level RFC 9110 requirement; enables loop detection |
 | 8 | A2 | Via loop detection | **Reliability**: prevents infinite proxy loops |
 | 9 | L1 | 502 for upstream failures | **Compliance**: proper error status codes |
@@ -769,7 +813,7 @@ This harness will be reused by all subsequent requirement implementations and it
 ### Phase 4: Correctness — Request Forwarding Fidelity
 
 | Priority | ID | Requirement | Rationale |
-|----------|-----|-------------|-----------|
+| ---------- | ----- | ------------- | ----------- |
 | 13 | C1 | Preserve header order | **Correctness**: MUST NOT reorder |
 | 14 | C2 | Forward unrecognized headers | **Correctness**: MUST forward (likely already works, needs test) |
 | 15 | C3 | Host header regeneration from request-target | **Correctness**: MUST regenerate from URI |
@@ -783,7 +827,7 @@ This harness will be reused by all subsequent requirement implementations and it
 ### Phase 5: Correctness — CONNECT Hardening
 
 | Priority | ID | Requirement | Rationale |
-|----------|-----|-------------|-----------|
+| ---------- | ----- | ------------- | ----------- |
 | 22 | D5 | Close connection on CONNECT rejection | **Security**: MUST close to prevent smuggling |
 | 23 | D6 | Wait for 2xx before forwarding CONNECT payload | **Security**: MUST prevent premature forwarding |
 | 24 | D7 | No 2xx without established upstream connection | **Correctness**: MUST NOT send premature 200 |
@@ -793,7 +837,7 @@ This harness will be reused by all subsequent requirement implementations and it
 ### Phase 6: Correctness — Protocol Edge Cases
 
 | Priority | ID | Requirement | Rationale |
-|----------|-----|-------------|-----------|
+| ---------- | ----- | ------------- | ----------- |
 | 27 | F1 | Forward Expect: 100-continue | **Correctness**: prevents client hangs |
 | 28 | F2 | Suppress 100 for HTTP/1.0 | **Correctness**: version-dependent behavior |
 | 29 | G1 | Max-Forwards for TRACE/OPTIONS | **Correctness**: MUST decrement |
@@ -804,13 +848,13 @@ This harness will be reused by all subsequent requirement implementations and it
 ### Phase 7: Observability — Proxy-Status
 
 | Priority | ID | Requirement | Rationale |
-|----------|-----|-------------|-----------|
+| ---------- | ----- | ------------- | ----------- |
 | 33 | A3 | Proxy-Status header | **Observability**: structured error reporting aids debugging |
 
 ### Phase 8: Client Identity Forwarding
 
 | Priority | ID | Requirement | Rationale |
-|----------|-----|-------------|-----------|
+| ---------- | ----- | ------------- | ----------- |
 | 34 | H1 | Forwarded header (RFC 7239) | **Observability**: standardized client identity |
 | 35 | H2 | X-Forwarded-For | **Compatibility**: widely expected de facto header |
 | 36 | H3 | X-Forwarded-Proto | **Compatibility**: scheme preservation |
@@ -819,7 +863,7 @@ This harness will be reused by all subsequent requirement implementations and it
 ### Phase 9: Future — HTTP/2 and HTTP/3
 
 | Priority | ID | Requirement | Rationale |
-|----------|-----|-------------|-----------|
+| ---------- | ----- | ------------- | ----------- |
 | 38 | M1 | HTTP/2 header cleanup | **Future**: when HTTP/2 support is added |
 | 39 | M2 | HTTP/2 CONNECT | **Future**: when HTTP/2 support is added |
 | 40 | M3 | HTTP/3 support | **Future**: requires QUIC transport |
@@ -833,11 +877,12 @@ This harness will be reused by all subsequent requirement implementations and it
 
 The test harness should support:
 
-```
+```text
 Client <--TCP--> spnego-proxy <--TCP--> Mock Upstream Proxy
 ```
 
 **Components**:
+
 1. **MockUpstreamProxy**: A programmable HTTP server that:
    - Records all received requests (headers, body, method, URI)
    - Returns configurable responses (status, headers, body, delays)
@@ -861,7 +906,7 @@ Client <--TCP--> spnego-proxy <--TCP--> Mock Upstream Proxy
 
 Tests should be named to trace back to the standard:
 
-```
+```text
 TestRFC9110_7_6_3_ViaHeaderAppended
 TestRFC9110_7_6_1_HopByHopHeadersRemoved
 TestRFC9112_6_1_TECLConflictRemovesCL
@@ -872,6 +917,7 @@ TestRFC7239_ForwardedHeaderObfuscation
 ### Iterative Test Infrastructure
 
 The test harness itself can be built incrementally:
+
 - **Phase 1**: Basic request echo + header capture (sufficient for Groups B, C)
 - **Phase 2**: Error simulation (sufficient for Groups E, K)
 - **Phase 3**: Configurable response generation (sufficient for Groups D, F)
@@ -882,7 +928,7 @@ The test harness itself can be built incrementally:
 ## 6. Version Differences Summary
 
 | Requirement | HTTP/1.0 | HTTP/1.1 | HTTP/2 | HTTP/3 |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | Via header | MUST | MUST | MUST | MUST |
 | Connection header removal | MUST | MUST | N/A (no Connection in H2/H3) | N/A |
 | Proxy-Connection removal | SHOULD | SHOULD | MUST (malformed if present) | MUST |
