@@ -49,6 +49,11 @@ func NewGSSTokenProvider(proxyHost, explicitSPN string) (*GSSTokenProvider, erro
 	return g, nil
 }
 
+// SPN returns the service principal name used for token acquisition.
+func (g *GSSTokenProvider) SPN() string {
+	return g.spn
+}
+
 func (g *GSSTokenProvider) GetToken() (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
