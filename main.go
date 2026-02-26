@@ -147,6 +147,12 @@ var (
 		message:    "The connection to the upstream proxy was lost while relaying the request.",
 		action:     "The upstream proxy may have closed the connection unexpectedly. Retry the request.",
 	}
+	errProxyLoopDetected = &proxyError{
+		statusCode: http.StatusBadGateway,
+		errorType:  "proxy_loop_detected",
+		message:    "A routing loop was detected: the request has already passed through this proxy instance.",
+		action:     "Check the proxy chain configuration for circular routing. The Via header in the request contains this proxy's identity.",
+	}
 )
 
 // writeHTTPError sends a structured HTTP error response to the client with an
@@ -202,6 +208,14 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 		}
 		return
 	}
+	// RFC 9110 §7.6.3: detect routing loops by checking whether the
+	// incoming Via header already contains this proxy instance's pseudonym.
+	if prior := req.Header.Get("Via"); prior != "" && strings.Contains(prior, pseudonym) {
+		slog.Warn("proxy loop detected", "via", prior, "pseudonym", pseudonym, "client_addr", clientAddr, "method", req.Method, "host", req.Host)
+		writeHTTPError(conn, errProxyLoopDetected)
+		return
+	}
+
 	token, err := provider.GetToken()
 	if err != nil {
 		pe := errTokenAcquisition
