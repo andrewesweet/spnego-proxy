@@ -191,8 +191,13 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, dialTimeo
 	}
 	token, err := provider.GetToken()
 	if err != nil {
-		slog.Error("failed to get SPNEGO token", "error", err, "error_type", errTokenAcquisition.errorType, "client_addr", clientAddr, "upstream_addr", proxy, "method", req.Method, "host", req.Host)
-		writeHTTPError(conn, errTokenAcquisition)
+		pe := errTokenAcquisition
+		var cbErr *CircuitBreakerError
+		if errors.As(err, &cbErr) {
+			pe = errCircuitBreakerOpen
+		}
+		slog.Error("failed to get SPNEGO token", "error", err, "error_type", pe.errorType, "client_addr", clientAddr, "upstream_addr", proxy, "method", req.Method, "host", req.Host)
+		writeHTTPError(conn, pe)
 		return
 	}
 	slog.Debug("proxy request", "method", req.Method, "uri", req.RequestURI, "proto", req.Proto, "headers", len(req.Header), "client_addr", clientAddr, "upstream_addr", proxy)

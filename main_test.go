@@ -531,6 +531,77 @@ func TestHandleClientTokenErrorReturns502(t *testing.T) {
 	}
 }
 
+func TestHandleClientCircuitBreakerErrorReturnsDistinctBody(t *testing.T) {
+	// Verify that a circuit breaker error produces a distinct body from
+	// a regular token acquisition error (issue #113, section 4).
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		for {
+			conn, err := upstream.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				buf := make([]byte, 4096)
+				_, _ = c.Read(buf)
+			}(conn)
+		}
+	}()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	// Use a CircuitBreakerError to simulate the circuit breaker being open.
+	provider := &stubTokenProvider{err: &CircuitBreakerError{
+		msg:   "circuit breaker open: token acquisition disabled after 3 consecutive failures",
+		cause: errors.New("gobreaker: open state"),
+	}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleClient(server, upstream.Addr().String(), provider, 5*time.Second, 5*time.Second, 0)
+	}()
+
+	req, _ := http.NewRequest("GET", "http://example.com/", nil)
+	_ = req.WriteProxy(client)
+
+	resp, err := http.ReadResponse(bufio.NewReader(client), req)
+	if err != nil {
+		t.Fatalf("expected HTTP error response, got read error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("expected status 502, got %d", resp.StatusCode)
+	}
+	if ps := resp.Header.Get("Proxy-Status"); ps != "spnego-proxy; error=proxy_internal_error" {
+		t.Errorf("expected Proxy-Status header %q, got %q", "spnego-proxy; error=proxy_internal_error", ps)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "circuit breaker open") {
+		t.Errorf("expected body to mention circuit breaker, got: %q", body)
+	}
+	if !strings.Contains(bodyStr, "temporarily disabled after repeated failures") {
+		t.Errorf("expected body to describe circuit breaker state, got: %q", body)
+	}
+	// The circuit breaker body should NOT contain the regular token error message.
+	if strings.Contains(bodyStr, "failed to acquire a SPNEGO authentication token") {
+		t.Errorf("expected circuit breaker body to differ from regular token error, got: %q", body)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return within 5s")
+	}
+}
+
 func TestHandleClientTokenErrorCONNECTReturns502(t *testing.T) {
 	// Verify CONNECT requests also get a 502 (this is the common case
 	// for HTTPS traffic through a proxy, and what curl uses).
