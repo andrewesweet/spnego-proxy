@@ -343,6 +343,12 @@ func TestShutdownDrainsInFlightConnections(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
+	// Verify Via header was added to the relayed response.
+	wantResponseVia := "HTTP/1.1 " + testPseudonym
+	if got := resp.Header.Get("Via"); got != wantResponseVia {
+		t.Errorf("response Via header = %q, want %q", got, wantResponseVia)
+	}
+
 	// Now simulate shutdown.
 	cancel()
 	_ = ln.Close()
@@ -775,6 +781,12 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
+	// Verify Via header was added to the relayed response.
+	wantResponseVia := "HTTP/1.1 " + testPseudonym
+	if got := resp.Header.Get("Via"); got != wantResponseVia {
+		t.Errorf("response Via header = %q, want %q", got, wantResponseVia)
+	}
+
 	// Close client side to unblock forwarding goroutines.
 	_ = client.Close()
 
@@ -879,6 +891,12 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
+	// Verify Via header was added to the relayed response.
+	wantResponseVia := "HTTP/1.1 " + testPseudonym
+	if got := resp.Header.Get("Via"); got != wantResponseVia {
+		t.Errorf("response Via header = %q, want %q", got, wantResponseVia)
+	}
+
 	// Close client to unblock forwarding goroutines.
 	_ = client.Close()
 
@@ -887,7 +905,7 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 	select {
 	case got := <-gotVia:
 		if got != wantVia {
-			t.Errorf("Via header = %q, want %q", got, wantVia)
+			t.Errorf("request Via header = %q, want %q", got, wantVia)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream Via header")
@@ -1022,6 +1040,12 @@ func TestHandleClientKeepAlive(t *testing.T) {
 		t.Errorf("expected body %q, got %q", "OK", body)
 	}
 
+	// Verify Via header was added to the relayed response.
+	wantResponseVia := "HTTP/1.1 " + testPseudonym
+	if got := resp.Header.Get("Via"); got != wantResponseVia {
+		t.Errorf("response Via header = %q, want %q", got, wantResponseVia)
+	}
+
 	_ = client.Close()
 
 	// Verify the Via header was added to the forwarded request.
@@ -1029,7 +1053,7 @@ func TestHandleClientKeepAlive(t *testing.T) {
 	select {
 	case got := <-gotVia:
 		if got != wantVia {
-			t.Errorf("Via header = %q, want %q", got, wantVia)
+			t.Errorf("request Via header = %q, want %q", got, wantVia)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream Via header")
@@ -1193,6 +1217,250 @@ func TestHandleClientAppendsToExistingVia(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream to receive request")
 	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return within 5s")
+	}
+}
+
+// TestHandleClientAddsViaToResponse verifies that handleClient adds a Via
+// header to responses relayed from the upstream proxy back to the client
+// (RFC 9110 §7.6.3).
+func TestHandleClientAddsViaToResponse(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		conn, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		// Read the forwarded request.
+		req, err := http.ReadRequest(bufio.NewReader(conn))
+		if err != nil {
+			return
+		}
+		_ = req.Body.Close()
+		// Send a response without a Via header.
+		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"))
+	}()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	provider := &stubTokenProvider{token: "tok"}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
+	}()
+
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	req, _ := http.NewRequest("GET", "http://example.com/", nil)
+	if err := req.WriteProxy(client); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(client), req)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	_ = client.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	want := "HTTP/1.1 " + testPseudonym
+	if got := resp.Header.Get("Via"); got != want {
+		t.Errorf("response Via header = %q, want %q", got, want)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return within 5s")
+	}
+}
+
+// TestHandleClientAppendsToExistingResponseVia verifies that handleClient
+// appends to an existing Via header on upstream responses rather than
+// replacing it (RFC 9110 §7.6.3).
+func TestHandleClientAppendsToExistingResponseVia(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		conn, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		req, err := http.ReadRequest(bufio.NewReader(conn))
+		if err != nil {
+			return
+		}
+		_ = req.Body.Close()
+		// Send a response that already has a Via header from the upstream proxy.
+		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nVia: 1.0 upstream-proxy\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"))
+	}()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	provider := &stubTokenProvider{token: "tok"}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
+	}()
+
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	req, _ := http.NewRequest("GET", "http://example.com/", nil)
+	if err := req.WriteProxy(client); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(client), req)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	_ = client.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	want := "1.0 upstream-proxy, HTTP/1.1 " + testPseudonym
+	if got := resp.Header.Get("Via"); got != want {
+		t.Errorf("response Via header = %q, want %q", got, want)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return within 5s")
+	}
+}
+
+// TestHandleClientAddsViaToConnectResponse verifies that handleClient adds
+// a Via header to CONNECT 200 responses and that the tunnel data still flows
+// correctly after the Via-injected response is written (RFC 9110 §7.6.3).
+func TestHandleClientAddsViaToConnectResponse(t *testing.T) {
+	const tunnelPayload = "TUNNEL-DATA-FROM-UPSTREAM"
+
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		conn, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		req, err := http.ReadRequest(bufio.NewReader(conn))
+		if err != nil {
+			return
+		}
+		_ = req.Body.Close()
+		// Send CONNECT 200 response, then tunnel data.
+		_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+		_, _ = conn.Write([]byte(tunnelPayload))
+	}()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	provider := &stubTokenProvider{token: "tok"}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
+	}()
+
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	_, err = io.WriteString(client, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+	if err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+
+	clientReader := bufio.NewReader(client)
+	resp, err := http.ReadResponse(clientReader, nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	// Verify Via header on the CONNECT response.
+	want := "HTTP/1.1 " + testPseudonym
+	if got := resp.Header.Get("Via"); got != want {
+		t.Errorf("response Via header = %q, want %q", got, want)
+	}
+
+	// Verify tunnel data still flows through after the Via-injected response.
+	buf := make([]byte, 4096)
+	n, err := clientReader.Read(buf)
+	if err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("read tunnel data: %v", err)
+	}
+	if got := string(buf[:n]); got != tunnelPayload {
+		t.Errorf("tunnel data = %q, want %q", got, tunnelPayload)
+	}
+
+	_ = client.Close()
 
 	select {
 	case <-done:
