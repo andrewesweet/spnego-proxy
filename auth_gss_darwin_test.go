@@ -13,8 +13,8 @@ func TestGSSTokenProviderInit(t *testing.T) {
 	}
 	defer func() { _ = provider.Close() }()
 
-	if provider.spn != "HTTP@proxy.example.com" {
-		t.Errorf("Expected SPN HTTP@proxy.example.com, got %s", provider.spn)
+	if provider.SPN() != "HTTP@proxy.example.com" {
+		t.Errorf("Expected SPN HTTP@proxy.example.com, got %s", provider.SPN())
 	}
 }
 
@@ -25,8 +25,8 @@ func TestGSSTokenProviderExplicitSPN(t *testing.T) {
 	}
 	defer func() { _ = provider.Close() }()
 
-	if provider.spn != "HTTP@custom.example.com" {
-		t.Errorf("Expected SPN HTTP@custom.example.com, got %s", provider.spn)
+	if provider.SPN() != "HTTP@custom.example.com" {
+		t.Errorf("Expected SPN HTTP@custom.example.com, got %s", provider.SPN())
 	}
 }
 
@@ -37,8 +37,8 @@ func TestGSSTokenProviderNoPort(t *testing.T) {
 	}
 	defer func() { _ = provider.Close() }()
 
-	if provider.spn != "HTTP@proxy.example.com" {
-		t.Errorf("Expected SPN HTTP@proxy.example.com, got %s", provider.spn)
+	if provider.SPN() != "HTTP@proxy.example.com" {
+		t.Errorf("Expected SPN HTTP@proxy.example.com, got %s", provider.SPN())
 	}
 }
 
@@ -51,8 +51,8 @@ func TestGSSTokenProviderNormalizesKrb5SPN(t *testing.T) {
 	}
 	defer func() { _ = provider.Close() }()
 
-	if provider.spn != "HTTP@custom.example.com" {
-		t.Errorf("Expected SPN HTTP@custom.example.com, got %s", provider.spn)
+	if provider.SPN() != "HTTP@custom.example.com" {
+		t.Errorf("Expected SPN HTTP@custom.example.com, got %s", provider.SPN())
 	}
 }
 
