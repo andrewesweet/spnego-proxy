@@ -64,15 +64,33 @@ func enableKeepAlive(conn net.Conn, period time.Duration) {
 	}
 }
 
-// writeHTTPError sends a minimal HTTP error response to the client.
-// It is best-effort; write failures are silently ignored because the
-// connection is about to be closed.
-func writeHTTPError(conn net.Conn, statusCode int, reason string) {
+// RFC 9209 Proxy-Status error tokens used by this proxy.
+// Only tokens that correspond to actual proxy error paths are defined.
+const (
+	proxyErrConnectionTimeout  = "connection_timeout"
+	proxyErrConnectionRefused  = "connection_refused"
+	proxyErrHTTPRequestError   = "http_request_error"
+	proxyErrProxyInternalError = "proxy_internal_error"
+	proxyErrConnectionTerminated = "connection_terminated"
+)
+
+// writeHTTPError sends a minimal HTTP error response to the client with an
+// RFC 9209 Proxy-Status header indicating the error type. It is best-effort;
+// write failures are silently ignored because the connection is about to be
+// closed.
+func writeHTTPError(conn net.Conn, statusCode int, proxyStatusError string, reason string) {
+	header := http.Header{
+		"Content-Type": {"text/plain"},
+		"Connection":   {"close"},
+	}
+	// RFC 9209 Proxy-Status header with RFC 8941 Structured Fields syntax.
+	header.Set("Proxy-Status", "spnego-proxy; error="+proxyStatusError)
+
 	resp := &http.Response{
 		StatusCode:    statusCode,
 		ProtoMajor:    1,
 		ProtoMinor:    1,
-		Header:        http.Header{"Content-Type": {"text/plain"}, "Connection": {"close"}},
+		Header:        header,
 		Body:          io.NopCloser(strings.NewReader(reason)),
 		ContentLength: int64(len(reason)),
 	}
@@ -87,8 +105,13 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 	}
 	proxyConn, err := net.DialTimeout("tcp", proxy, dialTimeout)
 	if err != nil {
-		logger.Printf("failed to connect to proxy: %v", err)
-		writeHTTPError(conn, http.StatusBadGateway, "failed to connect to upstream proxy\n")
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			logger.Printf("failed to connect to proxy: %v", err)
+			writeHTTPError(conn, http.StatusGatewayTimeout, proxyErrConnectionTimeout, "failed to connect to upstream proxy\n")
+		} else {
+			logger.Printf("failed to connect to proxy: %v", err)
+			writeHTTPError(conn, http.StatusBadGateway, proxyErrConnectionRefused, "failed to connect to upstream proxy\n")
+		}
 		return
 	}
 	defer func() { _ = proxyConn.Close() }()
@@ -99,14 +122,14 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 	if err != nil {
 		if !errors.Is(err, io.EOF) {
 			logger.Printf("failed to read request: %v", err)
-			writeHTTPError(conn, http.StatusBadRequest, "failed to read client request\n")
+			writeHTTPError(conn, http.StatusBadRequest, proxyErrHTTPRequestError, "failed to read client request\n")
 		}
 		return
 	}
 	token, err := provider.GetToken()
 	if err != nil {
 		logger.Printf("failed to get SPNEGO token: %v", err)
-		writeHTTPError(conn, http.StatusBadGateway, "proxy authentication failed\n")
+		writeHTTPError(conn, http.StatusBadGateway, proxyErrProxyInternalError, "proxy authentication failed\n")
 		return
 	}
 	if debug {
@@ -115,7 +138,7 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, debug boo
 	req.Header.Set("Proxy-Authorization", "Negotiate "+token)
 	if err := req.WriteProxy(proxyConn); err != nil {
 		logger.Printf("failed to write request to proxy: %v", err)
-		writeHTTPError(conn, http.StatusBadGateway, "failed to relay request to upstream proxy\n")
+		writeHTTPError(conn, http.StatusBadGateway, proxyErrConnectionTerminated, "failed to relay request to upstream proxy\n")
 		return
 	}
 	if keepAlive > 0 {

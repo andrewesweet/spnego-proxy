@@ -47,15 +47,18 @@ func TestHandleClientDialTimeout(t *testing.T) {
 		handleClient(server, unreachable, provider, false, 50*time.Millisecond, time.Second, 0)
 	}()
 
-	// The proxy should respond with 502 when it can't reach the upstream.
+	// The proxy should respond with 504 when the dial times out (RFC 9209 connection_timeout).
 	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
 	if err != nil {
 		t.Fatalf("expected HTTP error response, got read error: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Errorf("expected status 502, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusGatewayTimeout {
+		t.Errorf("expected status 504, got %d", resp.StatusCode)
+	}
+	if ps := resp.Header.Get("Proxy-Status"); ps != "spnego-proxy; error=connection_timeout" {
+		t.Errorf("expected Proxy-Status header %q, got %q", "spnego-proxy; error=connection_timeout", ps)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "failed to connect to upstream proxy") {
@@ -107,6 +110,9 @@ func TestHandleClientReadTimeout(t *testing.T) {
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected status 400, got %d", resp.StatusCode)
+	}
+	if ps := resp.Header.Get("Proxy-Status"); ps != "spnego-proxy; error=http_request_error" {
+		t.Errorf("expected Proxy-Status header %q, got %q", "spnego-proxy; error=http_request_error", ps)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "failed to read client request") {
@@ -492,6 +498,9 @@ func TestHandleClientTokenErrorReturns502(t *testing.T) {
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Errorf("expected status 502, got %d", resp.StatusCode)
 	}
+	if ps := resp.Header.Get("Proxy-Status"); ps != "spnego-proxy; error=proxy_internal_error" {
+		t.Errorf("expected Proxy-Status header %q, got %q", "spnego-proxy; error=proxy_internal_error", ps)
+	}
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "proxy authentication failed") {
 		t.Errorf("expected body to mention proxy authentication, got: %q", body)
@@ -566,6 +575,9 @@ func TestHandleClientTokenErrorCONNECTReturns502(t *testing.T) {
 
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Errorf("expected status 502, got %d", resp.StatusCode)
+	}
+	if ps := resp.Header.Get("Proxy-Status"); ps != "spnego-proxy; error=proxy_internal_error" {
+		t.Errorf("expected Proxy-Status header %q, got %q", "spnego-proxy; error=proxy_internal_error", ps)
 	}
 
 	select {
