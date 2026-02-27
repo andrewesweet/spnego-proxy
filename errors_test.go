@@ -16,8 +16,8 @@ func TestCredentialErrorMessage(t *testing.T) {
 func TestCredentialErrorUnwrap(t *testing.T) {
 	inner := errors.New("kdc unreachable")
 	err := &CredentialError{msg: "cred fail", cause: inner}
-	if unwrapped := errors.Unwrap(err); unwrapped != inner {
-		t.Errorf("expected Unwrap to return inner error, got %v", unwrapped)
+	if !errors.Is(err, inner) {
+		t.Errorf("expected errors.Is to find inner error through Unwrap")
 	}
 }
 
@@ -61,8 +61,8 @@ func TestNegotiationErrorMessage(t *testing.T) {
 func TestNegotiationErrorUnwrap(t *testing.T) {
 	inner := errors.New("spn mismatch")
 	err := &NegotiationError{msg: "neg fail", cause: inner}
-	if unwrapped := errors.Unwrap(err); unwrapped != inner {
-		t.Errorf("expected Unwrap to return inner error, got %v", unwrapped)
+	if !errors.Is(err, inner) {
+		t.Errorf("expected errors.Is to find inner error through Unwrap")
 	}
 }
 
