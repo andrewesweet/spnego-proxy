@@ -83,7 +83,14 @@ func injectVia(header http.Header, proto, pseudonym string) {
 // forwarding to the upstream proxy per RFC 9110 §7.6.1. It also handles
 // the Transfer-Encoding / Content-Length conflict (RFC 9112 §6.1) and
 // strips the client's Proxy-Authorization (RFC 9110 §11.7.1).
-func sanitizeHopByHop(header http.Header) {
+//
+// The function accepts *http.Request (not bare http.Header) because Go's
+// ReadRequest moves Transfer-Encoding into req.TransferEncoding and
+// Trailer into req.Trailer, removing both from req.Header. Clearing
+// those fields prevents WriteProxy from re-emitting them.
+func sanitizeHopByHop(req *http.Request) {
+	header := req.Header
+
 	// B1 (RFC 9110 §7.6.1): parse the Connection header for additional
 	// field names to remove, then remove Connection itself.
 	for _, v := range header["Connection"] {
@@ -100,6 +107,7 @@ func sanitizeHopByHop(header http.Header) {
 	header.Del("Proxy-Connection") // K3: non-standard hop-by-hop
 	header.Del("TE")
 	header.Del("Trailer")
+	req.Trailer = nil     // ReadRequest moves Trailer into this field
 	header.Del("Upgrade") // J2: strip unless proxy supports the protocol
 
 	// B2 (RFC 9110 §11.7.1): consume the client's Proxy-Authorization.
@@ -108,7 +116,9 @@ func sanitizeHopByHop(header http.Header) {
 
 	// E1 (RFC 9112 §6.1): when both Transfer-Encoding and Content-Length
 	// are present, remove Content-Length to prevent request smuggling.
-	if header.Get("Transfer-Encoding") != "" && header.Get("Content-Length") != "" {
+	// ReadRequest moves Transfer-Encoding into req.TransferEncoding, so
+	// we check that field rather than the header map.
+	if len(req.TransferEncoding) > 0 && header.Get("Content-Length") != "" {
 		header.Del("Content-Length")
 	}
 }
@@ -316,7 +326,7 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 	}
 
 	// Remove hop-by-hop headers before forwarding (RFC 9110 §7.6.1).
-	sanitizeHopByHop(req.Header)
+	sanitizeHopByHop(req)
 
 	token, err := provider.GetToken()
 	if err != nil {

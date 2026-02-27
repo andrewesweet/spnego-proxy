@@ -237,10 +237,11 @@ func TestE2_RFC9112_ValidContentLengthInResponsePassesThrough(t *testing.T) {
 
 func TestSanitizeHopByHop_Unit(t *testing.T) {
 	tests := []struct {
-		name       string
-		headers    http.Header
-		wantAbsent []string
-		wantKeep   map[string]string
+		name             string
+		headers          http.Header
+		transferEncoding []string // simulates req.TransferEncoding set by ReadRequest
+		wantAbsent       []string
+		wantKeep         map[string]string
 	}{
 		{
 			name: "B1: Connection names single header",
@@ -292,18 +293,14 @@ func TestSanitizeHopByHop_Unit(t *testing.T) {
 			wantAbsent: []string{"Keep-Alive", "Te", "Trailer"},
 		},
 		{
-			name: "E1: TE + CL conflict removes CL",
-			headers: http.Header{
-				"Transfer-Encoding": {"chunked"},
-				"Content-Length":    {"100"},
-			},
-			wantAbsent: []string{"Content-Length"},
+			name:             "E1: TE + CL conflict removes CL",
+			headers:          http.Header{"Content-Length": {"100"}},
+			transferEncoding: []string{"chunked"},
+			wantAbsent:       []string{"Content-Length"},
 		},
 		{
-			name: "E1: CL without TE is preserved",
-			headers: http.Header{
-				"Content-Length": {"42"},
-			},
+			name:     "E1: CL without TE is preserved",
+			headers:  http.Header{"Content-Length": {"42"}},
 			wantKeep: map[string]string{"Content-Length": "42"},
 		},
 		{
@@ -316,7 +313,11 @@ func TestSanitizeHopByHop_Unit(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			sanitizeHopByHop(tc.headers)
+			req := &http.Request{
+				Header:           tc.headers,
+				TransferEncoding: tc.transferEncoding,
+			}
+			sanitizeHopByHop(req)
 			for _, h := range tc.wantAbsent {
 				if v := tc.headers.Get(h); v != "" {
 					t.Errorf("header %q: want absent, got %q", h, v)
