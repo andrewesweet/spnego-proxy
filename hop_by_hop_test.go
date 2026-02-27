@@ -16,38 +16,11 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestB1_RFC9110_ConnectionHeaderAndNamedHeadersRemoved(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	defer upstream.Close()
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	defer proxy.Close()
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	req, _ := http.NewRequest("GET", "http://example.com/b1", nil)
-	req.Header.Set("Connection", "X-Custom-Hop")
-	req.Header.Set("X-Custom-Hop", "secret")
-	req.Header.Set("X-Legitimate", "keep-me")
-	if err := req.WriteProxy(conn); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	assertStatusCode(t, resp, http.StatusOK)
-
-	reqs := upstream.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("upstream received %d requests, want 1", len(reqs))
-	}
-	upReq := reqs[0]
+	upReq := proxyRoundTrip(t, http.Header{
+		"Connection":   {"X-Custom-Hop"},
+		"X-Custom-Hop": {"secret"},
+		"X-Legitimate": {"keep-me"},
+	})
 
 	assertHeaderAbsent(t, upReq.Header, "Connection")
 	assertHeaderAbsent(t, upReq.Header, "X-Custom-Hop")
@@ -55,39 +28,12 @@ func TestB1_RFC9110_ConnectionHeaderAndNamedHeadersRemoved(t *testing.T) {
 }
 
 func TestB1_RFC9110_ConnectionHeaderMultipleValues(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	defer upstream.Close()
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	defer proxy.Close()
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	req, _ := http.NewRequest("GET", "http://example.com/b1-multi", nil)
-	req.Header.Set("Connection", "X-Hop-A, X-Hop-B")
-	req.Header.Set("X-Hop-A", "a-value")
-	req.Header.Set("X-Hop-B", "b-value")
-	req.Header.Set("X-End-To-End", "preserved")
-	if err := req.WriteProxy(conn); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	assertStatusCode(t, resp, http.StatusOK)
-
-	reqs := upstream.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("upstream received %d requests, want 1", len(reqs))
-	}
-	upReq := reqs[0]
+	upReq := proxyRoundTrip(t, http.Header{
+		"Connection":   {"X-Hop-A, X-Hop-B"},
+		"X-Hop-A":      {"a-value"},
+		"X-Hop-B":      {"b-value"},
+		"X-End-To-End": {"preserved"},
+	})
 
 	assertHeaderAbsent(t, upReq.Header, "Connection")
 	assertHeaderAbsent(t, upReq.Header, "X-Hop-A")
@@ -96,40 +42,27 @@ func TestB1_RFC9110_ConnectionHeaderMultipleValues(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// B1 — Keep-Alive is a well-known hop-by-hop header
+// Well-known hop-by-hop headers stripped (table-driven)
 // ---------------------------------------------------------------------------
 
-func TestB1_RFC9110_KeepAliveStripped(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	defer upstream.Close()
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	defer proxy.Close()
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
+func TestHopByHop_WellKnownHeadersStripped(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		value  string
+	}{
+		{"B1/Keep-Alive", "Keep-Alive", "timeout=5"},
+		{"K3/Proxy-Connection", "Proxy-Connection", "keep-alive"},
+		{"J2/Upgrade", "Upgrade", "websocket"},
+		{"B1/TE", "TE", "trailers"},
+		{"B1/Trailer", "Trailer", "X-Checksum"},
 	}
-	defer func() { _ = conn.Close() }()
-
-	req, _ := http.NewRequest("GET", "http://example.com/keepalive", nil)
-	req.Header.Set("Keep-Alive", "timeout=5")
-	if err := req.WriteProxy(conn); err != nil {
-		t.Fatalf("write request: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			upReq := proxyRoundTrip(t, http.Header{tc.header: {tc.value}})
+			assertHeaderAbsent(t, upReq.Header, tc.header)
+		})
 	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	assertStatusCode(t, resp, http.StatusOK)
-
-	reqs := upstream.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("upstream received %d requests, want 1", len(reqs))
-	}
-	assertHeaderAbsent(t, reqs[0].Header, "Keep-Alive")
 }
 
 // ---------------------------------------------------------------------------
@@ -137,36 +70,9 @@ func TestB1_RFC9110_KeepAliveStripped(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestB2_RFC9110_ClientProxyAuthorizationConsumed(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	defer upstream.Close()
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	defer proxy.Close()
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	req, _ := http.NewRequest("GET", "http://example.com/b2", nil)
-	req.Header.Set("Proxy-Authorization", "Basic abc123")
-	if err := req.WriteProxy(conn); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	assertStatusCode(t, resp, http.StatusOK)
-
-	reqs := upstream.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("upstream received %d requests, want 1", len(reqs))
-	}
-	upReq := reqs[0]
+	upReq := proxyRoundTrip(t, http.Header{
+		"Proxy-Authorization": {"Basic abc123"},
+	})
 
 	// The proxy must inject its own Negotiate token, NOT forward the
 	// client's Basic credential.
@@ -177,119 +83,6 @@ func TestB2_RFC9110_ClientProxyAuthorizationConsumed(t *testing.T) {
 	if !strings.HasPrefix(pa, "Negotiate ") {
 		t.Errorf("expected Proxy-Authorization to start with 'Negotiate ', got %q", pa)
 	}
-}
-
-// ---------------------------------------------------------------------------
-// K3 — RFC 9113 §8.2.2: Proxy-Connection stripped
-// ---------------------------------------------------------------------------
-
-func TestK3_RFC9113_ProxyConnectionStripped(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	defer upstream.Close()
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	defer proxy.Close()
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	req, _ := http.NewRequest("GET", "http://example.com/k3", nil)
-	req.Header.Set("Proxy-Connection", "keep-alive")
-	if err := req.WriteProxy(conn); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	assertStatusCode(t, resp, http.StatusOK)
-
-	reqs := upstream.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("upstream received %d requests, want 1", len(reqs))
-	}
-	assertHeaderAbsent(t, reqs[0].Header, "Proxy-Connection")
-}
-
-// ---------------------------------------------------------------------------
-// J2 — RFC 9110 §7.8: Upgrade stripped
-// ---------------------------------------------------------------------------
-
-func TestJ2_RFC9110_UpgradeStripped(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	defer upstream.Close()
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	defer proxy.Close()
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	req, _ := http.NewRequest("GET", "http://example.com/j2", nil)
-	req.Header.Set("Upgrade", "websocket")
-	if err := req.WriteProxy(conn); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	assertStatusCode(t, resp, http.StatusOK)
-
-	reqs := upstream.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("upstream received %d requests, want 1", len(reqs))
-	}
-	assertHeaderAbsent(t, reqs[0].Header, "Upgrade")
-}
-
-// ---------------------------------------------------------------------------
-// B1 — TE and Trailer (well-known hop-by-hop) stripped
-// ---------------------------------------------------------------------------
-
-func TestB1_RFC9110_TEAndTrailerStripped(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	defer upstream.Close()
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	defer proxy.Close()
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	req, _ := http.NewRequest("GET", "http://example.com/te-trailer", nil)
-	req.Header.Set("TE", "trailers")
-	req.Header.Set("Trailer", "X-Checksum")
-	if err := req.WriteProxy(conn); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	assertStatusCode(t, resp, http.StatusOK)
-
-	reqs := upstream.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("upstream received %d requests, want 1", len(reqs))
-	}
-	assertHeaderAbsent(t, reqs[0].Header, "TE")
-	assertHeaderAbsent(t, reqs[0].Header, "Trailer")
 }
 
 // ---------------------------------------------------------------------------
@@ -333,11 +126,9 @@ func TestE1_RFC9112_TEAndCLConflictRemovesCL(t *testing.T) {
 	if len(reqs) != 1 {
 		t.Fatalf("upstream received %d requests, want 1", len(reqs))
 	}
-	upReq := reqs[0]
 
-	// Transfer-Encoding should be present (or the body should have
-	// been forwarded correctly); Content-Length must be absent.
-	assertHeaderAbsent(t, upReq.Header, "Content-Length")
+	// Content-Length must be absent.
+	assertHeaderAbsent(t, reqs[0].Header, "Content-Length")
 }
 
 // ---------------------------------------------------------------------------
@@ -438,68 +229,6 @@ func TestE2_RFC9112_ValidContentLengthInResponsePassesThrough(t *testing.T) {
 	if string(respBody) != body {
 		t.Errorf("body: want %q, got %q", body, string(respBody))
 	}
-}
-
-// ---------------------------------------------------------------------------
-// All hop-by-hop headers stripped together (combined test)
-// ---------------------------------------------------------------------------
-
-func TestHopByHop_AllHeadersStrippedTogether(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	defer upstream.Close()
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	defer proxy.Close()
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	req, _ := http.NewRequest("GET", "http://example.com/all-hop-by-hop", nil)
-	req.Header.Set("Connection", "X-Named-Hop")
-	req.Header.Set("X-Named-Hop", "should-be-removed")
-	req.Header.Set("Keep-Alive", "timeout=5")
-	req.Header.Set("Proxy-Authorization", "Basic attacker-creds")
-	req.Header.Set("Proxy-Connection", "keep-alive")
-	req.Header.Set("TE", "trailers")
-	req.Header.Set("Trailer", "X-Checksum")
-	req.Header.Set("Upgrade", "websocket")
-	req.Header.Set("X-End-To-End", "must-survive")
-	if err := req.WriteProxy(conn); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	assertStatusCode(t, resp, http.StatusOK)
-
-	reqs := upstream.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("upstream received %d requests, want 1", len(reqs))
-	}
-	upReq := reqs[0]
-
-	// All hop-by-hop headers must be absent.
-	for _, h := range []string{
-		"Connection", "X-Named-Hop", "Keep-Alive",
-		"Proxy-Connection", "TE", "Trailer", "Upgrade",
-	} {
-		assertHeaderAbsent(t, upReq.Header, h)
-	}
-
-	// Proxy-Authorization must be the proxy's own Negotiate token.
-	pa := upReq.Header.Get("Proxy-Authorization")
-	if !strings.HasPrefix(pa, "Negotiate ") {
-		t.Errorf("Proxy-Authorization: want 'Negotiate ...', got %q", pa)
-	}
-
-	// End-to-end headers must survive.
-	assertHeaderPresent(t, upReq.Header, "X-End-To-End", "must-survive")
 }
 
 // ---------------------------------------------------------------------------
@@ -649,41 +378,13 @@ func TestValidateResponseContentLength_Unit(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHopByHop_EndToEndHeadersPreserved(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	defer upstream.Close()
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	defer proxy.Close()
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	req, _ := http.NewRequest("GET", "http://example.com/e2e", nil)
-	req.Header.Set("Accept", "text/html")
-	req.Header.Set("Authorization", "Bearer token123")
-	req.Header.Set("Cache-Control", "no-cache")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "test-agent/1.0")
-	req.Header.Set("X-Custom-App", "my-value")
-	if err := req.WriteProxy(conn); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	assertStatusCode(t, resp, http.StatusOK)
-
-	reqs := upstream.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("upstream received %d requests, want 1", len(reqs))
-	}
-	upReq := reqs[0]
+	upReq := proxyRoundTrip(t, http.Header{
+		"Accept":        {"text/html"},
+		"Authorization": {"Bearer token123"},
+		"Cache-Control": {"no-cache"},
+		"Content-Type":  {"application/json"},
+		"X-Custom-App":  {"my-value"},
+	})
 
 	assertHeaderPresent(t, upReq.Header, "Accept", "text/html")
 	assertHeaderPresent(t, upReq.Header, "Authorization", "Bearer token123")
@@ -767,7 +468,6 @@ func TestHopByHop_ViaHeaderStillInjected(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	req, _ := http.NewRequest("GET", "http://example.com/via", nil)
-	// Include hop-by-hop headers that get stripped — Via should still appear.
 	req.Header.Set("Connection", "close")
 	req.Header.Set("Proxy-Connection", "keep-alive")
 	if err := req.WriteProxy(conn); err != nil {
@@ -796,8 +496,7 @@ func TestHopByHop_ViaHeaderStillInjected(t *testing.T) {
 	}
 
 	// Via must also be present on the response.
-	respVia := resp.Header.Get("Via")
-	if respVia == "" {
+	if resp.Header.Get("Via") == "" {
 		t.Error("expected Via header in response, got empty")
 	}
 }
