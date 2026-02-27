@@ -67,6 +67,18 @@ func generateViaPseudonym() string {
 	return fmt.Sprintf("spnego-proxy-%x", b)
 }
 
+// injectVia appends a Via header entry to the given HTTP headers per
+// RFC 9110 §7.6.3. The entry identifies this proxy instance using the
+// protocol version received and the proxy's pseudonym.
+func injectVia(header http.Header, proto, pseudonym string) {
+	viaEntry := proto + " " + pseudonym
+	if prior := header.Get("Via"); prior != "" {
+		header.Set("Via", prior+", "+viaEntry)
+	} else {
+		header.Set("Via", viaEntry)
+	}
+}
+
 // TokenProvider acquires SPNEGO tokens for proxy authentication.
 type TokenProvider interface {
 	// GetToken returns a base64-encoded SPNEGO token.
@@ -231,12 +243,7 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 
 	// RFC 9110 §7.6.3: intermediaries MUST add a Via entry identifying
 	// the protocol version received and the proxy instance.
-	viaEntry := req.Proto + " " + pseudonym
-	if prior := req.Header.Get("Via"); prior != "" {
-		req.Header.Set("Via", prior+", "+viaEntry)
-	} else {
-		req.Header.Set("Via", viaEntry)
-	}
+	injectVia(req.Header, req.Proto, pseudonym)
 
 	slog.Debug("proxy request", "method", req.Method, "uri", req.RequestURI, "proto", req.Proto, "headers", len(req.Header), "client_addr", clientAddr, "upstream_addr", proxy, "via", req.Header.Get("Via"))
 	if err := req.WriteProxy(proxyConn); err != nil {
@@ -264,7 +271,52 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 	}
 	wg.Add(2)
 	go forward(reqReader, proxyConn, conn.RemoteAddr(), proxyConn.RemoteAddr())
-	go forward(proxyConn, conn, proxyConn.RemoteAddr(), conn.RemoteAddr())
+	// Upstream→client: parse response headers to inject Via, then relay body.
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if cw, ok := conn.(interface{ CloseWrite() error }); ok {
+				_ = cw.CloseWrite()
+			}
+		}()
+		slog.Debug("forward start", "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+		defer slog.Debug("forward done", "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+
+		upstreamReader := bufio.NewReader(proxyConn)
+		resp, err := http.ReadResponse(upstreamReader, req)
+		if err != nil {
+			// Deviation from RFC 9110 §7.6.3 (MUST add Via): when the
+			// upstream response is unparseable, injecting a Via header is
+			// impossible. We relay raw bytes instead of returning an error
+			// so the client still receives whatever the upstream sent.
+			// The warning log ensures operator visibility. See README.md
+			// for the full rationale.
+			slog.Warn("failed to parse upstream response, falling back to raw relay",
+				"error", err, "client_addr", conn.RemoteAddr())
+			if _, err := io.Copy(conn, upstreamReader); err != nil {
+				slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+			}
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		// RFC 9110 §7.6.3: a forward proxy MUST add Via to responses.
+		injectVia(resp.Header, resp.Proto, pseudonym)
+
+		if err := resp.Write(conn); err != nil {
+			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+			return
+		}
+
+		// For CONNECT 200, the tunnel begins after the response headers.
+		// resp.Write wrote the (empty-body) response; now relay the
+		// encrypted tunnel data as raw bytes.
+		if req.Method == http.MethodConnect && resp.StatusCode == http.StatusOK {
+			if _, err := io.Copy(conn, upstreamReader); err != nil {
+				slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+			}
+		}
+	}()
 	wg.Wait()
 }
 
