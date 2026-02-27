@@ -429,6 +429,10 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 		defer func() { _ = resp.Body.Close() }()
 
 		// E2 (RFC 9112 §6.1): reject responses with invalid Content-Length.
+		// Defense-in-depth: Go's ReadResponse currently rejects most
+		// invalid Content-Length values before this point, but our
+		// validator catches edge cases (e.g. comma-separated differing
+		// values) and guards against future Go stdlib changes.
 		if pe := validateResponseContentLength(resp); pe != nil {
 			slog.Error("invalid Content-Length in upstream response",
 				"error_type", pe.errorType,
