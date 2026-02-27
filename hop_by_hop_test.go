@@ -366,6 +366,7 @@ func TestValidateResponseContentLength_Unit(t *testing.T) {
 		{name: "hex value", cl: []string{"0xff"}, wantErr: true},
 		{name: "empty value", cl: []string{""}, wantErr: false},
 		{name: "space-padded valid", cl: []string{" 42 "}, wantErr: false},
+		{name: "leading zeros equivalent", cl: []string{"042", "42"}, wantErr: false},
 	}
 
 	for _, tc := range tests {

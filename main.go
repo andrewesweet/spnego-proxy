@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -133,24 +134,24 @@ func validateResponseContentLength(resp *http.Response) *proxyError {
 	}
 
 	// Collect all individual values; headers may be comma-separated per
-	// RFC 9110 §5.6.1.
-	var first string
+	// RFC 9110 §5.6.1. Compare numerically so that semantically equal
+	// values like "042" and "42" are not rejected.
+	var first uint64
+	var seen bool
 	for _, v := range clValues {
 		for _, part := range strings.Split(v, ",") {
 			part = strings.TrimSpace(part)
 			if part == "" {
 				continue
 			}
-			// Each value must be 1*DIGIT (RFC 9110 §8.6).
-			for _, c := range []byte(part) {
-				if c < '0' || c > '9' {
-					return errInvalidContentLength
-				}
+			n, err := strconv.ParseUint(part, 10, 64)
+			if err != nil {
+				return errInvalidContentLength
 			}
-			if first == "" {
-				first = part
-			} else if part != first {
-				// Multiple differing Content-Length values.
+			if !seen {
+				first = n
+				seen = true
+			} else if n != first {
 				return errInvalidContentLength
 			}
 		}
