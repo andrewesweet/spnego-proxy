@@ -399,7 +399,12 @@ func TestHopByHop_EndToEndHeadersPreserved(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestE2_RFC9112_MultipleDifferingCLInResponse(t *testing.T) {
-	// Create a raw upstream that sends duplicate, differing Content-Length.
+	// Go's http.ReadResponse rejects responses with differing
+	// Content-Length headers before our validateResponseContentLength
+	// runs. This test verifies the proxy returns 502 (via the
+	// strings.Contains "Content-Length" check in the ReadResponse
+	// error path) rather than silently raw-relaying the smuggling
+	// attempt.
 	rawUpstream, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -439,15 +444,13 @@ func TestE2_RFC9112_MultipleDifferingCLInResponse(t *testing.T) {
 
 	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
 	if err != nil {
-		// Go's ReadResponse may itself reject the response; either way
-		// the client must not receive the smuggling attempt.
-		return
+		t.Fatalf("read response: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// If we get a parseable response, it must be a 502 from our proxy.
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Errorf("expected 502 for differing Content-Length, got %d", resp.StatusCode)
+	assertStatusCode(t, resp, http.StatusBadGateway)
+	if ps := resp.Header.Get("Proxy-Status"); !strings.Contains(ps, "http_protocol_error") {
+		t.Errorf("expected Proxy-Status to contain 'http_protocol_error', got %q", ps)
 	}
 }
 
