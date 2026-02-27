@@ -141,6 +141,18 @@ var (
 		message:    "The proxy failed to acquire a SPNEGO authentication token.",
 		action:     "Check Kerberos credentials. Run 'klist' to verify a valid ticket exists, or 'kinit' to obtain a new one.",
 	}
+	errCredentialFailure = &proxyError{
+		statusCode: http.StatusBadGateway,
+		errorType:  "proxy_internal_error",
+		message:    "Kerberos credentials are expired or unavailable.",
+		action:     "Run 'kinit' to obtain or refresh Kerberos credentials, then retry. Run 'klist' to check current ticket status.",
+	}
+	errNegotiationFailure = &proxyError{
+		statusCode: http.StatusBadGateway,
+		errorType:  "proxy_internal_error",
+		message:    "SPNEGO negotiation with the KDC failed.",
+		action:     "Check the service principal name (-spn flag) and Kerberos realm configuration. Verify the KDC is reachable.",
+	}
 	errCircuitBreakerOpen = &proxyError{
 		statusCode: http.StatusBadGateway,
 		errorType:  "proxy_internal_error",
@@ -232,8 +244,15 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 	if err != nil {
 		pe := errTokenAcquisition
 		var cbErr *CircuitBreakerError
-		if errors.As(err, &cbErr) {
+		var credErr *CredentialError
+		var negErr *NegotiationError
+		switch {
+		case errors.As(err, &cbErr):
 			pe = errCircuitBreakerOpen
+		case errors.As(err, &credErr):
+			pe = errCredentialFailure
+		case errors.As(err, &negErr):
+			pe = errNegotiationFailure
 		}
 		slog.Error("failed to get SPNEGO token", "error", err, "error_type", pe.errorType, "client_addr", clientAddr, "upstream_addr", proxy, "method", req.Method, "host", req.Host)
 		writeHTTPError(conn, pe)
