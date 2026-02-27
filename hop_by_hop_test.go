@@ -144,7 +144,10 @@ func TestE2_RFC9112_InvalidContentLengthInResponse(t *testing.T) {
 	}
 	defer func() { _ = rawUpstream.Close() }()
 
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		conn, err := rawUpstream.Accept()
 		if err != nil {
 			return
@@ -160,6 +163,7 @@ func TestE2_RFC9112_InvalidContentLengthInResponse(t *testing.T) {
 			"body"
 		_, _ = conn.Write([]byte(resp))
 	}()
+	t.Cleanup(wg.Wait)
 
 	proxy := NewProxyUnderTest(t, rawUpstream.Addr().String())
 	defer proxy.Close()
@@ -489,7 +493,10 @@ func TestE2_RFC9112_MultipleDifferingCLInResponse(t *testing.T) {
 	}
 	defer func() { _ = rawUpstream.Close() }()
 
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		conn, err := rawUpstream.Accept()
 		if err != nil {
 			return
@@ -505,6 +512,7 @@ func TestE2_RFC9112_MultipleDifferingCLInResponse(t *testing.T) {
 			"hello"
 		_, _ = conn.Write([]byte(resp))
 	}()
+	t.Cleanup(wg.Wait)
 
 	proxy := NewProxyUnderTest(t, rawUpstream.Addr().String())
 	defer proxy.Close()
