@@ -382,8 +382,17 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 		upstreamReader := bufio.NewReader(proxyConn)
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
-			// E2 (RFC 9112 §6.1): if the response fails to parse due to
-			// invalid Content-Length, return 502 instead of raw-relaying.
+			// E2 (RFC 9112 §6.1): Go's ReadResponse rejects responses
+			// with invalid Content-Length (e.g. non-numeric values,
+			// conflicting duplicates). Detect this so we return 502
+			// instead of raw-relaying the malformed response.
+			//
+			// The match on the error string is deliberate: Go's
+			// net/http does not export a typed error for this case.
+			// If the wording changes in a future Go release, the
+			// worst outcome is falling through to the raw-relay path
+			// below — not a security issue, since Go already rejected
+			// the malformed response.
 			if strings.Contains(err.Error(), "Content-Length") {
 				slog.Error("invalid Content-Length in upstream response",
 					"error", err, "error_type", errInvalidContentLength.errorType,
