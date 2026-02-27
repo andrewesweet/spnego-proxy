@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -228,6 +229,71 @@ func TestE2_RFC9112_ValidContentLengthInResponsePassesThrough(t *testing.T) {
 	respBody, _ := io.ReadAll(resp.Body)
 	if string(respBody) != body {
 		t.Errorf("body: want %q, got %q", body, string(respBody))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// E1 — RFC 9112 §6.1: Response-side TE + CL conflict → CL removed
+// ---------------------------------------------------------------------------
+
+func TestE1_RFC9112_ResponseTEAndCLConflictRemovesCL(t *testing.T) {
+	// A raw upstream sends a response with both Transfer-Encoding: chunked
+	// and Content-Length. The proxy must strip Content-Length before
+	// relaying to the client per RFC 9112 §6.1.
+	rawUpstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = rawUpstream.Close() }()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		conn, err := rawUpstream.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		reader := bufio.NewReader(conn)
+		_, _ = http.ReadRequest(reader)
+		// Both Transfer-Encoding and Content-Length — the proxy must
+		// strip Content-Length and use chunked framing.
+		resp := "HTTP/1.1 200 OK\r\n" +
+			"Transfer-Encoding: chunked\r\n" +
+			"Content-Length: 5\r\n" +
+			"\r\n" +
+			"5\r\nhello\r\n0\r\n\r\n"
+		_, _ = conn.Write([]byte(resp))
+	}()
+	t.Cleanup(wg.Wait)
+
+	proxy := NewProxyUnderTest(t, rawUpstream.Addr().String())
+	defer proxy.Close()
+
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	req, _ := http.NewRequest("GET", "http://example.com/e1-resp", nil)
+	if err := req.WriteProxy(conn); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	assertStatusCode(t, resp, http.StatusOK)
+	assertHeaderAbsent(t, resp.Header, "Content-Length")
+
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "hello" {
+		t.Errorf("body: want %q, got %q", "hello", string(body))
 	}
 }
 
