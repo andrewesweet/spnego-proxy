@@ -252,11 +252,13 @@ func assertHeaderPresent(t *testing.T, header http.Header, key, expectedValue st
 	}
 }
 
-// assertHeaderAbsent fails the test if header[key] is present.
+// assertHeaderAbsent fails the test if header[key] is present.  It uses a
+// direct map lookup so that present-but-empty headers are detected correctly
+// (header.Get returns "" for both absent and empty).
 func assertHeaderAbsent(t *testing.T, header http.Header, key string) {
 	t.Helper()
-	if got := header.Get(key); got != "" {
-		t.Errorf("header %q: want absent, got %q", key, got)
+	if vals, ok := header[http.CanonicalHeaderKey(key)]; ok {
+		t.Errorf("header %q: want absent, got %q", key, vals)
 	}
 }
 

@@ -319,8 +319,8 @@ func TestSanitizeHopByHop_Unit(t *testing.T) {
 			}
 			sanitizeHopByHop(req)
 			for _, h := range tc.wantAbsent {
-				if v := tc.headers.Get(h); v != "" {
-					t.Errorf("header %q: want absent, got %q", h, v)
+				if vals, ok := tc.headers[http.CanonicalHeaderKey(h)]; ok {
+					t.Errorf("header %q: want absent, got %q", h, vals)
 				}
 			}
 			for k, v := range tc.wantKeep {
