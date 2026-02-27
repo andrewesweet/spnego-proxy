@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -634,7 +633,7 @@ func TestHopByHop_ProxyAuthInjectedAfterSanitization(t *testing.T) {
 	}
 
 	assertHeaderPresent(t, reqs[0].Header, "Proxy-Authorization",
-		fmt.Sprintf("Negotiate %s", proxy.Provider.token))
+		"Negotiate "+proxy.Provider.token)
 }
 
 // ---------------------------------------------------------------------------
