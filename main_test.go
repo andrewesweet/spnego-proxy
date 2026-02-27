@@ -1378,4 +1378,3 @@ func TestHandleClientAddsViaToConnectResponse(t *testing.T) {
 		t.Fatal("handleClient did not return within 5s")
 	}
 }
-
