@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -43,26 +44,17 @@ func TestA1_RFC9110_ViaPreservesExistingEntries(t *testing.T) {
 // TestA1_RFC9110_ViaAppendedOnResponse verifies that the proxy adds a Via
 // header to responses relayed from the upstream back to the client.
 func TestA1_RFC9110_ViaAppendedOnResponse(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, func(_ *http.Request) *http.Response {
-		return &http.Response{
-			StatusCode:    http.StatusOK,
-			ProtoMajor:    1,
-			ProtoMinor:    1,
-			Header:        make(http.Header),
-			Body:          http.NoBody,
-			ContentLength: 0,
-		}
-	})
-	defer upstream.Close()
+	upstream := NewMockUpstreamProxy(t, nil)
+	t.Cleanup(upstream.Close)
 
 	proxy := NewProxyUnderTest(t, upstream.Addr())
-	defer proxy.Close()
+	t.Cleanup(proxy.Close)
 
 	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
-	defer func() { _ = conn.Close() }()
+	t.Cleanup(func() { _ = conn.Close() })
 
 	req, _ := http.NewRequest("GET", "http://example.com/a1-resp", nil)
 	if err := req.WriteProxy(conn); err != nil {
@@ -73,7 +65,7 @@ func TestA1_RFC9110_ViaAppendedOnResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	t.Cleanup(func() { _ = resp.Body.Close() })
 
 	assertStatusCode(t, resp, http.StatusOK)
 
@@ -93,16 +85,16 @@ func TestA1_RFC9110_ViaAppendedOnResponse(t *testing.T) {
 // not forwarded to the upstream.
 func TestA2_RFC9110_LoopDetectionReturns502(t *testing.T) {
 	upstream := NewMockUpstreamProxy(t, nil)
-	defer upstream.Close()
+	t.Cleanup(upstream.Close)
 
 	proxy := NewProxyUnderTest(t, upstream.Addr())
-	defer proxy.Close()
+	t.Cleanup(proxy.Close)
 
 	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
-	defer func() { _ = conn.Close() }()
+	t.Cleanup(func() { _ = conn.Close() })
 
 	req, _ := http.NewRequest("GET", "http://example.com/a2-loop", nil)
 	req.Header.Set("Via", "1.1 "+testPseudonym)
@@ -114,18 +106,31 @@ func TestA2_RFC9110_LoopDetectionReturns502(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	t.Cleanup(func() { _ = resp.Body.Close() })
 
 	assertStatusCode(t, resp, http.StatusBadGateway)
 
-	ps := resp.Header.Get("Proxy-Status")
-	if !strings.Contains(ps, "proxy_loop_detected") {
-		t.Errorf("Proxy-Status: want proxy_loop_detected, got %q", ps)
+	wantPS := "spnego-proxy; error=proxy_loop_detected"
+	if ps := resp.Header.Get("Proxy-Status"); ps != wantPS {
+		t.Errorf("Proxy-Status: want %q, got %q", wantPS, ps)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "spnego-proxy error: proxy_loop_detected") {
+		t.Errorf("body should contain error type, got: %q", body)
+	}
+	if !strings.Contains(string(body), "routing loop was detected") {
+		t.Errorf("body should describe loop detection, got: %q", body)
 	}
 
 	// The upstream must NOT have received the request.
 	if n := len(upstream.Requests()); n != 0 {
 		t.Errorf("upstream received %d requests, want 0", n)
+	}
+
+	// Token acquisition must be skipped when a loop is detected.
+	if calls := proxy.Provider.calls.Load(); calls != 0 {
+		t.Errorf("expected 0 token provider calls, got %d", calls)
 	}
 }
 
@@ -138,11 +143,48 @@ func TestA2_RFC9110_DifferentPseudonymNotDetectedAsLoop(t *testing.T) {
 	})
 
 	via := upReq.Header.Get("Via")
-	if !strings.Contains(via, testPseudonym) {
-		t.Errorf("Via %q should contain our pseudonym %q", via, testPseudonym)
+	want := "1.1 some-other-proxy, HTTP/1.1 " + testPseudonym
+	if via != want {
+		t.Errorf("Via header: want %q, got %q", want, via)
 	}
-	if !strings.Contains(via, "some-other-proxy") {
-		t.Errorf("Via %q should preserve the existing entry", via)
+}
+
+// TestA2_RFC9110_SubstringPseudonymDetectedAsLoop documents that loop
+// detection uses strings.Contains, so a Via entry containing our pseudonym
+// as a substring triggers loop detection. This is acceptable because
+// production pseudonyms use random hex suffixes, making prefix collisions
+// extremely unlikely.
+func TestA2_RFC9110_SubstringPseudonymDetectedAsLoop(t *testing.T) {
+	upstream := NewMockUpstreamProxy(t, nil)
+	t.Cleanup(upstream.Close)
+
+	proxy := NewProxyUnderTest(t, upstream.Addr())
+	t.Cleanup(proxy.Close)
+
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// Via entry contains our pseudonym as a prefix of a longer identifier.
+	req, _ := http.NewRequest("GET", "http://example.com/a2-substr", nil)
+	req.Header.Set("Via", "1.1 "+testPseudonym+"-extended")
+	if err := req.WriteProxy(conn); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	// Current behavior: substring match triggers loop detection.
+	assertStatusCode(t, resp, http.StatusBadGateway)
+
+	if n := len(upstream.Requests()); n != 0 {
+		t.Errorf("upstream received %d requests, want 0", n)
 	}
 }
 
