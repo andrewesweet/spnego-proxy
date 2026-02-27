@@ -406,12 +406,12 @@ func TestSanitizeHopByHop_Unit(t *testing.T) {
 			}
 			sanitizeHopByHop(req)
 			for _, h := range tc.wantAbsent {
-				if vals, ok := tc.headers[http.CanonicalHeaderKey(h)]; ok {
+				if vals, ok := req.Header[http.CanonicalHeaderKey(h)]; ok {
 					t.Errorf("header %q: want absent, got %q", h, vals)
 				}
 			}
 			for k, v := range tc.wantKeep {
-				if got := tc.headers.Get(k); got != v {
+				if got := req.Header.Get(k); got != v {
 					t.Errorf("header %q: want %q, got %q", k, v, got)
 				}
 			}
