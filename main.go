@@ -441,7 +441,7 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 
 		// RFC 9112 §6.1: if both Transfer-Encoding and Content-Length
 		// are present in the response, remove Content-Length.
-		if resp.Header.Get("Transfer-Encoding") != "" && resp.Header.Get("Content-Length") != "" {
+		if len(resp.TransferEncoding) > 0 && resp.Header.Get("Content-Length") != "" {
 			resp.Header.Del("Content-Length")
 			// Reset to -1 so resp.Write uses chunked framing instead
 			// of a fixed-length body derived from the removed header.
