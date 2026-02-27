@@ -630,3 +630,44 @@ func TestHopByHop_ProxyAuthInjectedAfterSanitization(t *testing.T) {
 	assertHeaderPresent(t, reqs[0].Header, "Proxy-Authorization",
 		fmt.Sprintf("Negotiate %s", proxy.Provider.token))
 }
+
+// ---------------------------------------------------------------------------
+// Regression: Connection: Via cannot bypass loop detection
+// ---------------------------------------------------------------------------
+
+func TestHopByHop_ConnectionViaCannotBypassLoopDetection(t *testing.T) {
+	// A malicious client sends "Connection: Via" to try to strip the Via
+	// header before loop detection. The proxy must detect the loop because
+	// loop detection runs before sanitizeHopByHop.
+	upstream := NewMockUpstreamProxy(t, nil)
+	defer upstream.Close()
+
+	proxy := NewProxyUnderTest(t, upstream.Addr())
+	defer proxy.Close()
+
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	req, _ := http.NewRequest("GET", "http://example.com/loop-bypass", nil)
+	req.Header.Set("Via", "1.1 "+testPseudonym)
+	req.Header.Set("Connection", "Via")
+	if err := req.WriteProxy(conn); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// The proxy must return 502 with proxy_loop_detected, not forward
+	// the request with the Via header stripped.
+	assertStatusCode(t, resp, http.StatusBadGateway)
+	if ps := resp.Header.Get("Proxy-Status"); !strings.Contains(ps, "proxy_loop_detected") {
+		t.Errorf("expected Proxy-Status to contain 'proxy_loop_detected', got %q", ps)
+	}
+}
