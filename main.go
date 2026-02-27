@@ -87,8 +87,11 @@ func injectVia(header http.Header, proto, pseudonym string) {
 //
 // The function accepts *http.Request (not bare http.Header) because Go's
 // ReadRequest moves Transfer-Encoding into req.TransferEncoding and
-// Trailer into req.Trailer, removing both from req.Header. Clearing
-// those fields prevents WriteProxy from re-emitting them.
+// Trailer into req.Trailer, removing both from req.Header. We clear
+// req.Trailer so WriteProxy does not re-emit it. We intentionally
+// preserve req.TransferEncoding so the proxy relays the body framing
+// (e.g. chunked) to the upstream — clearing it would break body
+// forwarding.
 func sanitizeHopByHop(req *http.Request) {
 	header := req.Header
 
