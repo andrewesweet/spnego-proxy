@@ -608,6 +608,152 @@ func TestHandleClientCircuitBreakerErrorReturnsDistinctBody(t *testing.T) {
 	}
 }
 
+func TestHandleClientCredentialErrorReturnsDistinctBody(t *testing.T) {
+	// Verify that a CredentialError produces a body describing expired or
+	// unavailable credentials, distinct from the generic token acquisition
+	// error (issue #119).
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		for {
+			conn, err := upstream.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				buf := make([]byte, 4096)
+				_, _ = c.Read(buf)
+			}(conn)
+		}
+	}()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	provider := &stubTokenProvider{err: &CredentialError{
+		msg:   "could not acquire client credential: KDC_ERR_PREAUTH_FAILED",
+		cause: errors.New("KDC_ERR_PREAUTH_FAILED"),
+	}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
+	}()
+
+	req, _ := http.NewRequest("GET", "http://example.com/", nil)
+	_ = req.WriteProxy(client)
+
+	resp, err := http.ReadResponse(bufio.NewReader(client), req)
+	if err != nil {
+		t.Fatalf("expected HTTP error response, got read error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("expected status 502, got %d", resp.StatusCode)
+	}
+	if ps := resp.Header.Get("Proxy-Status"); ps != "spnego-proxy; error=proxy_internal_error" {
+		t.Errorf("expected Proxy-Status header %q, got %q", "spnego-proxy; error=proxy_internal_error", ps)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "Kerberos credentials are expired or unavailable") {
+		t.Errorf("expected body to describe credential failure, got: %q", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "kinit") {
+		t.Errorf("expected body to suggest kinit, got: %q", bodyStr)
+	}
+	// The credential error body should NOT contain the generic token error message.
+	if strings.Contains(bodyStr, "failed to acquire a SPNEGO authentication token") {
+		t.Errorf("expected credential error body to differ from generic token error, got: %q", bodyStr)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return within 5s")
+	}
+}
+
+func TestHandleClientNegotiationErrorReturnsDistinctBody(t *testing.T) {
+	// Verify that a NegotiationError produces a body describing a negotiation
+	// failure, distinct from both the generic token error and the credential
+	// error (issue #119).
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		for {
+			conn, err := upstream.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				buf := make([]byte, 4096)
+				_, _ = c.Read(buf)
+			}(conn)
+		}
+	}()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	provider := &stubTokenProvider{err: &NegotiationError{
+		msg:   "could not initialize context: SPN mismatch",
+		cause: errors.New("SPN mismatch"),
+	}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
+	}()
+
+	req, _ := http.NewRequest("GET", "http://example.com/", nil)
+	_ = req.WriteProxy(client)
+
+	resp, err := http.ReadResponse(bufio.NewReader(client), req)
+	if err != nil {
+		t.Fatalf("expected HTTP error response, got read error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("expected status 502, got %d", resp.StatusCode)
+	}
+	if ps := resp.Header.Get("Proxy-Status"); ps != "spnego-proxy; error=proxy_internal_error" {
+		t.Errorf("expected Proxy-Status header %q, got %q", "spnego-proxy; error=proxy_internal_error", ps)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "SPNEGO negotiation with the KDC failed") {
+		t.Errorf("expected body to describe negotiation failure, got: %q", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "service principal name") {
+		t.Errorf("expected body to suggest checking SPN, got: %q", bodyStr)
+	}
+	// The negotiation error body should NOT contain the generic token error message.
+	if strings.Contains(bodyStr, "failed to acquire a SPNEGO authentication token") {
+		t.Errorf("expected negotiation error body to differ from generic token error, got: %q", bodyStr)
+	}
+	// The negotiation error body should NOT contain the credential error message.
+	if strings.Contains(bodyStr, "Kerberos credentials are expired or unavailable") {
+		t.Errorf("expected negotiation error body to differ from credential error, got: %q", bodyStr)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return within 5s")
+	}
+}
+
 func TestHandleClientTokenErrorCONNECTReturns502(t *testing.T) {
 	// Verify CONNECT requests also get a 502 (this is the common case
 	// for HTTPS traffic through a proxy, and what curl uses).

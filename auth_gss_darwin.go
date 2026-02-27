@@ -66,12 +66,18 @@ func (g *GSSTokenProvider) GetToken() (string, error) {
 	if result.error_code != 0 {
 		msg := C.GoString(&result.error_msg[0])
 		if ccname := os.Getenv("KRB5CCNAME"); ccname != "" {
-			return "", fmt.Errorf("GSS-API error: %s (KRB5CCNAME=%s; try 'klist' to check credentials or 'kinit' to refresh)", msg, ccname)
+			return "", &CredentialError{
+				msg: fmt.Sprintf("GSS-API error: %s (KRB5CCNAME=%s; try 'klist' to check credentials or 'kinit' to refresh)", msg, ccname),
+			}
 		}
-		return "", fmt.Errorf("GSS-API error: %s (try 'klist' to check credentials or 'kinit' to refresh)", msg)
+		return "", &CredentialError{
+			msg: fmt.Sprintf("GSS-API error: %s (try 'klist' to check credentials or 'kinit' to refresh)", msg),
+		}
 	}
 	if result.data == nil || result.length == 0 {
-		return "", fmt.Errorf("GSS-API returned empty token")
+		return "", &NegotiationError{
+			msg: "GSS-API returned empty token",
+		}
 	}
 	defer C.free_token_data(result.data)
 
