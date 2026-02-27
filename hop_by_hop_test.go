@@ -130,6 +130,12 @@ func TestE1_RFC9112_TEAndCLConflictRemovesCL(t *testing.T) {
 
 	// Content-Length must be absent.
 	assertHeaderAbsent(t, reqs[0].Header, "Content-Length")
+
+	// Transfer-Encoding (chunked framing) must still be present so the
+	// upstream can correctly decode the body.
+	if len(reqs[0].TransferEncoding) == 0 || reqs[0].TransferEncoding[0] != "chunked" {
+		t.Errorf("expected Transfer-Encoding: chunked to be preserved, got %v", reqs[0].TransferEncoding)
+	}
 }
 
 // ---------------------------------------------------------------------------
