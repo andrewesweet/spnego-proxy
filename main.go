@@ -319,6 +319,8 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 	}
 	// RFC 9110 §7.6.3: detect routing loops by checking whether the
 	// incoming Via header already contains this proxy instance's pseudonym.
+	// This must precede sanitizeHopByHop: a client sending
+	// "Connection: Via" would strip Via before the loop check otherwise.
 	if prior := req.Header.Get("Via"); prior != "" && strings.Contains(prior, pseudonym) {
 		slog.Warn("proxy loop detected", "via", prior, "pseudonym", pseudonym, "client_addr", clientAddr, "method", req.Method, "host", req.Host)
 		writeHTTPError(conn, errProxyLoopDetected)
