@@ -309,6 +309,17 @@ func TestSanitizeHopByHop_Unit(t *testing.T) {
 			// Connection itself is removed; no crash on empty values.
 			wantAbsent: []string{"Connection"},
 		},
+		{
+			name: "Connection names Proxy-Authorization",
+			// A malicious client could try to strip the proxy's own
+			// Proxy-Authorization by naming it in Connection. This is
+			// safe because sanitizeHopByHop runs before token injection.
+			headers: http.Header{
+				"Connection":          {"Proxy-Authorization"},
+				"Proxy-Authorization": {"Basic attacker"},
+			},
+			wantAbsent: []string{"Connection", "Proxy-Authorization"},
+		},
 	}
 
 	for _, tc := range tests {
