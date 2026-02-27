@@ -252,11 +252,13 @@ func assertHeaderPresent(t *testing.T, header http.Header, key, expectedValue st
 	}
 }
 
-// assertHeaderAbsent fails the test if header[key] is present.
+// assertHeaderAbsent fails the test if header[key] is present.  It uses a
+// direct map lookup so that present-but-empty headers are detected correctly
+// (header.Get returns "" for both absent and empty).
 func assertHeaderAbsent(t *testing.T, header http.Header, key string) {
 	t.Helper()
-	if got := header.Get(key); got != "" {
-		t.Errorf("header %q: want absent, got %q", key, got)
+	if vals, ok := header[http.CanonicalHeaderKey(key)]; ok {
+		t.Errorf("header %q: want absent, got %q", key, vals)
 	}
 }
 
@@ -266,6 +268,47 @@ func assertStatusCode(t *testing.T, resp *http.Response, expected int) {
 	if resp.StatusCode != expected {
 		t.Errorf("status code: want %d, got %d", expected, resp.StatusCode)
 	}
+}
+
+// proxyRoundTrip sends a GET request with the given headers through a fresh
+// proxy→upstream chain and returns the upstream's recorded request.  It
+// assumes the default 200 OK mock response.
+func proxyRoundTrip(t *testing.T, headers http.Header) *RecordedRequest {
+	t.Helper()
+	upstream := NewMockUpstreamProxy(t, nil)
+	t.Cleanup(upstream.Close)
+
+	proxy := NewProxyUnderTest(t, upstream.Addr())
+	t.Cleanup(proxy.Close)
+
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	req, _ := http.NewRequest("GET", "http://example.com/test", nil)
+	for k, vs := range headers {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	if err := req.WriteProxy(conn); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	_ = resp.Body.Close()
+	assertStatusCode(t, resp, http.StatusOK)
+
+	reqs := upstream.Requests()
+	if len(reqs) != 1 {
+		t.Fatalf("upstream received %d requests, want 1", len(reqs))
+	}
+	return reqs[0]
 }
 
 // ---------------------------------------------------------------------------

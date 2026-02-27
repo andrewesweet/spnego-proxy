@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -77,6 +78,88 @@ func injectVia(header http.Header, proto, pseudonym string) {
 	} else {
 		header.Set("Via", viaEntry)
 	}
+}
+
+// sanitizeHopByHop removes hop-by-hop headers from the request before
+// forwarding to the upstream proxy per RFC 9110 §7.6.1. It also handles
+// the Transfer-Encoding / Content-Length conflict (RFC 9112 §6.1) and
+// strips the client's Proxy-Authorization (RFC 9110 §11.7.1).
+//
+// The function accepts *http.Request (not bare http.Header) because Go's
+// ReadRequest moves Transfer-Encoding into req.TransferEncoding and
+// Trailer into req.Trailer, removing both from req.Header. We clear
+// req.Trailer so WriteProxy does not re-emit it. We intentionally
+// preserve req.TransferEncoding so the proxy relays the body framing
+// (e.g. chunked) to the upstream — clearing it would break body
+// forwarding.
+func sanitizeHopByHop(req *http.Request) {
+	header := req.Header
+
+	// B1 (RFC 9110 §7.6.1): parse the Connection header for additional
+	// field names to remove, then remove Connection itself.
+	for _, v := range header["Connection"] {
+		for _, name := range strings.Split(v, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				header.Del(name)
+			}
+		}
+	}
+	header.Del("Connection")
+
+	// Well-known hop-by-hop headers (RFC 9110 §7.6.1, RFC 9113 §8.2.2).
+	header.Del("Keep-Alive")
+	header.Del("Proxy-Connection") // K3: non-standard hop-by-hop
+	header.Del("TE")
+	header.Del("Trailer")
+	req.Trailer = nil     // ReadRequest moves Trailer into this field
+	header.Del("Upgrade") // J2: strip unless proxy supports the protocol
+
+	// B2 (RFC 9110 §11.7.1): consume the client's Proxy-Authorization.
+	// The proxy injects its own SPNEGO token after this function returns.
+	header.Del("Proxy-Authorization")
+
+	// E1 (RFC 9112 §6.1): when both Transfer-Encoding and Content-Length
+	// are present, remove Content-Length to prevent request smuggling.
+	// ReadRequest moves Transfer-Encoding into req.TransferEncoding, so
+	// we check that field rather than the header map.
+	if len(req.TransferEncoding) > 0 && header.Get("Content-Length") != "" {
+		header.Del("Content-Length")
+	}
+}
+
+// validateResponseContentLength checks the upstream response for invalid
+// Content-Length values per RFC 9112 §6.1. It returns a non-nil *proxyError
+// when the response must be rejected with 502.
+func validateResponseContentLength(resp *http.Response) *proxyError {
+	clValues := resp.Header["Content-Length"]
+	if len(clValues) == 0 {
+		return nil
+	}
+
+	// Collect all individual values; headers may be comma-separated per
+	// RFC 9110 §5.6.1. Compare numerically so that semantically equal
+	// values like "042" and "42" are not rejected.
+	var first uint64
+	var seen bool
+	for _, v := range clValues {
+		for _, part := range strings.Split(v, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			n, err := strconv.ParseUint(part, 10, 64)
+			if err != nil {
+				return errInvalidContentLength
+			}
+			if !seen {
+				first = n
+				seen = true
+			} else if n != first {
+				return errInvalidContentLength
+			}
+		}
+	}
+	return nil
 }
 
 // TokenProvider acquires SPNEGO tokens for proxy authentication.
@@ -177,6 +260,12 @@ var (
 		message:    "A routing loop was detected: the request has already passed through this proxy instance.",
 		action:     "Check the proxy chain configuration for circular routing. The Via header in the request contains this proxy's identity.",
 	}
+	errInvalidContentLength = &proxyError{
+		statusCode: http.StatusBadGateway,
+		errorType:  "http_protocol_error",
+		message:    "The upstream proxy sent a response with an invalid Content-Length header.",
+		action:     "This may indicate a misconfigured upstream proxy or an attempt at response splitting. Contact the upstream proxy administrator.",
+	}
 )
 
 // writeHTTPError sends a structured HTTP error response to the client with an
@@ -234,11 +323,16 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 	}
 	// RFC 9110 §7.6.3: detect routing loops by checking whether the
 	// incoming Via header already contains this proxy instance's pseudonym.
+	// This must precede sanitizeHopByHop: a client sending
+	// "Connection: Via" would strip Via before the loop check otherwise.
 	if prior := req.Header.Get("Via"); prior != "" && strings.Contains(prior, pseudonym) {
 		slog.Warn("proxy loop detected", "via", prior, "pseudonym", pseudonym, "client_addr", clientAddr, "method", req.Method, "host", req.Host)
 		writeHTTPError(conn, errProxyLoopDetected)
 		return
 	}
+
+	// Remove hop-by-hop headers before forwarding (RFC 9110 §7.6.1).
+	sanitizeHopByHop(req)
 
 	token, err := provider.GetToken()
 	if err != nil {
@@ -304,6 +398,24 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 		upstreamReader := bufio.NewReader(proxyConn)
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
+			// E2 (RFC 9112 §6.1): Go's ReadResponse rejects responses
+			// with invalid Content-Length (e.g. non-numeric values,
+			// conflicting duplicates). Detect this so we return 502
+			// instead of raw-relaying the malformed response.
+			//
+			// The match on the error string is deliberate: Go's
+			// net/http does not export a typed error for this case.
+			// If the wording changes in a future Go release, the
+			// worst outcome is falling through to the raw-relay path
+			// below — not a security issue, since Go already rejected
+			// the malformed response.
+			if strings.Contains(err.Error(), "Content-Length") {
+				slog.Error("invalid Content-Length in upstream response",
+					"error", err, "error_type", errInvalidContentLength.errorType,
+					"client_addr", conn.RemoteAddr())
+				writeHTTPError(conn, errInvalidContentLength)
+				return
+			}
 			// Deviation from RFC 9110 §7.6.3 (MUST add Via): when the
 			// upstream response is unparseable, injecting a Via header is
 			// impossible. We relay raw bytes instead of returning an error
@@ -318,6 +430,30 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 			return
 		}
 		defer func() { _ = resp.Body.Close() }()
+
+		// E2 (RFC 9112 §6.1): reject responses with invalid Content-Length.
+		// Defense-in-depth: Go's ReadResponse currently rejects most
+		// invalid Content-Length values before this point, but our
+		// validator catches edge cases (e.g. comma-separated differing
+		// values) and guards against future Go stdlib changes.
+		if pe := validateResponseContentLength(resp); pe != nil {
+			slog.Error("invalid Content-Length in upstream response",
+				"error_type", pe.errorType,
+				"content_length", resp.Header["Content-Length"],
+				"client_addr", conn.RemoteAddr(),
+				"upstream_addr", proxyConn.RemoteAddr())
+			writeHTTPError(conn, pe)
+			return
+		}
+
+		// RFC 9112 §6.1: if both Transfer-Encoding and Content-Length
+		// are present in the response, remove Content-Length.
+		if len(resp.TransferEncoding) > 0 && resp.Header.Get("Content-Length") != "" {
+			resp.Header.Del("Content-Length")
+			// Reset to -1 so resp.Write uses chunked framing instead
+			// of a fixed-length body derived from the removed header.
+			resp.ContentLength = -1
+		}
 
 		// RFC 9110 §7.6.3: a forward proxy MUST add Via to responses.
 		injectVia(resp.Header, resp.Proto, pseudonym)
