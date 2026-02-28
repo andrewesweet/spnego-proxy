@@ -159,28 +159,48 @@ func (m *MockUpstreamProxy) Close() {
 // backed by a stubTokenProvider.  It removes the per-test boilerplate of
 // creating listeners, token providers, and pseudonyms.
 //
-// Exported fields (Provider, Pseudonym, DialTimeout, ReadTimeout, KeepAlive)
-// may be customised after construction but before the first client connects.
+// The Provider field may be customised after construction but before the
+// first client connects. ConnectPorts and Forwarding must be set via
+// SetConnectPorts and SetForwardingConfig to avoid data races with the
+// accept loop goroutine.
 type ProxyUnderTest struct {
 	listener net.Listener
 
-	// Provider is the stub token provider used by the proxy.  Tests may
-	// replace it or adjust its fields before sending requests.
+	// Provider is the stub token provider shared with cfg.Provider.
+	// Tests may mutate its fields (e.g., Provider.err) but must NOT replace
+	// the pointer — cfg.Provider would still reference the old value.
 	Provider *stubTokenProvider
 
-	// Pseudonym is the Via header pseudonym.  Defaults to testPseudonym.
-	Pseudonym string
+	// mu protects cfg so mutable fields (ConnectPorts, Forwarding) can
+	// be set after construction without a data race with acceptLoop.
+	mu  sync.RWMutex
+	cfg ProxyConfig
 
-	// DialTimeout, ReadTimeout, and KeepAlive mirror the handleClient
-	// parameters.  Defaults are generous (5 s) so tests that do not care
-	// about timeouts need not set them.
-	DialTimeout time.Duration
-	ReadTimeout time.Duration
-	KeepAlive   time.Duration
+	wg     sync.WaitGroup
+	closed chan struct{}
+}
 
-	upstream string
-	wg       sync.WaitGroup
-	closed   chan struct{}
+// getConfig returns a snapshot of the current ProxyConfig (thread-safe).
+func (p *ProxyUnderTest) getConfig() ProxyConfig {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.cfg
+}
+
+// SetConnectPorts sets the allowed CONNECT port list.
+// Thread-safe; may be called at any time after construction.
+func (p *ProxyUnderTest) SetConnectPorts(ports []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cfg.ConnectPorts = ports
+}
+
+// SetForwardingConfig sets the ForwardingConfig.
+// Thread-safe; may be called at any time after construction.
+func (p *ProxyUnderTest) SetForwardingConfig(fwd ForwardingConfig) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cfg.Forwarding = fwd
 }
 
 // NewProxyUnderTest creates and starts a proxy listening on a dynamic port.
@@ -191,15 +211,19 @@ func NewProxyUnderTest(t *testing.T, upstream string) *ProxyUnderTest {
 	if err != nil {
 		t.Fatalf("ProxyUnderTest: listen: %v", err)
 	}
+	provider := &stubTokenProvider{token: "test-token"}
 	p := &ProxyUnderTest{
-		listener:    l,
-		Provider:    &stubTokenProvider{token: "test-token"},
-		upstream:    upstream,
-		Pseudonym:   testPseudonym,
-		DialTimeout: 5 * time.Second,
-		ReadTimeout: 5 * time.Second,
-		KeepAlive:   0,
-		closed:      make(chan struct{}),
+		listener: l,
+		Provider: provider,
+		cfg: ProxyConfig{
+			Upstream:    upstream,
+			Provider:    provider,
+			Pseudonym:   testPseudonym,
+			DialTimeout: 5 * time.Second,
+			ReadTimeout: 5 * time.Second,
+			KeepAlive:   0,
+		},
+		closed: make(chan struct{}),
 	}
 	p.wg.Add(1)
 	go p.acceptLoop()
@@ -221,8 +245,7 @@ func (p *ProxyUnderTest) acceptLoop() {
 		p.wg.Add(1)
 		go func() {
 			defer p.wg.Done()
-			handleClient(conn, p.upstream, p.Provider, p.Pseudonym,
-				p.DialTimeout, p.ReadTimeout, p.KeepAlive)
+			handleClient(conn, p.getConfig())
 		}()
 	}
 }
@@ -309,6 +332,69 @@ func proxyRoundTrip(t *testing.T, headers http.Header) *RecordedRequest {
 		t.Fatalf("upstream received %d requests, want 1", len(reqs))
 	}
 	return reqs[0]
+}
+
+// proxyRawRoundTrip creates a fresh upstream+proxy pair, sends the given raw
+// HTTP request bytes through the proxy, and returns the response and recorded
+// upstream requests. Optional setup funcs can configure the ProxyUnderTest
+// before the first request (e.g., SetConnectPorts).
+func proxyRawRoundTrip(t *testing.T, rawReq string, setup ...func(*ProxyUnderTest)) (*http.Response, []*RecordedRequest) {
+	t.Helper()
+	return proxyRawRoundTripWithUpstream(t, rawReq, nil, setup...)
+}
+
+// proxyRawRoundTripWithUpstream is like proxyRawRoundTrip but accepts a custom
+// upstream response function. If respFunc is nil, the default 200 OK mock is
+// used.
+func proxyRawRoundTripWithUpstream(t *testing.T, rawReq string, respFunc func(*http.Request) *http.Response, setup ...func(*ProxyUnderTest)) (*http.Response, []*RecordedRequest) {
+	t.Helper()
+	upstream := NewMockUpstreamProxy(t, respFunc)
+	t.Cleanup(upstream.Close)
+	proxy := NewProxyUnderTest(t, upstream.Addr())
+	for _, fn := range setup {
+		fn(proxy)
+	}
+	t.Cleanup(proxy.Close)
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if _, err := conn.Write([]byte(rawReq)); err != nil {
+		t.Fatalf("write raw request: %v", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	return resp, upstream.Requests()
+}
+
+// waitForDone waits for a done channel to be closed, failing the test if it
+// does not close within 5 seconds. This replaces the repeated
+// select { case <-done: case <-time.After(5*time.Second): t.Fatal(...) }
+// pattern used in tests that launch handleClient in a goroutine.
+func waitForDone(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return within 5s")
+	}
+}
+
+// defaultTestConfig returns a ProxyConfig suitable for most tests. The
+// upstream address and provider are required; all other fields use sensible
+// defaults (testPseudonym, 5 s timeouts, no keep-alive).
+func defaultTestConfig(upstream string, provider TokenProvider) ProxyConfig {
+	return ProxyConfig{
+		Upstream:    upstream,
+		Provider:    provider,
+		Pseudonym:   testPseudonym,
+		DialTimeout: 5 * time.Second,
+		ReadTimeout: 5 * time.Second,
+	}
 }
 
 // ---------------------------------------------------------------------------

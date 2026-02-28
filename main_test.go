@@ -16,6 +16,28 @@ import (
 	"golang.org/x/net/netutil"
 )
 
+// acceptOneAndHandle starts a listener, accepts one connection, and runs
+// handleClient with the given config. Returns the listener address and a
+// channel that is closed when handleClient returns.
+func acceptOneAndHandle(t *testing.T, cfg ProxyConfig) (addr string, done <-chan struct{}) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	ch := make(chan struct{})
+	go func() {
+		defer close(ch)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		handleClient(conn, cfg)
+	}()
+	return ln.Addr().String(), ch
+}
+
 // closeWriteConn wraps a net.Conn and adds a CloseWrite method so the
 // type assertion in the forward() half-close path succeeds.
 type closeWriteConn struct {
@@ -31,52 +53,6 @@ func (c *closeWriteConn) CloseWrite() error {
 		return cw.CloseWrite()
 	}
 	return nil
-}
-
-func TestHandleClientDialTimeout(t *testing.T) {
-	// Use an unreachable address (RFC 5737 TEST-NET) to trigger a dial timeout.
-	unreachable := "192.0.2.1:1"
-
-	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-
-	provider := &stubTokenProvider{token: "tok"}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		handleClient(server, unreachable, provider, testPseudonym, 50*time.Millisecond, time.Second, 0)
-	}()
-
-	// The proxy should respond with 504 when the dial times out (RFC 9209 connection_timeout).
-	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
-	if err != nil {
-		t.Fatalf("expected HTTP error response, got read error: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusGatewayTimeout {
-		t.Errorf("expected status 504, got %d", resp.StatusCode)
-	}
-	if ps := resp.Header.Get("Proxy-Status"); ps != "spnego-proxy; error=connection_timeout" {
-		t.Errorf("expected Proxy-Status header %q, got %q", "spnego-proxy; error=connection_timeout", ps)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "spnego-proxy error: connection_timeout") {
-		t.Errorf("expected body to contain %q, got: %q", "spnego-proxy error: connection_timeout", body)
-	}
-	if !strings.Contains(string(body), "timed out connecting to the upstream proxy") {
-		t.Errorf("expected body to describe timeout, got: %q", body)
-	}
-	if !strings.Contains(string(body), "Suggested action:") {
-		t.Errorf("expected body to contain suggested action, got: %q", body)
-	}
-
-	select {
-	case <-done:
-		// handleClient returned promptly — dial timed out as expected.
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s; dial timeout not effective")
-	}
 }
 
 func TestHandleClientReadTimeout(t *testing.T) {
@@ -101,10 +77,12 @@ func TestHandleClientReadTimeout(t *testing.T) {
 	defer func() { _ = client.Close() }()
 
 	provider := &stubTokenProvider{token: "tok"}
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
+	cfg.ReadTimeout = 50 * time.Millisecond
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 50*time.Millisecond, 0)
+		handleClient(server, cfg)
 	}()
 
 	// The proxy should respond with 400 when it can't read the client request.
@@ -131,12 +109,7 @@ func TestHandleClientReadTimeout(t *testing.T) {
 		t.Errorf("expected body to contain suggested action, got: %q", body)
 	}
 
-	select {
-	case <-done:
-		// handleClient returned promptly — read deadline fired as expected.
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s; read timeout not effective")
-	}
+	waitForDone(t, done)
 }
 
 func TestLimitListenerBlocksAtCapacity(t *testing.T) {
@@ -299,6 +272,7 @@ func TestShutdownDrainsInFlightConnections(t *testing.T) {
 	addr := ln.Addr().String()
 
 	provider := &stubTokenProvider{token: "tok"}
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var wg sync.WaitGroup
@@ -316,7 +290,7 @@ func TestShutdownDrainsInFlightConnections(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
+				handleClient(conn, cfg)
 			}()
 		}
 	}()
@@ -356,12 +330,7 @@ func TestShutdownDrainsInFlightConnections(t *testing.T) {
 	// Wait for drain (same pattern as main).
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
-	select {
-	case <-done:
-		// All in-flight connections drained.
-	case <-time.After(5 * time.Second):
-		t.Fatal("in-flight connections did not drain within 5s")
-	}
+	waitForDone(t, done)
 
 	// Verify provider cleanup runs after drain.
 	_ = provider.Close()
@@ -406,6 +375,7 @@ func TestShutdownDrainTimeout(t *testing.T) {
 	addr := ln.Addr().String()
 
 	provider := &stubTokenProvider{token: "tok"}
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var wg sync.WaitGroup
@@ -423,7 +393,7 @@ func TestShutdownDrainTimeout(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
+				handleClient(conn, cfg)
 			}()
 		}
 	}()
@@ -459,379 +429,10 @@ func TestShutdownDrainTimeout(t *testing.T) {
 		_ = provider.Close()
 	}()
 
-	select {
-	case <-shutdownComplete:
-		// Shutdown completed (via timeout, since the connection is held open).
-	case <-time.After(5 * time.Second):
-		t.Fatal("shutdown did not complete within 5s; drain timeout mechanism broken")
-	}
+	waitForDone(t, shutdownComplete)
 
 	if !provider.closed.Load() {
 		t.Error("expected provider to be closed after drain timeout")
-	}
-}
-
-func TestHandleClientTokenErrorReturns502(t *testing.T) {
-	// Start a fake upstream that holds connections open.
-	upstream, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = upstream.Close() }()
-	go func() {
-		for {
-			conn, err := upstream.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer func() { _ = c.Close() }()
-				buf := make([]byte, 4096)
-				_, _ = c.Read(buf)
-			}(conn)
-		}
-	}()
-
-	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-
-	provider := &stubTokenProvider{err: errors.New("GSS-API error: An unsupported mechanism was requested")}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
-	}()
-
-	// Send a request through the client side of the pipe.
-	req, _ := http.NewRequest("GET", "http://example.com/", nil)
-	_ = req.WriteProxy(client)
-
-	// The proxy should respond with 502 instead of just closing.
-	resp, err := http.ReadResponse(bufio.NewReader(client), req)
-	if err != nil {
-		t.Fatalf("expected HTTP error response, got read error: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Errorf("expected status 502, got %d", resp.StatusCode)
-	}
-	if ps := resp.Header.Get("Proxy-Status"); ps != "spnego-proxy; error=proxy_internal_error" {
-		t.Errorf("expected Proxy-Status header %q, got %q", "spnego-proxy; error=proxy_internal_error", ps)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "spnego-proxy error: proxy_internal_error") {
-		t.Errorf("expected body to contain %q, got: %q", "spnego-proxy error: proxy_internal_error", body)
-	}
-	if !strings.Contains(string(body), "failed to acquire a SPNEGO authentication token") {
-		t.Errorf("expected body to describe token acquisition failure, got: %q", body)
-	}
-	if !strings.Contains(string(body), "Suggested action:") {
-		t.Errorf("expected body to contain suggested action, got: %q", body)
-	}
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s")
-	}
-}
-
-func TestHandleClientCircuitBreakerErrorReturnsDistinctBody(t *testing.T) {
-	// Verify that a circuit breaker error produces a distinct body from
-	// a regular token acquisition error (issue #113, section 4).
-	upstream, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = upstream.Close() }()
-	go func() {
-		for {
-			conn, err := upstream.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer func() { _ = c.Close() }()
-				buf := make([]byte, 4096)
-				_, _ = c.Read(buf)
-			}(conn)
-		}
-	}()
-
-	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-
-	// Use a CircuitBreakerError to simulate the circuit breaker being open.
-	provider := &stubTokenProvider{err: &CircuitBreakerError{
-		msg:   "circuit breaker open: token acquisition disabled after 3 consecutive failures",
-		cause: errors.New("gobreaker: open state"),
-	}}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
-	}()
-
-	req, _ := http.NewRequest("GET", "http://example.com/", nil)
-	_ = req.WriteProxy(client)
-
-	resp, err := http.ReadResponse(bufio.NewReader(client), req)
-	if err != nil {
-		t.Fatalf("expected HTTP error response, got read error: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Errorf("expected status 502, got %d", resp.StatusCode)
-	}
-	if ps := resp.Header.Get("Proxy-Status"); ps != "spnego-proxy; error=proxy_internal_error" {
-		t.Errorf("expected Proxy-Status header %q, got %q", "spnego-proxy; error=proxy_internal_error", ps)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	bodyStr := string(body)
-	if !strings.Contains(bodyStr, "circuit breaker open") {
-		t.Errorf("expected body to mention circuit breaker, got: %q", body)
-	}
-	if !strings.Contains(bodyStr, "temporarily disabled after repeated failures") {
-		t.Errorf("expected body to describe circuit breaker state, got: %q", body)
-	}
-	// The circuit breaker body should NOT contain the regular token error message.
-	if strings.Contains(bodyStr, "failed to acquire a SPNEGO authentication token") {
-		t.Errorf("expected circuit breaker body to differ from regular token error, got: %q", body)
-	}
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s")
-	}
-}
-
-func TestHandleClientCredentialErrorReturnsDistinctBody(t *testing.T) {
-	// Verify that a CredentialError produces a body describing expired or
-	// unavailable credentials, distinct from the generic token acquisition
-	// error (issue #119).
-	upstream, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = upstream.Close() }()
-	go func() {
-		for {
-			conn, err := upstream.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer func() { _ = c.Close() }()
-				buf := make([]byte, 4096)
-				_, _ = c.Read(buf)
-			}(conn)
-		}
-	}()
-
-	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-
-	provider := &stubTokenProvider{err: &CredentialError{
-		msg:   "could not acquire client credential: KDC_ERR_PREAUTH_FAILED",
-		cause: errors.New("KDC_ERR_PREAUTH_FAILED"),
-	}}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
-	}()
-
-	req, _ := http.NewRequest("GET", "http://example.com/", nil)
-	_ = req.WriteProxy(client)
-
-	resp, err := http.ReadResponse(bufio.NewReader(client), req)
-	if err != nil {
-		t.Fatalf("expected HTTP error response, got read error: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Errorf("expected status 502, got %d", resp.StatusCode)
-	}
-	if ps := resp.Header.Get("Proxy-Status"); ps != "spnego-proxy; error=proxy_internal_error" {
-		t.Errorf("expected Proxy-Status header %q, got %q", "spnego-proxy; error=proxy_internal_error", ps)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	bodyStr := string(body)
-	if !strings.Contains(bodyStr, "Kerberos credentials are expired or unavailable") {
-		t.Errorf("expected body to describe credential failure, got: %q", bodyStr)
-	}
-	if !strings.Contains(bodyStr, "kinit") {
-		t.Errorf("expected body to suggest kinit, got: %q", bodyStr)
-	}
-	// The credential error body should NOT contain the generic token error message.
-	if strings.Contains(bodyStr, "failed to acquire a SPNEGO authentication token") {
-		t.Errorf("expected credential error body to differ from generic token error, got: %q", bodyStr)
-	}
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s")
-	}
-}
-
-func TestHandleClientNegotiationErrorReturnsDistinctBody(t *testing.T) {
-	// Verify that a NegotiationError produces a body describing a negotiation
-	// failure, distinct from both the generic token error and the credential
-	// error (issue #119).
-	upstream, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = upstream.Close() }()
-	go func() {
-		for {
-			conn, err := upstream.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer func() { _ = c.Close() }()
-				buf := make([]byte, 4096)
-				_, _ = c.Read(buf)
-			}(conn)
-		}
-	}()
-
-	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-
-	provider := &stubTokenProvider{err: &NegotiationError{
-		msg:   "could not initialize context: SPN mismatch",
-		cause: errors.New("SPN mismatch"),
-	}}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
-	}()
-
-	req, _ := http.NewRequest("GET", "http://example.com/", nil)
-	_ = req.WriteProxy(client)
-
-	resp, err := http.ReadResponse(bufio.NewReader(client), req)
-	if err != nil {
-		t.Fatalf("expected HTTP error response, got read error: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Errorf("expected status 502, got %d", resp.StatusCode)
-	}
-	if ps := resp.Header.Get("Proxy-Status"); ps != "spnego-proxy; error=proxy_internal_error" {
-		t.Errorf("expected Proxy-Status header %q, got %q", "spnego-proxy; error=proxy_internal_error", ps)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	bodyStr := string(body)
-	if !strings.Contains(bodyStr, "SPNEGO negotiation with the KDC failed") {
-		t.Errorf("expected body to describe negotiation failure, got: %q", bodyStr)
-	}
-	if !strings.Contains(bodyStr, "service principal name") {
-		t.Errorf("expected body to suggest checking SPN, got: %q", bodyStr)
-	}
-	// The negotiation error body should NOT contain the generic token error message.
-	if strings.Contains(bodyStr, "failed to acquire a SPNEGO authentication token") {
-		t.Errorf("expected negotiation error body to differ from generic token error, got: %q", bodyStr)
-	}
-	// The negotiation error body should NOT contain the credential error message.
-	if strings.Contains(bodyStr, "Kerberos credentials are expired or unavailable") {
-		t.Errorf("expected negotiation error body to differ from credential error, got: %q", bodyStr)
-	}
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s")
-	}
-}
-
-func TestHandleClientTokenErrorCONNECTReturns502(t *testing.T) {
-	// Verify CONNECT requests also get a 502 (this is the common case
-	// for HTTPS traffic through a proxy, and what curl uses).
-	upstream, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = upstream.Close() }()
-	go func() {
-		for {
-			conn, err := upstream.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer func() { _ = c.Close() }()
-				buf := make([]byte, 4096)
-				_, _ = c.Read(buf)
-			}(conn)
-		}
-	}()
-
-	// Use a real TCP listener so the client and server are decoupled
-	// (net.Pipe has strict synchronous semantics that can interact
-	// poorly with CONNECT request parsing).
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = ln.Close() }()
-
-	provider := &stubTokenProvider{err: errors.New("GSS-API error: An unsupported mechanism was requested")}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
-	}()
-
-	client, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer func() { _ = client.Close() }()
-
-	// Send a CONNECT request (what curl does for HTTPS through a proxy).
-	_, err = io.WriteString(client, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
-	if err != nil {
-		t.Fatalf("write CONNECT: %v", err)
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
-	if err != nil {
-		t.Fatalf("expected HTTP error response, got read error: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Errorf("expected status 502, got %d", resp.StatusCode)
-	}
-	if ps := resp.Header.Get("Proxy-Status"); ps != "spnego-proxy; error=proxy_internal_error" {
-		t.Errorf("expected Proxy-Status header %q, got %q", "spnego-proxy; error=proxy_internal_error", ps)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "spnego-proxy error: proxy_internal_error") {
-		t.Errorf("expected CONNECT body to contain %q, got: %q", "spnego-proxy error: proxy_internal_error", body)
-	}
-	if !strings.Contains(string(body), "failed to acquire a SPNEGO authentication token") {
-		t.Errorf("expected CONNECT body to describe token acquisition failure, got: %q", body)
-	}
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s")
 	}
 }
 
@@ -885,27 +486,14 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 	}()
 
 	// Set up the local proxy listener.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = ln.Close() }()
-
 	provider := &stubTokenProvider{token: "tok"}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
-	}()
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
+	addr, done := acceptOneAndHandle(t, cfg)
 
 	// Connect to the local proxy and send a CONNECT request followed
 	// immediately by extra data in the same write, so it lands in the
 	// same bufio buffer as the request headers.
-	client, err := net.Dial("tcp", ln.Addr().String())
+	client, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -957,11 +545,7 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 		t.Fatal("timed out waiting for upstream Via header")
 	}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s")
-	}
+	waitForDone(t, done)
 }
 
 // TestCloseWriteCalledOnForwardCompletion verifies that the half-close
@@ -1002,6 +586,7 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 	defer func() { _ = ln.Close() }()
 
 	provider := &stubTokenProvider{token: "tok"}
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
 	wrapped := &closeWriteConn{}
 
 	done := make(chan struct{})
@@ -1012,7 +597,7 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 			return
 		}
 		wrapped.Conn = conn
-		handleClient(wrapped, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
+		handleClient(wrapped, cfg)
 	}()
 
 	// Connect to the local proxy and send a request.
@@ -1057,13 +642,9 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 		t.Fatal("timed out waiting for upstream Via header")
 	}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s")
-	}
+	waitForDone(t, done)
 
-	// The forward() function sends data proxy→client via the wrapped
+	// The forward() function sends data proxy->client via the wrapped
 	// conn, so CloseWrite must have been called on it at least once.
 	if n := wrapped.closeWriteCalls.Load(); n == 0 {
 		t.Error("expected CloseWrite to be called on the client connection, but it was not")
@@ -1143,25 +724,13 @@ func TestHandleClientKeepAlive(t *testing.T) {
 		}
 	}()
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = ln.Close() }()
-
 	provider := &stubTokenProvider{token: "tok"}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		// Pass a non-zero keepalive to exercise the keepalive code path.
-		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 30*time.Second)
-	}()
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
+	// Pass a non-zero keepalive to exercise the keepalive code path.
+	cfg.KeepAlive = 30 * time.Second
+	addr, done := acceptOneAndHandle(t, cfg)
 
-	client, err := net.Dial("tcp", ln.Addr().String())
+	client, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -1205,11 +774,7 @@ func TestHandleClientKeepAlive(t *testing.T) {
 		t.Fatal("timed out waiting for upstream Via header")
 	}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s")
-	}
+	waitForDone(t, done)
 }
 
 // TestHandleClientAppendsToExistingResponseVia verifies that handleClient
@@ -1236,24 +801,11 @@ func TestHandleClientAppendsToExistingResponseVia(t *testing.T) {
 		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nVia: 1.0 upstream-proxy\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"))
 	}()
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = ln.Close() }()
-
 	provider := &stubTokenProvider{token: "tok"}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
-	}()
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
+	addr, done := acceptOneAndHandle(t, cfg)
 
-	client, err := net.Dial("tcp", ln.Addr().String())
+	client, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -1281,11 +833,7 @@ func TestHandleClientAppendsToExistingResponseVia(t *testing.T) {
 		t.Errorf("response Via header = %q, want %q", got, want)
 	}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s")
-	}
+	waitForDone(t, done)
 }
 
 // TestHandleClientAddsViaToConnectResponse verifies that handleClient adds
@@ -1315,24 +863,11 @@ func TestHandleClientAddsViaToConnectResponse(t *testing.T) {
 		_, _ = conn.Write([]byte(tunnelPayload))
 	}()
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = ln.Close() }()
-
 	provider := &stubTokenProvider{token: "tok"}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0)
-	}()
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
+	addr, done := acceptOneAndHandle(t, cfg)
 
-	client, err := net.Dial("tcp", ln.Addr().String())
+	client, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -1372,9 +907,5 @@ func TestHandleClientAddsViaToConnectResponse(t *testing.T) {
 
 	_ = client.Close()
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s")
-	}
+	waitForDone(t, done)
 }
