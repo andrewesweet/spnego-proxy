@@ -472,25 +472,8 @@ func TestShutdownDrainTimeout(t *testing.T) {
 }
 
 func TestHandleClientTokenErrorReturns502(t *testing.T) {
-	// Start a fake upstream that holds connections open.
-	upstream, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = upstream.Close() }()
-	go func() {
-		for {
-			conn, err := upstream.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer func() { _ = c.Close() }()
-				buf := make([]byte, 4096)
-				_, _ = c.Read(buf)
-			}(conn)
-		}
-	}()
+	upstream := NewMockUpstreamProxy(t, nil)
+	t.Cleanup(upstream.Close)
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -499,7 +482,7 @@ func TestHandleClientTokenErrorReturns502(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
+		handleClient(server, upstream.Addr(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	// Send a request through the client side of the pipe.
@@ -540,24 +523,8 @@ func TestHandleClientTokenErrorReturns502(t *testing.T) {
 func TestHandleClientCircuitBreakerErrorReturnsDistinctBody(t *testing.T) {
 	// Verify that a circuit breaker error produces a distinct body from
 	// a regular token acquisition error (issue #113, section 4).
-	upstream, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = upstream.Close() }()
-	go func() {
-		for {
-			conn, err := upstream.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer func() { _ = c.Close() }()
-				buf := make([]byte, 4096)
-				_, _ = c.Read(buf)
-			}(conn)
-		}
-	}()
+	upstream := NewMockUpstreamProxy(t, nil)
+	t.Cleanup(upstream.Close)
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -570,7 +537,7 @@ func TestHandleClientCircuitBreakerErrorReturnsDistinctBody(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
+		handleClient(server, upstream.Addr(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	req, _ := http.NewRequest("GET", "http://example.com/", nil)
@@ -612,24 +579,8 @@ func TestHandleClientCredentialErrorReturnsDistinctBody(t *testing.T) {
 	// Verify that a CredentialError produces a body describing expired or
 	// unavailable credentials, distinct from the generic token acquisition
 	// error (issue #119).
-	upstream, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = upstream.Close() }()
-	go func() {
-		for {
-			conn, err := upstream.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer func() { _ = c.Close() }()
-				buf := make([]byte, 4096)
-				_, _ = c.Read(buf)
-			}(conn)
-		}
-	}()
+	upstream := NewMockUpstreamProxy(t, nil)
+	t.Cleanup(upstream.Close)
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -641,7 +592,7 @@ func TestHandleClientCredentialErrorReturnsDistinctBody(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
+		handleClient(server, upstream.Addr(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	req, _ := http.NewRequest("GET", "http://example.com/", nil)
@@ -683,24 +634,8 @@ func TestHandleClientNegotiationErrorReturnsDistinctBody(t *testing.T) {
 	// Verify that a NegotiationError produces a body describing a negotiation
 	// failure, distinct from both the generic token error and the credential
 	// error (issue #119).
-	upstream, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = upstream.Close() }()
-	go func() {
-		for {
-			conn, err := upstream.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer func() { _ = c.Close() }()
-				buf := make([]byte, 4096)
-				_, _ = c.Read(buf)
-			}(conn)
-		}
-	}()
+	upstream := NewMockUpstreamProxy(t, nil)
+	t.Cleanup(upstream.Close)
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -712,7 +647,7 @@ func TestHandleClientNegotiationErrorReturnsDistinctBody(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
+		handleClient(server, upstream.Addr(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	req, _ := http.NewRequest("GET", "http://example.com/", nil)
@@ -757,24 +692,8 @@ func TestHandleClientNegotiationErrorReturnsDistinctBody(t *testing.T) {
 func TestHandleClientTokenErrorCONNECTReturns502(t *testing.T) {
 	// Verify CONNECT requests also get a 502 (this is the common case
 	// for HTTPS traffic through a proxy, and what curl uses).
-	upstream, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = upstream.Close() }()
-	go func() {
-		for {
-			conn, err := upstream.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer func() { _ = c.Close() }()
-				buf := make([]byte, 4096)
-				_, _ = c.Read(buf)
-			}(conn)
-		}
-	}()
+	upstream := NewMockUpstreamProxy(t, nil)
+	t.Cleanup(upstream.Close)
 
 	// Use a real TCP listener so the client and server are decoupled
 	// (net.Pipe has strict synchronous semantics that can interact
@@ -793,7 +712,7 @@ func TestHandleClientTokenErrorCONNECTReturns502(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
+		handleClient(conn, upstream.Addr(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	client, err := net.Dial("tcp", ln.Addr().String())
