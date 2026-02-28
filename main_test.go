@@ -16,6 +16,28 @@ import (
 	"golang.org/x/net/netutil"
 )
 
+// acceptOneAndHandle starts a listener, accepts one connection, and runs
+// handleClient with the given config. Returns the listener address and a
+// channel that is closed when handleClient returns.
+func acceptOneAndHandle(t *testing.T, cfg ProxyConfig) (addr string, done <-chan struct{}) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	ch := make(chan struct{})
+	go func() {
+		defer close(ch)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		handleClient(conn, cfg)
+	}()
+	return ln.Addr().String(), ch
+}
+
 // closeWriteConn wraps a net.Conn and adds a CloseWrite method so the
 // type assertion in the forward() half-close path succeeds.
 type closeWriteConn struct {
@@ -55,10 +77,12 @@ func TestHandleClientReadTimeout(t *testing.T) {
 	defer func() { _ = client.Close() }()
 
 	provider := &stubTokenProvider{token: "tok"}
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
+	cfg.ReadTimeout = 50 * time.Millisecond
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, ProxyConfig{Upstream: upstream.Addr().String(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 50 * time.Millisecond})
+		handleClient(server, cfg)
 	}()
 
 	// The proxy should respond with 400 when it can't read the client request.
@@ -85,12 +109,7 @@ func TestHandleClientReadTimeout(t *testing.T) {
 		t.Errorf("expected body to contain suggested action, got: %q", body)
 	}
 
-	select {
-	case <-done:
-		// handleClient returned promptly — read deadline fired as expected.
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s; read timeout not effective")
-	}
+	waitForDone(t, done)
 }
 
 func TestLimitListenerBlocksAtCapacity(t *testing.T) {
@@ -253,6 +272,7 @@ func TestShutdownDrainsInFlightConnections(t *testing.T) {
 	addr := ln.Addr().String()
 
 	provider := &stubTokenProvider{token: "tok"}
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var wg sync.WaitGroup
@@ -270,7 +290,7 @@ func TestShutdownDrainsInFlightConnections(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, ProxyConfig{Upstream: upstream.Addr().String(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
+				handleClient(conn, cfg)
 			}()
 		}
 	}()
@@ -310,12 +330,7 @@ func TestShutdownDrainsInFlightConnections(t *testing.T) {
 	// Wait for drain (same pattern as main).
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
-	select {
-	case <-done:
-		// All in-flight connections drained.
-	case <-time.After(5 * time.Second):
-		t.Fatal("in-flight connections did not drain within 5s")
-	}
+	waitForDone(t, done)
 
 	// Verify provider cleanup runs after drain.
 	_ = provider.Close()
@@ -360,6 +375,7 @@ func TestShutdownDrainTimeout(t *testing.T) {
 	addr := ln.Addr().String()
 
 	provider := &stubTokenProvider{token: "tok"}
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var wg sync.WaitGroup
@@ -377,7 +393,7 @@ func TestShutdownDrainTimeout(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, ProxyConfig{Upstream: upstream.Addr().String(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
+				handleClient(conn, cfg)
 			}()
 		}
 	}()
@@ -413,12 +429,7 @@ func TestShutdownDrainTimeout(t *testing.T) {
 		_ = provider.Close()
 	}()
 
-	select {
-	case <-shutdownComplete:
-		// Shutdown completed (via timeout, since the connection is held open).
-	case <-time.After(5 * time.Second):
-		t.Fatal("shutdown did not complete within 5s; drain timeout mechanism broken")
-	}
+	waitForDone(t, shutdownComplete)
 
 	if !provider.closed.Load() {
 		t.Error("expected provider to be closed after drain timeout")
@@ -475,27 +486,14 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 	}()
 
 	// Set up the local proxy listener.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = ln.Close() }()
-
 	provider := &stubTokenProvider{token: "tok"}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		handleClient(conn, ProxyConfig{Upstream: upstream.Addr().String(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
-	}()
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
+	addr, done := acceptOneAndHandle(t, cfg)
 
 	// Connect to the local proxy and send a CONNECT request followed
 	// immediately by extra data in the same write, so it lands in the
 	// same bufio buffer as the request headers.
-	client, err := net.Dial("tcp", ln.Addr().String())
+	client, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -547,11 +545,7 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 		t.Fatal("timed out waiting for upstream Via header")
 	}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s")
-	}
+	waitForDone(t, done)
 }
 
 // TestCloseWriteCalledOnForwardCompletion verifies that the half-close
@@ -592,6 +586,7 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 	defer func() { _ = ln.Close() }()
 
 	provider := &stubTokenProvider{token: "tok"}
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
 	wrapped := &closeWriteConn{}
 
 	done := make(chan struct{})
@@ -602,7 +597,7 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 			return
 		}
 		wrapped.Conn = conn
-		handleClient(wrapped, ProxyConfig{Upstream: upstream.Addr().String(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
+		handleClient(wrapped, cfg)
 	}()
 
 	// Connect to the local proxy and send a request.
@@ -647,13 +642,9 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 		t.Fatal("timed out waiting for upstream Via header")
 	}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s")
-	}
+	waitForDone(t, done)
 
-	// The forward() function sends data proxy→client via the wrapped
+	// The forward() function sends data proxy->client via the wrapped
 	// conn, so CloseWrite must have been called on it at least once.
 	if n := wrapped.closeWriteCalls.Load(); n == 0 {
 		t.Error("expected CloseWrite to be called on the client connection, but it was not")
@@ -733,25 +724,13 @@ func TestHandleClientKeepAlive(t *testing.T) {
 		}
 	}()
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = ln.Close() }()
-
 	provider := &stubTokenProvider{token: "tok"}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		// Pass a non-zero keepalive to exercise the keepalive code path.
-		handleClient(conn, ProxyConfig{Upstream: upstream.Addr().String(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second, KeepAlive: 30 * time.Second})
-	}()
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
+	// Pass a non-zero keepalive to exercise the keepalive code path.
+	cfg.KeepAlive = 30 * time.Second
+	addr, done := acceptOneAndHandle(t, cfg)
 
-	client, err := net.Dial("tcp", ln.Addr().String())
+	client, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -795,11 +774,7 @@ func TestHandleClientKeepAlive(t *testing.T) {
 		t.Fatal("timed out waiting for upstream Via header")
 	}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s")
-	}
+	waitForDone(t, done)
 }
 
 // TestHandleClientAppendsToExistingResponseVia verifies that handleClient
@@ -826,24 +801,11 @@ func TestHandleClientAppendsToExistingResponseVia(t *testing.T) {
 		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nVia: 1.0 upstream-proxy\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"))
 	}()
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = ln.Close() }()
-
 	provider := &stubTokenProvider{token: "tok"}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		handleClient(conn, ProxyConfig{Upstream: upstream.Addr().String(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
-	}()
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
+	addr, done := acceptOneAndHandle(t, cfg)
 
-	client, err := net.Dial("tcp", ln.Addr().String())
+	client, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -871,11 +833,7 @@ func TestHandleClientAppendsToExistingResponseVia(t *testing.T) {
 		t.Errorf("response Via header = %q, want %q", got, want)
 	}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s")
-	}
+	waitForDone(t, done)
 }
 
 // TestHandleClientAddsViaToConnectResponse verifies that handleClient adds
@@ -905,24 +863,11 @@ func TestHandleClientAddsViaToConnectResponse(t *testing.T) {
 		_, _ = conn.Write([]byte(tunnelPayload))
 	}()
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = ln.Close() }()
-
 	provider := &stubTokenProvider{token: "tok"}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		handleClient(conn, ProxyConfig{Upstream: upstream.Addr().String(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
-	}()
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
+	addr, done := acceptOneAndHandle(t, cfg)
 
-	client, err := net.Dial("tcp", ln.Addr().String())
+	client, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -962,9 +907,5 @@ func TestHandleClientAddsViaToConnectResponse(t *testing.T) {
 
 	_ = client.Close()
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s")
-	}
+	waitForDone(t, done)
 }

@@ -195,7 +195,7 @@ func TestA3_RFC9209_ProxyStatusOnProxyInternalError(t *testing.T) {
 				}
 			}
 
-			// Upstream must NOT have received the request — token failure is pre-dial.
+			// Upstream must NOT have received the request — token failure occurs before the request is forwarded.
 			if n := len(upstream.Requests()); n != 0 {
 				t.Errorf("upstream received %d requests, want 0", n)
 			}
