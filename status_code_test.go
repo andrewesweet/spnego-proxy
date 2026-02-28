@@ -265,7 +265,6 @@ func TestJ1_RFC9112_HTTP11AdvertisedInProxyGeneratedResponses(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			upstreamAddr := tc.setupFunc(t)
 
