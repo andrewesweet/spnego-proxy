@@ -100,16 +100,28 @@ func generateObfuscatedID() string {
 	return "_" + hex.EncodeToString(b)
 }
 
+// appendHeaderValue appends value to the existing comma-separated header
+// identified by key, or sets it when the header is absent.
+func appendHeaderValue(header http.Header, key, value string) {
+	if existing := header.Get(key); existing != "" {
+		header.Set(key, existing+", "+value)
+	} else {
+		header.Set(key, value)
+	}
+}
+
 // injectForwardingHeaders adds RFC 7239 Forwarded and/or de-facto
 // X-Forwarded-* headers to the request according to fwdCfg. It is called
 // after sanitizeHopByHop so that any client-supplied hop-by-hop headers have
 // already been stripped before we append our own values.
 func injectForwardingHeaders(req *http.Request, clientAddr string, fwdCfg ForwardingConfig) {
+	if !fwdCfg.ForwardedEnabled && !fwdCfg.XForwardedForEnabled {
+		return
+	}
+
 	clientIP, _, err := net.SplitHostPort(clientAddr)
-	if clientIP == "" {
-		if err != nil {
-			slog.Debug("could not parse host:port from client address, using raw address", "client_addr", clientAddr, "error", err)
-		}
+	if err != nil {
+		slog.Debug("could not parse host:port from client address, using raw address", "client_addr", clientAddr, "error", err)
 		clientIP = clientAddr // fallback when address has no port component
 	}
 
@@ -117,21 +129,13 @@ func injectForwardingHeaders(req *http.Request, clientAddr string, fwdCfg Forwar
 	if fwdCfg.ForwardedEnabled {
 		obfID := generateObfuscatedID()
 		entry := fmt.Sprintf("for=%s;proto=http", obfID)
-		if existing := req.Header.Get("Forwarded"); existing != "" {
-			req.Header.Set("Forwarded", existing+", "+entry)
-		} else {
-			req.Header.Set("Forwarded", entry)
-		}
+		appendHeaderValue(req.Header, "Forwarded", entry)
 	}
 
 	// H2/H3/H4: X-Forwarded-* headers.
 	if fwdCfg.XForwardedForEnabled {
 		// H2: X-Forwarded-For — append or set client IP.
-		if existing := req.Header.Get("X-Forwarded-For"); existing != "" {
-			req.Header.Set("X-Forwarded-For", existing+", "+clientIP)
-		} else {
-			req.Header.Set("X-Forwarded-For", clientIP)
-		}
+		appendHeaderValue(req.Header, "X-Forwarded-For", clientIP)
 		// H3: X-Forwarded-Proto — set only when absent.
 		if req.Header.Get("X-Forwarded-Proto") == "" {
 			req.Header.Set("X-Forwarded-Proto", "http")
@@ -150,6 +154,7 @@ func injectForwardingHeaders(req *http.Request, clientAddr string, fwdCfg Forwar
 func generateViaPseudonym() string {
 	b := make([]byte, 4)
 	if _, err := crand.Read(b); err != nil {
+		slog.Error("crypto/rand.Read failed, falling back to timestamp-based pseudonym", "error", err)
 		return fmt.Sprintf("spnego-proxy-%08x", time.Now().UnixNano()&0xffffffff)
 	}
 	return fmt.Sprintf("spnego-proxy-%x", b)
@@ -159,12 +164,7 @@ func generateViaPseudonym() string {
 // RFC 9110 §7.6.3. The entry identifies this proxy instance using the
 // protocol version received and the proxy's pseudonym.
 func injectVia(header http.Header, proto, pseudonym string) {
-	viaEntry := proto + " " + pseudonym
-	if prior := header.Get("Via"); prior != "" {
-		header.Set("Via", prior+", "+viaEntry)
-	} else {
-		header.Set("Via", viaEntry)
-	}
+	appendHeaderValue(header, "Via", proto+" "+pseudonym)
 }
 
 // sanitizeHopByHop removes hop-by-hop headers from the request before
@@ -480,6 +480,43 @@ func connectPortAllowed(port string, allowedPorts []string) bool {
 	return len(allowedPorts) == 0 || slices.Contains(allowedPorts, port)
 }
 
+// handleUpstreamResponseError handles errors from readUpstreamResponse.
+// For invalid Content-Length it sends a 502 error to the client; for all
+// other errors it falls back to raw-relaying the upstream bytes.
+func handleUpstreamResponseError(conn, proxyConn net.Conn, upstreamReader *bufio.Reader, err error, clientAddr string) {
+	if errors.Is(err, errContentLengthInvalid) {
+		slog.Error("invalid Content-Length in upstream response",
+			"error", err, "error_type", errInvalidContentLength.errorType,
+			"client_addr", clientAddr,
+			"upstream_addr", proxyConn.RemoteAddr())
+		writeHTTPError(conn, errInvalidContentLength)
+		return
+	}
+	slog.Warn("failed to parse upstream response, falling back to raw relay",
+		"error", err, "client_addr", clientAddr)
+	if _, err := io.Copy(conn, upstreamReader); err != nil {
+		slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+	}
+}
+
+// forwardHalf copies data from src to dst, calling CloseWrite on dst when
+// done. It logs the start, completion, and any errors. wg.Done is deferred
+// so callers can use a WaitGroup to synchronise the two halves of a
+// bidirectional forwarding pair.
+func forwardHalf(wg *sync.WaitGroup, dst net.Conn, src io.Reader, fromAddr, toAddr net.Addr) {
+	defer wg.Done()
+	defer func() {
+		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
+	}()
+	slog.Debug("forward start", "from", fromAddr, "to", toAddr)
+	defer slog.Debug("forward done", "from", fromAddr, "to", toAddr)
+	if _, err := io.Copy(dst, src); err != nil {
+		slog.Error("forward error", "error", err, "from", fromAddr, "to", toAddr)
+	}
+}
+
 // handleClient handles a single client connection. cfg groups all
 // non-connection parameters including upstream address, token provider,
 // timeouts, CONNECT port restrictions (D4, RFC 9110 §9.3.6), and
@@ -614,21 +651,8 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	}
 
 	var wg sync.WaitGroup
-	forward := func(from io.Reader, to net.Conn, fromAddr, toAddr net.Addr) {
-		defer wg.Done()
-		defer func() {
-			if cw, ok := to.(interface{ CloseWrite() error }); ok {
-				_ = cw.CloseWrite()
-			}
-		}()
-		slog.Debug("forward start", "from", fromAddr, "to", toAddr)
-		defer slog.Debug("forward done", "from", fromAddr, "to", toAddr)
-		if _, err := io.Copy(to, from); err != nil {
-			slog.Error("forward error", "error", err, "from", fromAddr, "to", toAddr)
-		}
-	}
 	wg.Add(2)
-	go forward(reqReader, proxyConn, conn.RemoteAddr(), proxyConn.RemoteAddr())
+	go forwardHalf(&wg, proxyConn, reqReader, conn.RemoteAddr(), proxyConn.RemoteAddr())
 	// Upstream→client: parse response headers to inject Via, then relay body.
 	go func() {
 		defer wg.Done()
@@ -643,23 +667,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 		upstreamReader := bufio.NewReader(proxyConn)
 		resp, err := readUpstreamResponse(upstreamReader, req, cfg.Pseudonym)
 		if err != nil {
-			if errors.Is(err, errContentLengthInvalid) {
-				slog.Error("invalid Content-Length in upstream response",
-					"error", err, "error_type", errInvalidContentLength.errorType,
-					"client_addr", conn.RemoteAddr(),
-					"upstream_addr", proxyConn.RemoteAddr())
-				writeHTTPError(conn, errInvalidContentLength)
-				return
-			}
-			// Deviation from RFC 9110 §7.6.3 (MUST add Via): when the
-			// upstream response is unparseable, injecting a Via header is
-			// impossible. We relay raw bytes instead of returning an error
-			// so the client still receives whatever the upstream sent.
-			slog.Warn("failed to parse upstream response, falling back to raw relay",
-				"error", err, "client_addr", conn.RemoteAddr())
-			if _, err := io.Copy(conn, upstreamReader); err != nil {
-				slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
-			}
+			handleUpstreamResponseError(conn, proxyConn, upstreamReader, err, clientAddr)
 			return
 		}
 		defer func() { _ = resp.Body.Close() }()
@@ -678,24 +686,11 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 // forwarding only after a 2xx is confirmed.
 func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req *http.Request, pseudonym, clientAddr string) {
 	upstreamReader := bufio.NewReader(proxyConn)
-	resp, err := readUpstreamResponse(upstreamReader, req, pseudonym)
+	resp, err := readUpstreamResponse(upstreamReader, req, pseudonym) //nolint:bodyclose // S3: resp.Body is the raw tunnel stream; closing it would shut down the TCP connection we forward below.
 	if err != nil {
-		if errors.Is(err, errContentLengthInvalid) {
-			slog.Error("invalid Content-Length in upstream CONNECT response",
-				"error", err, "error_type", errInvalidContentLength.errorType,
-				"client_addr", clientAddr,
-				"upstream_addr", proxyConn.RemoteAddr())
-			writeHTTPError(conn, errInvalidContentLength)
-			return
-		}
-		slog.Warn("failed to parse upstream CONNECT response, falling back to raw relay",
-			"error", err, "client_addr", clientAddr)
-		if _, err := io.Copy(conn, upstreamReader); err != nil {
-			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
-		}
+		handleUpstreamResponseError(conn, proxyConn, upstreamReader, err, clientAddr)
 		return
 	}
-	defer func() { _ = resp.Body.Close() }()
 
 	// For CONNECT responses, the "body" is the raw tunnel data — it must
 	// not be written by resp.Write (that would block waiting for the
@@ -722,37 +717,8 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 	slog.Debug("CONNECT tunnel established", "client_addr", clientAddr, "upstream_addr", proxyConn.RemoteAddr())
 	var wg sync.WaitGroup
 	wg.Add(2)
-
-	// Client→upstream: forward buffered request reader + remaining client data.
-	go func() {
-		defer wg.Done()
-		defer func() {
-			if cw, ok := proxyConn.(interface{ CloseWrite() error }); ok {
-				_ = cw.CloseWrite()
-			}
-		}()
-		slog.Debug("forward start", "from", conn.RemoteAddr(), "to", proxyConn.RemoteAddr())
-		defer slog.Debug("forward done", "from", conn.RemoteAddr(), "to", proxyConn.RemoteAddr())
-		if _, err := io.Copy(proxyConn, reqReader); err != nil {
-			slog.Error("forward error", "error", err, "from", conn.RemoteAddr(), "to", proxyConn.RemoteAddr())
-		}
-	}()
-
-	// Upstream→client: relay tunnel data after the response headers.
-	go func() {
-		defer wg.Done()
-		defer func() {
-			if cw, ok := conn.(interface{ CloseWrite() error }); ok {
-				_ = cw.CloseWrite()
-			}
-		}()
-		slog.Debug("forward start", "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
-		defer slog.Debug("forward done", "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
-		if _, err := io.Copy(conn, upstreamReader); err != nil {
-			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
-		}
-	}()
-
+	go forwardHalf(&wg, proxyConn, reqReader, conn.RemoteAddr(), proxyConn.RemoteAddr())
+	go forwardHalf(&wg, conn, upstreamReader, proxyConn.RemoteAddr(), conn.RemoteAddr())
 	wg.Wait()
 }
 
