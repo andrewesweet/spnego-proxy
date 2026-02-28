@@ -161,6 +161,7 @@ func (m *MockUpstreamProxy) Close() {
 //
 // Exported fields (Provider, Pseudonym, DialTimeout, ReadTimeout, KeepAlive)
 // may be customised after construction but before the first client connects.
+// ConnectPorts must be set via SetConnectPorts to avoid data races.
 type ProxyUnderTest struct {
 	listener net.Listener
 
@@ -178,9 +179,29 @@ type ProxyUnderTest struct {
 	ReadTimeout time.Duration
 	KeepAlive   time.Duration
 
+	// mu protects ConnectPorts so it can be set after construction
+	// without a data race with the acceptLoop goroutine.
+	mu           sync.RWMutex
+	connectPorts []string
+
 	upstream string
 	wg       sync.WaitGroup
 	closed   chan struct{}
+}
+
+// ConnectPorts returns the current allowed CONNECT port list (thread-safe).
+func (p *ProxyUnderTest) getConnectPorts() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.connectPorts
+}
+
+// SetConnectPorts sets the allowed CONNECT port list (thread-safe).
+// It may be called after NewProxyUnderTest before the first client connects.
+func (p *ProxyUnderTest) SetConnectPorts(ports []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.connectPorts = ports
 }
 
 // NewProxyUnderTest creates and starts a proxy listening on a dynamic port.
@@ -222,7 +243,7 @@ func (p *ProxyUnderTest) acceptLoop() {
 		go func() {
 			defer p.wg.Done()
 			handleClient(conn, p.upstream, p.Provider, p.Pseudonym,
-				p.DialTimeout, p.ReadTimeout, p.KeepAlive)
+				p.DialTimeout, p.ReadTimeout, p.KeepAlive, p.getConnectPorts())
 		}()
 	}
 }

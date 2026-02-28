@@ -55,7 +55,7 @@ func TestL2_RFC9110_GatewayTimeoutOnDialTimeout(t *testing.T) {
 		// 50 ms dial timeout: short enough for a fast test, long enough
 		// to let the OS attempt the connection before cancelling.
 		handleClient(server, unreachable, provider, testPseudonym,
-			50*time.Millisecond, 5*time.Second, 0)
+			50*time.Millisecond, 5*time.Second, 0, nil)
 	}()
 
 	// The proxy dials upstream immediately on accepting a connection,
@@ -124,7 +124,7 @@ func TestL1_RFC9112_BadGatewayOnConnectionRefused(t *testing.T) {
 	go func() {
 		defer close(done)
 		handleClient(server, refusedAddr, provider, testPseudonym,
-			5*time.Second, 5*time.Second, 0)
+			5*time.Second, 5*time.Second, 0, nil)
 	}()
 
 	// Read the proxy error response without sending a request. The proxy
@@ -276,7 +276,7 @@ func TestJ1_RFC9112_HTTP11AdvertisedInProxyGeneratedResponses(t *testing.T) {
 			go func() {
 				defer close(done)
 				handleClient(server, upstreamAddr, provider, testPseudonym,
-					tc.dialTimeout, 5*time.Second, 0)
+					tc.dialTimeout, 5*time.Second, 0, nil)
 			}()
 
 			// Read the full response so that handleClient can complete

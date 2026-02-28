@@ -266,6 +266,12 @@ var (
 		message:    "The upstream proxy sent a response with an invalid Content-Length header.",
 		action:     "This may indicate a misconfigured upstream proxy or an attempt at response splitting. Contact the upstream proxy administrator.",
 	}
+	errForbiddenPort = &proxyError{
+		statusCode: http.StatusForbidden,
+		errorType:  "http_request_denied",
+		message:    "CONNECT to the requested port is not allowed.",
+		action:     "The proxy restricts CONNECT tunneling to specific ports. Contact the proxy administrator.",
+	}
 )
 
 // writeHTTPError sends a structured HTTP error response to the client with an
@@ -292,7 +298,24 @@ func writeHTTPError(conn net.Conn, pe *proxyError) {
 	_ = resp.Write(conn)
 }
 
-func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym string, dialTimeout, readTimeout, keepAlive time.Duration) {
+// connectPortAllowed reports whether port is in the allowed set.
+// An empty allowedPorts slice means all ports are permitted.
+func connectPortAllowed(port string, allowedPorts []string) bool {
+	if len(allowedPorts) == 0 {
+		return true
+	}
+	for _, p := range allowedPorts {
+		if p == port {
+			return true
+		}
+	}
+	return false
+}
+
+// handleClient handles a single client connection. connectPorts restricts
+// which ports are allowed for CONNECT tunneling; nil or empty means all ports
+// are permitted (D4, RFC 9110 §9.3.6).
+func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym string, dialTimeout, readTimeout, keepAlive time.Duration, connectPorts []string) {
 	defer func() { _ = conn.Close() }()
 	clientAddr := conn.RemoteAddr().String()
 	slog.Debug("new client", "client_addr", clientAddr)
@@ -329,6 +352,22 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 		slog.Warn("proxy loop detected", "via", prior, "pseudonym", pseudonym, "client_addr", clientAddr, "method", req.Method, "host", req.Host)
 		writeHTTPError(conn, errProxyLoopDetected)
 		return
+	}
+
+	// D4 (RFC 9110 §9.3.6): restrict CONNECT to allowed ports when
+	// connectPorts is non-empty. Parse the port from req.Host; default to
+	// "443" when no port is present (bare hostname CONNECT).
+	if req.Method == http.MethodConnect && len(connectPorts) > 0 {
+		_, port, err := net.SplitHostPort(req.Host)
+		if err != nil {
+			// No port in host — RFC convention is to default to 443.
+			port = "443"
+		}
+		if !connectPortAllowed(port, connectPorts) {
+			slog.Warn("CONNECT port not allowed", "host", req.Host, "port", port, "client_addr", clientAddr)
+			writeHTTPError(conn, errForbiddenPort)
+			return
+		}
 	}
 
 	// Remove hop-by-hop headers before forwarding (RFC 9110 §7.6.1).
@@ -368,6 +407,17 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 		enableKeepAlive(conn, keepAlive)
 		enableKeepAlive(proxyConn, keepAlive)
 	}
+
+	if req.Method == http.MethodConnect {
+		// D6 (RFC 9112 §11.2): for CONNECT, read the upstream response
+		// BEFORE starting to forward client payload. This ensures client
+		// data (e.g. TLS ClientHello) is not sent to the upstream until
+		// after the upstream has confirmed tunnel establishment with 2xx.
+		handleConnectTunnel(conn, proxyConn, reqReader, req, pseudonym, clientAddr)
+		return
+	}
+
+	// Non-CONNECT: bidirectional forwarding with concurrent response parsing.
 	var wg sync.WaitGroup
 	forward := func(from io.Reader, to net.Conn, fromAddr, toAddr net.Addr) {
 		defer wg.Done()
@@ -462,16 +512,109 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
 			return
 		}
+	}()
+	wg.Wait()
+}
 
-		// For CONNECT 200, the tunnel begins after the response headers.
-		// resp.Write wrote the (empty-body) response; now relay the
-		// encrypted tunnel data as raw bytes.
-		if req.Method == http.MethodConnect && resp.StatusCode == http.StatusOK {
-			if _, err := io.Copy(conn, upstreamReader); err != nil {
-				slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+// handleConnectTunnel manages the CONNECT tunnel lifecycle per RFC 9112 §11.2.
+// It reads the upstream response before forwarding any client payload (D6),
+// relays the response to the client (D7), and then starts bidirectional
+// forwarding only after a 2xx is confirmed.
+func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req *http.Request, pseudonym, clientAddr string) {
+	upstreamReader := bufio.NewReader(proxyConn)
+	resp, err := http.ReadResponse(upstreamReader, req)
+	if err != nil {
+		if strings.Contains(err.Error(), "Content-Length") {
+			slog.Error("invalid Content-Length in upstream CONNECT response",
+				"error", err, "error_type", errInvalidContentLength.errorType,
+				"client_addr", clientAddr)
+			writeHTTPError(conn, errInvalidContentLength)
+			return
+		}
+		slog.Warn("failed to parse upstream CONNECT response, falling back to raw relay",
+			"error", err, "client_addr", clientAddr)
+		if _, err := io.Copy(conn, upstreamReader); err != nil {
+			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+		}
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if pe := validateResponseContentLength(resp); pe != nil {
+		slog.Error("invalid Content-Length in upstream CONNECT response",
+			"error_type", pe.errorType,
+			"content_length", resp.Header["Content-Length"],
+			"client_addr", clientAddr,
+			"upstream_addr", proxyConn.RemoteAddr())
+		writeHTTPError(conn, pe)
+		return
+	}
+
+	if len(resp.TransferEncoding) > 0 && resp.Header.Get("Content-Length") != "" {
+		resp.Header.Del("Content-Length")
+		resp.ContentLength = -1
+	}
+
+	// RFC 9110 §7.6.3: inject Via on the upstream response.
+	injectVia(resp.Header, resp.Proto, pseudonym)
+
+	// For CONNECT responses, the "body" is the raw tunnel data — it must
+	// not be written by resp.Write (that would block waiting for the
+	// upstream to close the connection). We write only the response
+	// headers here; raw tunnel forwarding happens below after 2xx.
+	resp.Body = http.NoBody
+	resp.ContentLength = 0
+
+	// D7 (RFC 9110 §9.3.6): relay the upstream's actual response to the
+	// client. We never synthesise our own 2xx here.
+	if err := resp.Write(conn); err != nil {
+		slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+		return
+	}
+
+	// Only start bidirectional tunnel forwarding after confirmed 2xx.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Upstream rejected the CONNECT — connection will be closed by
+		// the deferred conn.Close() in handleClient (D5).
+		slog.Debug("upstream rejected CONNECT", "status", resp.StatusCode, "client_addr", clientAddr)
+		return
+	}
+
+	// 2xx confirmed: start bidirectional tunnel.
+	slog.Debug("CONNECT tunnel established", "client_addr", clientAddr, "upstream_addr", proxyConn.RemoteAddr())
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Client→upstream: forward buffered request reader + remaining client data.
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if cw, ok := proxyConn.(interface{ CloseWrite() error }); ok {
+				_ = cw.CloseWrite()
 			}
+		}()
+		slog.Debug("forward start", "from", conn.RemoteAddr(), "to", proxyConn.RemoteAddr())
+		defer slog.Debug("forward done", "from", conn.RemoteAddr(), "to", proxyConn.RemoteAddr())
+		if _, err := io.Copy(proxyConn, reqReader); err != nil {
+			slog.Error("forward error", "error", err, "from", conn.RemoteAddr(), "to", proxyConn.RemoteAddr())
 		}
 	}()
+
+	// Upstream→client: relay tunnel data after the response headers.
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if cw, ok := conn.(interface{ CloseWrite() error }); ok {
+				_ = cw.CloseWrite()
+			}
+		}()
+		slog.Debug("forward start", "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+		defer slog.Debug("forward done", "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+		if _, err := io.Copy(conn, upstreamReader); err != nil {
+			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+		}
+	}()
+
 	wg.Wait()
 }
 
@@ -486,6 +629,7 @@ func main() {
 	drainTimeout := flag.Duration("drain-timeout", 30*time.Second, "timeout for draining in-flight connections on shutdown")
 	keepAlive := flag.Duration("keepalive", 30*time.Second, "TCP keepalive period for idle connection detection (0 to disable)")
 	maxConns := flag.Int("max-conns", 512, "maximum number of concurrent connections (0 for unlimited)")
+	connectPortsFlag := flag.String("connect-ports", "", "comma-separated list of ports allowed for CONNECT tunneling (empty = all ports allowed)")
 
 	// Flags for gokrb5 password-based auth (optional on macOS, required on other platforms)
 	cfgFile := flag.String("config", "", "kerberos config file")
@@ -528,6 +672,16 @@ func main() {
 	}
 	pseudonym := generateViaPseudonym()
 
+	// Parse -connect-ports flag into a slice. Empty string means all ports allowed.
+	var connectPorts []string
+	if *connectPortsFlag != "" {
+		for _, p := range strings.Split(*connectPortsFlag, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				connectPorts = append(connectPorts, p)
+			}
+		}
+	}
+
 	if *maxConns > 0 {
 		l = netutil.LimitListener(l, *maxConns)
 		slog.Info("listening", "addr", *addr, "proxy", *proxy, "max_conns", *maxConns, "via_pseudonym", pseudonym)
@@ -554,7 +708,7 @@ func main() {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, *proxy, provider, pseudonym, *dialTimeout, *readTimeout, *keepAlive)
+				handleClient(conn, *proxy, provider, pseudonym, *dialTimeout, *readTimeout, *keepAlive, connectPorts)
 			}()
 		}
 	}()
