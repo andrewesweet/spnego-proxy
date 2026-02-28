@@ -161,7 +161,8 @@ func (m *MockUpstreamProxy) Close() {
 //
 // Exported fields (Provider, Pseudonym, DialTimeout, ReadTimeout, KeepAlive)
 // may be customised after construction but before the first client connects.
-// ConnectPorts must be set via SetConnectPorts to avoid data races.
+// ConnectPorts must be set via SetConnectPorts and ForwardingConfig must be
+// set via SetForwardingConfig to avoid data races.
 type ProxyUnderTest struct {
 	listener net.Listener
 
@@ -179,10 +180,11 @@ type ProxyUnderTest struct {
 	ReadTimeout time.Duration
 	KeepAlive   time.Duration
 
-	// mu protects ConnectPorts so it can be set after construction
-	// without a data race with the acceptLoop goroutine.
-	mu           sync.RWMutex
-	connectPorts []string
+	// mu protects connectPorts and forwardingConfig so they can be set
+	// after construction without a data race with the acceptLoop goroutine.
+	mu               sync.RWMutex
+	connectPorts     []string
+	forwardingConfig ForwardingConfig
 
 	upstream string
 	wg       sync.WaitGroup
@@ -202,6 +204,21 @@ func (p *ProxyUnderTest) SetConnectPorts(ports []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.connectPorts = ports
+}
+
+// getForwardingConfig returns the current ForwardingConfig (thread-safe).
+func (p *ProxyUnderTest) getForwardingConfig() ForwardingConfig {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.forwardingConfig
+}
+
+// SetForwardingConfig sets the ForwardingConfig (thread-safe).
+// It must be called before the first client connects to avoid data races.
+func (p *ProxyUnderTest) SetForwardingConfig(cfg ForwardingConfig) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.forwardingConfig = cfg
 }
 
 // NewProxyUnderTest creates and starts a proxy listening on a dynamic port.
@@ -243,7 +260,8 @@ func (p *ProxyUnderTest) acceptLoop() {
 		go func() {
 			defer p.wg.Done()
 			handleClient(conn, p.upstream, p.Provider, p.Pseudonym,
-				p.DialTimeout, p.ReadTimeout, p.KeepAlive, p.getConnectPorts())
+				p.DialTimeout, p.ReadTimeout, p.KeepAlive, p.getConnectPorts(),
+				p.getForwardingConfig())
 		}()
 	}
 }

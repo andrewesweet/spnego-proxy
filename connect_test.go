@@ -271,7 +271,7 @@ func TestD6_ClientPayloadNotSentBeforeUpstream2xx(t *testing.T) {
 			return
 		}
 		handleClient(conn, upstreamLn.Addr().String(), provider, testPseudonym,
-			5*time.Second, 5*time.Second, 0, nil)
+			5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	client, err := net.Dial("tcp", ln.Addr().String())
@@ -354,7 +354,7 @@ func TestD7_UpstreamNon2xxRelayedToClient(t *testing.T) {
 			return
 		}
 		handleClient(conn, upstream.Addr(), provider, testPseudonym,
-			5*time.Second, 5*time.Second, 0, nil)
+			5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	client, err := net.Dial("tcp", ln.Addr().String())

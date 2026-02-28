@@ -56,6 +56,88 @@ func normalizeSPN(spn string, targetSep, alternateSep byte) string {
 	return spn // no recognized separator; return as-is
 }
 
+// ForwardingConfig controls which forwarding headers the proxy injects into
+// outbound requests.
+//
+// Both fields default to false (disabled) to preserve the existing behaviour
+// where no forwarding headers are added. Operators opt in via CLI flags.
+type ForwardingConfig struct {
+	// ForwardedEnabled enables the RFC 7239 Forwarded header (H1).
+	// The header uses an obfuscated identifier for the client address.
+	ForwardedEnabled bool
+
+	// XForwardedForEnabled enables the de-facto X-Forwarded-For header (H2)
+	// and, when the headers are absent, also sets X-Forwarded-Proto (H3) and
+	// X-Forwarded-Host (H4).
+	XForwardedForEnabled bool
+}
+
+// generateObfuscatedID returns a random RFC 7239 §6.3 obfuscated identifier
+// of the form "_xxxxxxxx" (underscore followed by 8 lowercase hex characters).
+// Using 4 random bytes gives 2^32 unique values — sufficient to avoid
+// collisions in practice while keeping the identifier short.
+func generateObfuscatedID() string {
+	b := make([]byte, 4)
+	if _, err := crand.Read(b); err != nil {
+		// Fallback: use low 32 bits of nanosecond timestamp.
+		return fmt.Sprintf("_%08x", time.Now().UnixNano()&0xffffffff)
+	}
+	return fmt.Sprintf("_%x", b)
+}
+
+// formatForwardedFor returns the correct Forwarded "for" token value for the
+// given address string per RFC 7239 §4:
+//   - IPv6 addresses must be quoted and enclosed in brackets: "[addr]"
+//   - IPv4 addresses and obfuscated tokens are used as-is.
+func formatForwardedFor(addr string) string {
+	if strings.Contains(addr, ":") {
+		// net.ParseIP accepts both IPv4-mapped and pure IPv6; any string with
+		// a colon that isn't an IPv4 address needs bracket quoting.
+		return fmt.Sprintf(`"[%s]"`, addr)
+	}
+	return addr
+}
+
+// injectForwardingHeaders adds RFC 7239 Forwarded and/or de-facto
+// X-Forwarded-* headers to the request according to fwdCfg. It is called
+// after sanitizeHopByHop so that any client-supplied hop-by-hop headers have
+// already been stripped before we append our own values.
+func injectForwardingHeaders(req *http.Request, clientAddr string, fwdCfg ForwardingConfig) {
+	clientIP, _, _ := net.SplitHostPort(clientAddr)
+	if clientIP == "" {
+		clientIP = clientAddr // fallback for net.Pipe addresses in tests
+	}
+
+	// H1: RFC 7239 Forwarded header.
+	if fwdCfg.ForwardedEnabled {
+		obfID := generateObfuscatedID()
+		entry := fmt.Sprintf("for=%s;proto=http", obfID)
+		if existing := req.Header.Get("Forwarded"); existing != "" {
+			req.Header.Set("Forwarded", existing+", "+entry)
+		} else {
+			req.Header.Set("Forwarded", entry)
+		}
+	}
+
+	// H2/H3/H4: X-Forwarded-* headers.
+	if fwdCfg.XForwardedForEnabled {
+		// H2: X-Forwarded-For — append or set client IP.
+		if existing := req.Header.Get("X-Forwarded-For"); existing != "" {
+			req.Header.Set("X-Forwarded-For", existing+", "+clientIP)
+		} else {
+			req.Header.Set("X-Forwarded-For", clientIP)
+		}
+		// H3: X-Forwarded-Proto — set only when absent.
+		if req.Header.Get("X-Forwarded-Proto") == "" {
+			req.Header.Set("X-Forwarded-Proto", "http")
+		}
+		// H4: X-Forwarded-Host — set only when absent.
+		if req.Header.Get("X-Forwarded-Host") == "" {
+			req.Header.Set("X-Forwarded-Host", req.Host)
+		}
+	}
+}
+
 // generateViaPseudonym returns a unique pseudonym for this proxy instance,
 // used in the Via header to identify this specific process. The format is
 // "spnego-proxy-<8-hex-chars>", providing 2^32 unique identifiers — sufficient
@@ -344,8 +426,9 @@ func connectPortAllowed(port string, allowedPorts []string) bool {
 
 // handleClient handles a single client connection. connectPorts restricts
 // which ports are allowed for CONNECT tunneling; nil or empty means all ports
-// are permitted (D4, RFC 9110 §9.3.6).
-func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym string, dialTimeout, readTimeout, keepAlive time.Duration, connectPorts []string) {
+// are permitted (D4, RFC 9110 §9.3.6). fwdCfg controls optional forwarding
+// header injection (RFC 7239 Forwarded, X-Forwarded-For, etc.).
+func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym string, dialTimeout, readTimeout, keepAlive time.Duration, connectPorts []string, fwdCfg ForwardingConfig) {
 	defer func() { _ = conn.Close() }()
 	clientAddr := conn.RemoteAddr().String()
 	slog.Debug("new client", "client_addr", clientAddr)
@@ -422,6 +505,10 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 
 	// Remove hop-by-hop headers before forwarding (RFC 9110 §7.6.1).
 	sanitizeHopByHop(req)
+
+	// H1–H4: inject optional forwarding headers after hop-by-hop sanitization
+	// so that any client-sent hop-by-hop headers are stripped first.
+	injectForwardingHeaders(req, clientAddr, fwdCfg)
 
 	token, err := provider.GetToken()
 	if err != nil {
@@ -681,6 +768,10 @@ func main() {
 	maxConns := flag.Int("max-conns", 512, "maximum number of concurrent connections (0 for unlimited)")
 	connectPortsFlag := flag.String("connect-ports", "", "comma-separated list of ports allowed for CONNECT tunneling (empty = all ports allowed)")
 
+	// Forwarding header flags (both disabled by default).
+	forwardedFlag := flag.Bool("forwarded", false, "inject RFC 7239 Forwarded header with obfuscated client identifier")
+	xForwardedForFlag := flag.Bool("x-forwarded-for", false, "inject X-Forwarded-For, X-Forwarded-Proto, and X-Forwarded-Host headers")
+
 	// Flags for gokrb5 password-based auth (optional on macOS, required on other platforms)
 	cfgFile := flag.String("config", "", "kerberos config file")
 	user := flag.String("user", "", "kerberos user name")
@@ -732,6 +823,11 @@ func main() {
 		}
 	}
 
+	fwdCfg := ForwardingConfig{
+		ForwardedEnabled:     *forwardedFlag,
+		XForwardedForEnabled: *xForwardedForFlag,
+	}
+
 	if *maxConns > 0 {
 		l = netutil.LimitListener(l, *maxConns)
 		slog.Info("listening", "addr", *addr, "proxy", *proxy, "max_conns", *maxConns, "via_pseudonym", pseudonym)
@@ -758,7 +854,7 @@ func main() {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, *proxy, provider, pseudonym, *dialTimeout, *readTimeout, *keepAlive, connectPorts)
+				handleClient(conn, *proxy, provider, pseudonym, *dialTimeout, *readTimeout, *keepAlive, connectPorts, fwdCfg)
 			}()
 		}
 	}()

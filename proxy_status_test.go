@@ -77,7 +77,7 @@ func TestA3_RFC9209_ProxyStatusOnTokenAcquisitionFailure(t *testing.T) {
 	go func() {
 		defer close(done)
 		handleClient(server, upstream.Addr(), provider, testPseudonym,
-			5*time.Second, 5*time.Second, 0, nil)
+			5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	sendRequest(t, client, "http://example.com/test")
@@ -134,7 +134,7 @@ func TestA3_RFC9209_ProxyStatusOnCircuitBreakerOpen(t *testing.T) {
 	go func() {
 		defer close(done)
 		handleClient(server, upstream.Addr(), provider, testPseudonym,
-			5*time.Second, 5*time.Second, 0, nil)
+			5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	sendRequest(t, client, "http://example.com/test")
@@ -193,7 +193,7 @@ func TestA3_RFC9209_ProxyStatusOnCredentialFailure(t *testing.T) {
 	go func() {
 		defer close(done)
 		handleClient(server, upstream.Addr(), provider, testPseudonym,
-			5*time.Second, 5*time.Second, 0, nil)
+			5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	sendRequest(t, client, "http://example.com/test")
@@ -252,7 +252,7 @@ func TestA3_RFC9209_ProxyStatusOnNegotiationFailure(t *testing.T) {
 	go func() {
 		defer close(done)
 		handleClient(server, upstream.Addr(), provider, testPseudonym,
-			5*time.Second, 5*time.Second, 0, nil)
+			5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	sendRequest(t, client, "http://example.com/test")
@@ -307,7 +307,7 @@ func TestA3_RFC9209_ProxyStatusOnMalformedRequest(t *testing.T) {
 	go func() {
 		defer close(done)
 		handleClient(server, upstream.Addr(), provider, testPseudonym,
-			5*time.Second, 5*time.Second, 0, nil)
+			5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	// Send data that is not a valid HTTP request — deliberately malformed
@@ -536,7 +536,7 @@ func TestA3_RFC9209_ProxyIdentifierIsSpnegoProxy(t *testing.T) {
 			go func() {
 				defer close(done)
 				handleClient(server, upstream.Addr(), provider, testPseudonym,
-					5*time.Second, 5*time.Second, 0, nil)
+					5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 			}()
 
 			sendRequest(t, client, "http://example.com/identifier-test")

@@ -44,7 +44,7 @@ func TestHandleClientDialTimeout(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, unreachable, provider, testPseudonym, 50*time.Millisecond, time.Second, 0, nil)
+		handleClient(server, unreachable, provider, testPseudonym, 50*time.Millisecond, time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	// The proxy should respond with 504 when the dial times out (RFC 9209 connection_timeout).
@@ -104,7 +104,7 @@ func TestHandleClientReadTimeout(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 50*time.Millisecond, 0, nil)
+		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 50*time.Millisecond, 0, nil, ForwardingConfig{})
 	}()
 
 	// The proxy should respond with 400 when it can't read the client request.
@@ -316,7 +316,7 @@ func TestShutdownDrainsInFlightConnections(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil)
+				handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 			}()
 		}
 	}()
@@ -423,7 +423,7 @@ func TestShutdownDrainTimeout(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil)
+				handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 			}()
 		}
 	}()
@@ -499,7 +499,7 @@ func TestHandleClientTokenErrorReturns502(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil)
+		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	// Send a request through the client side of the pipe.
@@ -570,7 +570,7 @@ func TestHandleClientCircuitBreakerErrorReturnsDistinctBody(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil)
+		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	req, _ := http.NewRequest("GET", "http://example.com/", nil)
@@ -641,7 +641,7 @@ func TestHandleClientCredentialErrorReturnsDistinctBody(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil)
+		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	req, _ := http.NewRequest("GET", "http://example.com/", nil)
@@ -712,7 +712,7 @@ func TestHandleClientNegotiationErrorReturnsDistinctBody(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil)
+		handleClient(server, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	req, _ := http.NewRequest("GET", "http://example.com/", nil)
@@ -793,7 +793,7 @@ func TestHandleClientTokenErrorCONNECTReturns502(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil)
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	client, err := net.Dial("tcp", ln.Addr().String())
@@ -899,7 +899,7 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil)
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	// Connect to the local proxy and send a CONNECT request followed
@@ -1012,7 +1012,7 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 			return
 		}
 		wrapped.Conn = conn
-		handleClient(wrapped, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil)
+		handleClient(wrapped, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	// Connect to the local proxy and send a request.
@@ -1158,7 +1158,7 @@ func TestHandleClientKeepAlive(t *testing.T) {
 			return
 		}
 		// Pass a non-zero keepalive to exercise the keepalive code path.
-		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 30*time.Second, nil)
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 30*time.Second, nil, ForwardingConfig{})
 	}()
 
 	client, err := net.Dial("tcp", ln.Addr().String())
@@ -1250,7 +1250,7 @@ func TestHandleClientAppendsToExistingResponseVia(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil)
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	client, err := net.Dial("tcp", ln.Addr().String())
@@ -1329,7 +1329,7 @@ func TestHandleClientAddsViaToConnectResponse(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil)
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	client, err := net.Dial("tcp", ln.Addr().String())

@@ -139,7 +139,7 @@ func TestProxyChainWithRealToken(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil)
+		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
 	}()
 
 	// Connect and send a request through the proxy.
