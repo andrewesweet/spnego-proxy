@@ -26,63 +26,48 @@ import (
 // D4 — Port restriction
 // ---------------------------------------------------------------------------
 
-// TestD4_ConnectToAllowedPortSucceeds verifies that when connectPorts is set
-// and the target port is in the allowed list, the CONNECT tunnel is established
-// successfully.
-func TestD4_ConnectToAllowedPortSucceeds(t *testing.T) {
-	// nil respFunc: the default 200 OK mock is sufficient for CONNECT.
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	proxy.SetConnectPorts([]string{"443", "8443"})
-	t.Cleanup(proxy.Close)
-
-	client, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	t.Cleanup(func() { _ = client.Close() })
-
-	_, err = io.WriteString(client, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
-	if err != nil {
-		t.Fatalf("write CONNECT: %v", err)
+// TestD4_ConnectPortRestriction verifies that when connectPorts is set, the
+// proxy allows CONNECT to listed ports and rejects unlisted ones with 403.
+// It also verifies that a CONNECT target with no explicit port defaults to 443.
+func TestD4_ConnectPortRestriction(t *testing.T) {
+	tests := []struct {
+		name       string
+		ports      []string
+		target     string
+		wantStatus int
+	}{
+		{"allowed port", []string{"443", "8443"}, "example.com:443", http.StatusOK},
+		{"disallowed port", []string{"443", "8443"}, "example.com:25", http.StatusForbidden},
+		{"default port 443 when absent", []string{"443"}, "example.com", http.StatusOK},
 	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := "CONNECT " + tc.target + " HTTP/1.1\r\nHost: " + tc.target + "\r\n\r\n"
 
-	assertStatusCode(t, resp, http.StatusOK)
-}
+			resp, reqs := proxyRawRoundTrip(t, raw, func(p *ProxyUnderTest) {
+				p.SetConnectPorts(tc.ports)
+			})
 
-// TestD4_ConnectToDisallowedPortReturnsForbidden verifies that when
-// connectPorts is non-empty and the target port is not in the allowed list,
-// the proxy returns 403 Forbidden.
-func TestD4_ConnectToDisallowedPortReturnsForbidden(t *testing.T) {
-	raw := "CONNECT example.com:25 HTTP/1.1\r\nHost: example.com:25\r\n\r\n"
+			assertStatusCode(t, resp, tc.wantStatus)
 
-	resp, reqs := proxyRawRoundTrip(t, raw, func(p *ProxyUnderTest) {
-		p.SetConnectPorts([]string{"443", "8443"})
-	})
+			if tc.wantStatus == http.StatusForbidden {
+				wantPS := "spnego-proxy; error=http_request_denied"
+				if got := resp.Header.Get("Proxy-Status"); got != wantPS {
+					t.Errorf("Proxy-Status: want %q, got %q", wantPS, got)
+				}
 
-	assertStatusCode(t, resp, http.StatusForbidden)
+				body, _ := io.ReadAll(resp.Body)
+				if !strings.Contains(string(body), "http_request_denied") {
+					t.Errorf("body: want mention of http_request_denied, got %q", body)
+				}
 
-	wantPS := "spnego-proxy; error=http_request_denied"
-	if got := resp.Header.Get("Proxy-Status"); got != wantPS {
-		t.Errorf("Proxy-Status: want %q, got %q", wantPS, got)
-	}
-
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "http_request_denied") {
-		t.Errorf("body: want mention of http_request_denied, got %q", body)
-	}
-
-	// Upstream must not have received any request.
-	if n := len(reqs); n != 0 {
-		t.Errorf("upstream received %d request(s), want 0", n)
+				// Upstream must not have received any request.
+				if n := len(reqs); n != 0 {
+					t.Errorf("upstream received %d request(s), want 0", n)
+				}
+			}
+		})
 	}
 }
 
@@ -98,7 +83,6 @@ func TestD4_EmptyPortListAllowsAll(t *testing.T) {
 	t.Cleanup(proxy.Close)
 
 	for _, port := range []string{"25", "443", "8080", "9999"} {
-		port := port
 		t.Run("port_"+port, func(t *testing.T) {
 			client, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
 			if err != nil {
@@ -121,39 +105,6 @@ func TestD4_EmptyPortListAllowsAll(t *testing.T) {
 			assertStatusCode(t, resp, http.StatusOK)
 		})
 	}
-}
-
-// TestD4_DefaultPort443WhenNoPortSpecified verifies that a CONNECT target
-// with no explicit port (e.g. "example.com") is treated as port 443 when
-// checking against the allowed port list.
-func TestD4_DefaultPort443WhenNoPortSpecified(t *testing.T) {
-	// nil respFunc: the default 200 OK mock is sufficient for CONNECT.
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	proxy.SetConnectPorts([]string{"443"}) // only 443 allowed
-	t.Cleanup(proxy.Close)
-
-	client, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	t.Cleanup(func() { _ = client.Close() })
-
-	// Send CONNECT without a port — should default to 443 and be allowed.
-	_, err = io.WriteString(client, "CONNECT example.com HTTP/1.1\r\nHost: example.com\r\n\r\n")
-	if err != nil {
-		t.Fatalf("write CONNECT: %v", err)
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	assertStatusCode(t, resp, http.StatusOK)
 }
 
 // ---------------------------------------------------------------------------
@@ -473,6 +424,7 @@ func isEOForClosed(err error) bool {
 	}
 	s := err.Error()
 	return errors.Is(err, io.EOF) ||
+		errors.Is(err, net.ErrClosed) ||
 		strings.Contains(s, "EOF") ||
 		strings.Contains(s, "closed") ||
 		strings.Contains(s, "reset by peer") ||
