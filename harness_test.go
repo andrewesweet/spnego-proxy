@@ -296,13 +296,17 @@ func assertStatusCode(t *testing.T, resp *http.Response, expected int) {
 
 // proxyRoundTrip sends a GET request with the given headers through a fresh
 // proxy→upstream chain and returns the upstream's recorded request.  It
-// assumes the default 200 OK mock response.
-func proxyRoundTrip(t *testing.T, headers http.Header) *RecordedRequest {
+// assumes the default 200 OK mock response. Optional setup funcs can
+// configure the ProxyUnderTest before the first request (e.g., SetForwardingConfig).
+func proxyRoundTrip(t *testing.T, headers http.Header, setup ...func(*ProxyUnderTest)) *RecordedRequest {
 	t.Helper()
 	upstream := NewMockUpstreamProxy(t, nil)
 	t.Cleanup(upstream.Close)
 
 	proxy := NewProxyUnderTest(t, upstream.Addr())
+	for _, fn := range setup {
+		fn(proxy)
+	}
 	t.Cleanup(proxy.Close)
 
 	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
