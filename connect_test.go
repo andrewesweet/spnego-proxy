@@ -4,15 +4,17 @@ package main
 //
 // Requirements covered:
 //
+//	D2 — Drain buffered data on tunnel close (RFC 9110 §9.3.6 MUST)
+//	D3 — No Transfer-Encoding in CONNECT 2xx response (RFC 9112 §6.1 MUST NOT)
 //	D4 — Restrict CONNECT to safe ports (RFC 9110 §9.3.6 SHOULD)
 //	D5 — Close connection when rejecting a CONNECT request (RFC 9112 §11.2 MUST)
 //	D6 — Wait for upstream 2xx before forwarding client payload (RFC 9110 §9.3.6 MUST)
-//	D2 — Drain buffered data on tunnel close (RFC 9110 §9.3.6 MUST)
 //	D7 — Do not send 2xx to client without established upstream connection (RFC 9110 §9.3.6 MUST NOT)
 
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -416,6 +418,57 @@ func TestD2_UpstreamBufferedDataDrainedOnClose(t *testing.T) {
 	if string(data) != tunnelPayload {
 		t.Errorf("D2 violation: want tunnel payload %q, got %q", tunnelPayload, string(data))
 	}
+}
+
+// ---------------------------------------------------------------------------
+// D3 — RFC 9112 §6.1: No Transfer-Encoding in CONNECT 2xx response
+// ---------------------------------------------------------------------------
+
+// TestD3_RFC9112_NoTransferEncodingInCONNECTResponse verifies that when the
+// upstream returns a 200 Connection Established response to a CONNECT request,
+// the proxy does not add or forward a Transfer-Encoding header to the client.
+func TestD3_RFC9112_NoTransferEncodingInCONNECTResponse(t *testing.T) {
+	upstream := NewMockUpstreamProxy(t, func(req *http.Request) *http.Response {
+		if req.Method != http.MethodConnect {
+			t.Errorf("expected CONNECT, got %s", req.Method)
+		}
+		// Return a minimal 200 Connection Established. The proxy must
+		// not inject Transfer-Encoding into the forwarded response.
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+			Header:     make(http.Header),
+			Body:       http.NoBody,
+		}
+	})
+	t.Cleanup(upstream.Close)
+
+	proxy := NewProxyUnderTest(t, upstream.Addr())
+	t.Cleanup(proxy.Close)
+
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	_, err = fmt.Fprintf(conn, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+	if err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// The upstream returned 200; verify the forwarded response.
+	assertStatusCode(t, resp, http.StatusOK)
+
+	// D3: Transfer-Encoding MUST NOT appear in the CONNECT 2xx response.
+	assertHeaderAbsent(t, resp.Header, "Transfer-Encoding")
 }
 
 // isEOForClosed returns true if the error indicates a closed or EOF connection.
