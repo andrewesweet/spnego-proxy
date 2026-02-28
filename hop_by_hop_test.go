@@ -784,6 +784,7 @@ func loopDetectionScenario(t *testing.T) (*http.Response, *ProxyUnderTest, *Mock
 // not forwarded to the upstream.
 func TestA2_RFC9110_LoopDetectionReturns502(t *testing.T) {
 	resp, proxy, upstream := loopDetectionScenario(t)
+	defer func() { _ = resp.Body.Close() }()
 
 	assertStatusCode(t, resp, http.StatusBadGateway)
 
@@ -816,6 +817,7 @@ func TestA2_RFC9110_LoopDetectionReturns502(t *testing.T) {
 // responds with 502 Bad Gateway and Proxy-Status "proxy_loop_detected".
 func TestA3_RFC9209_ProxyStatusOnLoopDetected(t *testing.T) {
 	resp, _, upstream := loopDetectionScenario(t)
+	defer func() { _ = resp.Body.Close() }()
 
 	// A3: 502 with proxy_loop_detected when own pseudonym found in Via.
 	assertProxyStatus(t, resp, http.StatusBadGateway, "proxy_loop_detected")
