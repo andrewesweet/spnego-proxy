@@ -127,9 +127,12 @@ func TestForwardedChaining(t *testing.T) {
 }
 
 // TestForwardedObfuscatedFormat verifies the exact token format: _<8 lowercase
-// hex chars>.  generateObfuscatedID uses 4 random bytes → 8 hex chars.
+// hex chars> (generateObfuscatedID uses 4 random bytes -> 8 hex chars) and
+// that the output matches the RFC 7239 section 6.3 obfnode production:
+// "_" 1*( ALPHA / DIGIT / "." / "_" / "-").
 func TestForwardedObfuscatedFormat(t *testing.T) {
-	for range 10 {
+	re := regexp.MustCompile(`^_[A-Za-z0-9._-]+$`)
+	for range 20 {
 		id := generateObfuscatedID()
 		if !strings.HasPrefix(id, "_") {
 			t.Errorf("generateObfuscatedID() = %q: missing underscore prefix", id)
@@ -142,6 +145,9 @@ func TestForwardedObfuscatedFormat(t *testing.T) {
 			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 				t.Errorf("generateObfuscatedID() = %q: non-lowercase-hex char %q", id, c)
 			}
+		}
+		if !re.MatchString(id) {
+			t.Errorf("generateObfuscatedID() = %q does not match RFC 7239 obfnode pattern", id)
 		}
 	}
 }
@@ -303,18 +309,6 @@ func TestGenerateObfuscatedIDUniqueness(t *testing.T) {
 			t.Errorf("generateObfuscatedID() produced duplicate %q in 20 iterations", id)
 		}
 		seen[id] = true
-	}
-}
-
-// TestGenerateObfuscatedIDRFC7239Compliance verifies the format matches
-// RFC 7239 §6.3 obfnode production: "_" 1*( ALPHA / DIGIT / "." / "_" / "-")
-func TestGenerateObfuscatedIDRFC7239Compliance(t *testing.T) {
-	re := regexp.MustCompile(`^_[A-Za-z0-9._-]+$`)
-	for range 20 {
-		id := generateObfuscatedID()
-		if !re.MatchString(id) {
-			t.Errorf("generateObfuscatedID() = %q does not match RFC 7239 obfnode pattern", id)
-		}
 	}
 }
 

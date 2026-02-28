@@ -68,6 +68,12 @@ func TestL2_RFC9110_GatewayTimeoutOnDialTimeout(t *testing.T) {
 	if !strings.Contains(string(body), "connection_timeout") {
 		t.Errorf("body: want mention of connection_timeout, got %q", body)
 	}
+	if !strings.Contains(string(body), "timed out connecting to the upstream proxy") {
+		t.Errorf("body: want description of timeout, got %q", body)
+	}
+	if !strings.Contains(string(body), "Suggested action:") {
+		t.Errorf("body: want suggested action, got %q", body)
+	}
 
 	waitForDone(t, done)
 }
