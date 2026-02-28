@@ -181,3 +181,11 @@ Pull requests run the following checks automatically:
 | Security analysis | CodeQL | Go, C, Actions |
 | Build + unit tests | go build, go test | macOS (CGO) + Linux |
 | GSS-API integration tests | go test (INTEGRATION=1) | macOS arm64 only |
+
+## Security
+
+A STRIDE threat model of the codebase is maintained in
+[docs/threat-model/](docs/threat-model/README.md). Security-related issues are
+tracked with the
+[`threat-model`](https://github.com/andrewesweet/spnego-proxy/labels/threat-model)
+label.
