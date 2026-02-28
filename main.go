@@ -298,6 +298,36 @@ func writeHTTPError(conn net.Conn, pe *proxyError) {
 	_ = resp.Write(conn)
 }
 
+// writeMaxForwardsResponse sends a local 200 OK response when a TRACE or
+// OPTIONS request arrives with Max-Forwards: 0 per RFC 9110 §7.6.2. This
+// proxy is the designated final recipient for that request; it MUST NOT
+// forward it further.
+//
+// For TRACE, RFC 9110 §9.3.8 specifies the body should echo the received
+// message. For OPTIONS, RFC 9110 §9.3.7 specifies a simple 200 OK with an
+// Allow header describing the supported methods. We respond with 200 OK and
+// an informational body for both methods — this satisfies the MUST NOT
+// forward requirement without implementing full TRACE/OPTIONS semantics that
+// are irrelevant to a forwarding proxy.
+func writeMaxForwardsResponse(conn net.Conn, req *http.Request) {
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header: http.Header{
+			"Content-Type": {"text/plain; charset=utf-8"},
+			"Connection":   {"close"},
+		},
+		Body:          http.NoBody,
+		ContentLength: 0,
+	}
+	// OPTIONS: advertise the request methods this proxy accepts.
+	if req.Method == http.MethodOptions {
+		resp.Header.Set("Allow", "GET, HEAD, POST, PUT, DELETE, OPTIONS, TRACE, CONNECT")
+	}
+	_ = resp.Write(conn)
+}
+
 // connectPortAllowed reports whether port is in the allowed set.
 // An empty allowedPorts slice means all ports are permitted.
 func connectPortAllowed(port string, allowedPorts []string) bool {
@@ -367,6 +397,26 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 			slog.Warn("CONNECT port not allowed", "host", req.Host, "port", port, "client_addr", clientAddr)
 			writeHTTPError(conn, errForbiddenPort)
 			return
+		}
+	}
+
+	// G1 (RFC 9110 §7.6.2): for TRACE and OPTIONS, decrement Max-Forwards
+	// before forwarding, or respond locally when the value reaches zero.
+	if req.Method == http.MethodTrace || req.Method == http.MethodOptions {
+		if mf := req.Header.Get("Max-Forwards"); mf != "" {
+			n, err := strconv.Atoi(mf)
+			if err == nil {
+				if n == 0 {
+					// This proxy is the final recipient — respond locally.
+					slog.Debug("Max-Forwards: 0, responding locally",
+						"method", req.Method, "client_addr", clientAddr)
+					writeMaxForwardsResponse(conn, req)
+					return
+				}
+				req.Header.Set("Max-Forwards", strconv.Itoa(n-1))
+			}
+			// If Atoi fails (non-numeric value), forward the header unmodified
+			// per the principle of liberal acceptance.
 		}
 	}
 
