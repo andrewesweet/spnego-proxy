@@ -302,6 +302,11 @@ func readUpstreamResponse(upstreamReader *bufio.Reader, req *http.Request, pseud
 		resp.ContentLength = -1
 	}
 
+	// B3 (RFC 9110 §11.7.2): Proxy-Authenticate is hop-by-hop — it applies
+	// only between the client and the next inbound proxy. Strip it before
+	// relaying the response downstream.
+	resp.Header.Del("Proxy-Authenticate")
+
 	// RFC 9110 §7.6.3: a forward proxy MUST add Via to responses.
 	injectVia(resp.Header, resp.Proto, pseudonym)
 

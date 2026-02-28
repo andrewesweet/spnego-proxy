@@ -9,7 +9,7 @@ package main
 //   C4  RFC 9112 §3.2.2  — path and query of request-target not modified
 //   C5  RFC 9110 §11.7.2 — Authorization header passed through unmodified
 //   C7  RFC 9110 §7.7    — content not transformed when no-transform is present
-//   B3  RFC 9110 §11.7.2 — Proxy-Authenticate not forwarded to client (known gap)
+//   B3  RFC 9110 §11.7.2 — Proxy-Authenticate not forwarded to client
 //
 // Non-testable requirements (handled transparently by Go stdlib):
 //   C6  RFC 9112 §5.2 — whitespace between header name and colon stripped
@@ -282,24 +282,13 @@ func TestForwardingC7_NoTransformBodyPreserved(t *testing.T) {
 // B3 — RFC 9110 §11.7.2: Proxy-Authenticate not forwarded to client
 // ---------------------------------------------------------------------------
 
-// TestForwardingB3_ProxyAuthenticateNotForwardedToClient checks whether the
+// TestForwardingB3_ProxyAuthenticateNotForwardedToClient verifies that the
 // proxy strips the Proxy-Authenticate header from upstream responses before
 // relaying them to the client.
 //
 // RFC 9110 §11.7.2: Proxy-Authenticate is a hop-by-hop header that applies
 // only between the client and the next inbound proxy; it MUST NOT be
 // forwarded downstream.
-//
-// KNOWN GAP: The proxy currently does NOT strip Proxy-Authenticate from
-// upstream responses. The response path uses http.ReadResponse + resp.Write
-// without filtering Proxy-Authenticate. Go's http.Response.Write re-emits all
-// headers as received, so the Proxy-Authenticate value set by the upstream
-// will reach the client.
-//
-// Follow-up work: Add Proxy-Authenticate to the hop-by-hop sanitization pass
-// applied to upstream responses (analogous to sanitizeHopByHop for requests),
-// before the injectVia + resp.Write call in the upstream-to-client goroutine.
-// See GitHub issue #125 for tracking.
 func TestForwardingB3_ProxyAuthenticateNotForwardedToClient(t *testing.T) {
 	respFunc := func(_ *http.Request) *http.Response {
 		return &http.Response{
@@ -322,14 +311,6 @@ func TestForwardingB3_ProxyAuthenticateNotForwardedToClient(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	assertStatusCode(t, resp, http.StatusOK)
 
-	// KNOWN GAP: The assertion below is written as the desired post-fix
-	// behaviour. Until the proxy strips Proxy-Authenticate from responses,
-	// this test will document the gap via t.Skip rather than fail hard.
-	// Remove the t.Skip call once response-side hop-by-hop sanitization is
-	// implemented (issue #125).
-	if pa := resp.Header.Get("Proxy-Authenticate"); pa != "" {
-		t.Skipf("KNOWN GAP (issue #125 / B3): proxy forwards Proxy-Authenticate %q to client; "+
-			"response-side hop-by-hop sanitization is not yet implemented", pa)
-	}
-	// If we reach here, the proxy already handles B3 correctly.
+	// B3: Proxy-Authenticate MUST NOT be forwarded to the client.
+	assertHeaderAbsent(t, resp.Header, "Proxy-Authenticate")
 }
