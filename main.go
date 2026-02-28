@@ -816,7 +816,7 @@ func main() {
 	// Parse -connect-ports flag into a slice. Empty string means all ports allowed.
 	var connectPorts []string
 	if *connectPortsFlag != "" {
-		for _, p := range strings.Split(*connectPortsFlag, ",") {
+		for p := range strings.SplitSeq(*connectPortsFlag, ",") {
 			if p = strings.TrimSpace(p); p != "" {
 				connectPorts = append(connectPorts, p)
 			}
