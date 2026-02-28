@@ -645,7 +645,8 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 			if errors.Is(err, errContentLengthInvalid) {
 				slog.Error("invalid Content-Length in upstream response",
 					"error", err, "error_type", errInvalidContentLength.errorType,
-					"client_addr", conn.RemoteAddr())
+					"client_addr", conn.RemoteAddr(),
+					"upstream_addr", proxyConn.RemoteAddr())
 				writeHTTPError(conn, errInvalidContentLength)
 				return
 			}
@@ -681,7 +682,8 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 		if errors.Is(err, errContentLengthInvalid) {
 			slog.Error("invalid Content-Length in upstream CONNECT response",
 				"error", err, "error_type", errInvalidContentLength.errorType,
-				"client_addr", clientAddr)
+				"client_addr", clientAddr,
+				"upstream_addr", proxyConn.RemoteAddr())
 			writeHTTPError(conn, errInvalidContentLength)
 			return
 		}
