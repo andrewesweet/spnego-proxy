@@ -347,12 +347,10 @@ type proxyError struct {
 
 // body renders the structured plain-text response body.
 func (e *proxyError) body() string {
-	var buf strings.Builder
-	fmt.Fprintf(&buf, "spnego-proxy error: %s\n\n%s\n", e.errorType, e.message)
-	if e.action != "" {
-		fmt.Fprintf(&buf, "\nSuggested action: %s\n", e.action)
+	if e.action == "" {
+		return fmt.Sprintf("spnego-proxy error: %s\n\n%s\n", e.errorType, e.message)
 	}
-	return buf.String()
+	return fmt.Sprintf("spnego-proxy error: %s\n\n%s\n\nSuggested action: %s\n", e.errorType, e.message, e.action)
 }
 
 // RFC 9209 Proxy-Status error type tokens.
@@ -443,12 +441,12 @@ var (
 // closed.
 func writeHTTPError(conn net.Conn, pe *proxyError) {
 	body := pe.body()
-	header := http.Header{
-		"Content-Type": {"text/plain; charset=utf-8"},
-		"Connection":   {"close"},
-	}
 	// RFC 9209 Proxy-Status header with RFC 8941 Structured Fields syntax.
-	header.Set("Proxy-Status", "spnego-proxy; error="+pe.errorType)
+	header := http.Header{
+		"Content-Type":  {"text/plain; charset=utf-8"},
+		"Connection":    {"close"},
+		"Proxy-Status":  {"spnego-proxy; error=" + pe.errorType},
+	}
 
 	resp := &http.Response{
 		StatusCode:    pe.statusCode,
@@ -481,8 +479,7 @@ func writeMaxForwardsResponse(conn net.Conn, req *http.Request) {
 			"Content-Type": {"text/plain; charset=utf-8"},
 			"Connection":   {"close"},
 		},
-		Body:          http.NoBody,
-		ContentLength: 0,
+		Body: http.NoBody,
 	}
 	// OPTIONS: advertise the request methods this proxy accepts.
 	if req.Method == http.MethodOptions {
@@ -491,10 +488,39 @@ func writeMaxForwardsResponse(conn net.Conn, req *http.Request) {
 	_ = resp.Write(conn)
 }
 
+// splitCSV splits a comma-separated string into trimmed, non-empty tokens.
+func splitCSV(s string) []string {
+	var out []string
+	for part := range strings.SplitSeq(s, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 // connectPortAllowed reports whether port is in the allowed set.
 // An empty allowedPorts slice means all ports are permitted.
 func connectPortAllowed(port string, allowedPorts []string) bool {
 	return len(allowedPorts) == 0 || slices.Contains(allowedPorts, port)
+}
+
+// tokenErrorToProxyError maps a GetToken error to the most specific proxyError
+// sentinel, falling back to errTokenAcquisition for unrecognised errors.
+func tokenErrorToProxyError(err error) *proxyError {
+	var cbErr *CircuitBreakerError
+	var credErr *CredentialError
+	var negErr *NegotiationError
+	switch {
+	case errors.As(err, &cbErr):
+		return errCircuitBreakerOpen
+	case errors.As(err, &credErr):
+		return errCredentialFailure
+	case errors.As(err, &negErr):
+		return errNegotiationFailure
+	default:
+		return errTokenAcquisition
+	}
 }
 
 // handleUpstreamResponseError handles errors from readUpstreamResponse.
@@ -516,17 +542,22 @@ func handleUpstreamResponseError(conn, proxyConn net.Conn, upstreamReader *bufio
 	}
 }
 
+// closeWrite calls CloseWrite on conn if the underlying type supports it.
+// This signals the remote peer that no more data will be sent on this half
+// of the connection, allowing it to read EOF and finish gracefully.
+func closeWrite(conn net.Conn) {
+	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+	}
+}
+
 // forwardHalf copies data from src to dst, calling CloseWrite on dst when
 // done. It logs the start, completion, and any errors. wg.Done is deferred
 // so callers can use a WaitGroup to synchronise the two halves of a
 // bidirectional forwarding pair.
 func forwardHalf(wg *sync.WaitGroup, dst net.Conn, src io.Reader, fromAddr, toAddr net.Addr) {
 	defer wg.Done()
-	defer func() {
-		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-			_ = cw.CloseWrite()
-		}
-	}()
+	defer closeWrite(dst)
 	slog.Debug("forward start", "from", fromAddr, "to", toAddr)
 	defer slog.Debug("forward done", "from", fromAddr, "to", toAddr)
 	if _, err := io.Copy(dst, src); err != nil {
@@ -593,20 +624,17 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	if req.Method == http.MethodTrace || req.Method == http.MethodOptions {
 		if mf := req.Header.Get("Max-Forwards"); mf != "" {
 			n, err := strconv.Atoi(mf)
-			if err == nil {
-				if n <= 0 {
-					// This proxy is the final recipient — respond locally.
-					slog.Debug("Max-Forwards: 0, responding locally",
-						"method", req.Method, "client_addr", clientAddr)
-					writeMaxForwardsResponse(conn, req)
-					return
-				}
-				req.Header.Set("Max-Forwards", strconv.Itoa(n-1))
-			}
-			// If Atoi fails (non-numeric value), forward the header unmodified
-			// per the principle of liberal acceptance.
 			if err != nil {
+				// Non-numeric value: forward unmodified per the principle of liberal acceptance.
 				slog.Debug("non-numeric Max-Forwards value, forwarding unmodified", "max_forwards", mf, "client_addr", clientAddr)
+			} else if n <= 0 {
+				// This proxy is the final recipient — respond locally.
+				slog.Debug("Max-Forwards: 0, responding locally",
+					"method", req.Method, "client_addr", clientAddr)
+				writeMaxForwardsResponse(conn, req)
+				return
+			} else {
+				req.Header.Set("Max-Forwards", strconv.Itoa(n-1))
 			}
 		}
 	}
@@ -620,18 +648,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 
 	token, err := cfg.Provider.GetToken()
 	if err != nil {
-		pe := errTokenAcquisition
-		var cbErr *CircuitBreakerError
-		var credErr *CredentialError
-		var negErr *NegotiationError
-		switch {
-		case errors.As(err, &cbErr):
-			pe = errCircuitBreakerOpen
-		case errors.As(err, &credErr):
-			pe = errCredentialFailure
-		case errors.As(err, &negErr):
-			pe = errNegotiationFailure
-		}
+		pe := tokenErrorToProxyError(err)
 		slog.Error("failed to get SPNEGO token", "error", err, "error_type", pe.errorType, "client_addr", clientAddr, "upstream_addr", cfg.Upstream, "method", req.Method, "host", req.Host)
 		writeHTTPError(conn, pe)
 		return
@@ -683,11 +700,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	// Upstream→client: parse response headers to inject Via, then relay body.
 	go func() {
 		defer wg.Done()
-		defer func() {
-			if cw, ok := conn.(interface{ CloseWrite() error }); ok {
-				_ = cw.CloseWrite()
-			}
-		}()
+		defer closeWrite(conn)
 		slog.Debug("forward start", "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
 		defer slog.Debug("forward done", "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
 
@@ -806,14 +819,7 @@ func main() {
 	}
 	pseudonym := generateViaPseudonym()
 
-	var connectPorts []string
-	if *connectPortsFlag != "" {
-		for p := range strings.SplitSeq(*connectPortsFlag, ",") {
-			if p = strings.TrimSpace(p); p != "" {
-				connectPorts = append(connectPorts, p)
-			}
-		}
-	}
+	connectPorts := splitCSV(*connectPortsFlag)
 
 	cfg := ProxyConfig{
 		Upstream:     *proxy,
@@ -831,10 +837,12 @@ func main() {
 
 	if *maxConns > 0 {
 		l = netutil.LimitListener(l, *maxConns)
-		slog.Info("listening", "addr", *addr, "proxy", *proxy, "max_conns", *maxConns, "via_pseudonym", pseudonym)
-	} else {
-		slog.Info("listening", "addr", *addr, "proxy", *proxy, "via_pseudonym", pseudonym)
 	}
+	logArgs := []any{"addr", *addr, "proxy", *proxy, "via_pseudonym", pseudonym}
+	if *maxConns > 0 {
+		logArgs = append(logArgs, "max_conns", *maxConns)
+	}
+	slog.Info("listening", logArgs...)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
