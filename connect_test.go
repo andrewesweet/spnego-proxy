@@ -7,6 +7,7 @@ package main
 //	D4 — Restrict CONNECT to safe ports (RFC 9110 §9.3.6 SHOULD)
 //	D5 — Close connection when rejecting a CONNECT request (RFC 9112 §11.2 MUST)
 //	D6 — Wait for upstream 2xx before forwarding client payload (RFC 9112 §11.2 MUST)
+//	D2 — Drain buffered data on tunnel close (RFC 9110 §9.3.6 MUST)
 //	D7 — Do not send 2xx to client without established upstream connection (RFC 9110 §9.3.6 MUST NOT)
 
 import (
@@ -427,6 +428,102 @@ func TestD5_ConnectionClosedAfterConnectRejection(t *testing.T) {
 		t.Error("D5 violation: expected connection to be closed after CONNECT rejection, but read succeeded")
 	} else if !isEOForClosed(err) {
 		t.Errorf("D5 violation: expected EOF or closed error after CONNECT rejection, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// D2 — Drain buffered data on tunnel close
+// ---------------------------------------------------------------------------
+
+// TestD2_UpstreamBufferedDataDrainedOnClose verifies that when the upstream
+// closes its side of the CONNECT tunnel with pending data, all buffered bytes
+// are delivered to the client before EOF. This tests the upstream→client
+// direction of D2 (RFC 9110 §9.3.6).
+func TestD2_UpstreamBufferedDataDrainedOnClose(t *testing.T) {
+	const tunnelPayload = "TUNNEL-DATA-FROM-UPSTREAM-THAT-MUST-ARRIVE"
+
+	// The mock upstream sends a 200 for CONNECT, then writes tunnel data
+	// and closes the connection.
+	upstream := NewMockUpstreamProxy(t, func(req *http.Request) *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+			Header:     make(http.Header),
+			Body:       http.NoBody,
+		}
+	})
+	// We need to inject tunnel data after the 200 response. Override the
+	// mock's handleConn by using a raw listener instead.
+	upstream.Close()
+
+	rawUpstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = rawUpstream.Close() }()
+
+	go func() {
+		conn, err := rawUpstream.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		// Read the CONNECT request from the proxy.
+		reader := bufio.NewReader(conn)
+		if _, err := http.ReadRequest(reader); err != nil {
+			return
+		}
+
+		// Send 200 response.
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+			Header:     make(http.Header),
+			Body:       http.NoBody,
+		}
+		_ = resp.Write(conn)
+
+		// Write tunnel data and close — the proxy must drain all of it
+		// to the client.
+		_, _ = conn.Write([]byte(tunnelPayload))
+		// Connection closes via defer, signaling EOF to the proxy.
+	}()
+
+	proxy := NewProxyUnderTest(t, rawUpstream.Addr().String())
+	defer proxy.Close()
+
+	client, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	// Send CONNECT request.
+	_, err = io.WriteString(client, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+	if err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+
+	// Read the 200 response.
+	br := bufio.NewReader(client)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	_ = resp.Body.Close()
+	assertStatusCode(t, resp, http.StatusOK)
+
+	// Read all tunnel data — the proxy must deliver every byte before EOF.
+	_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+	data, err := io.ReadAll(br)
+	if err != nil {
+		t.Fatalf("read tunnel data: %v", err)
+	}
+	if string(data) != tunnelPayload {
+		t.Errorf("D2 violation: want tunnel payload %q, got %q", tunnelPayload, string(data))
 	}
 }
 
