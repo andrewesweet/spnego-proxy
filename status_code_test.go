@@ -54,8 +54,7 @@ func TestL2_RFC9110_GatewayTimeoutOnDialTimeout(t *testing.T) {
 		defer close(done)
 		// 50 ms dial timeout: short enough for a fast test, long enough
 		// to let the OS attempt the connection before cancelling.
-		handleClient(server, unreachable, provider, testPseudonym,
-			50*time.Millisecond, 5*time.Second, 0, nil, ForwardingConfig{})
+		handleClient(server, ProxyConfig{Upstream: unreachable, Provider: provider, Pseudonym: testPseudonym, DialTimeout: 50 * time.Millisecond, ReadTimeout: 5 * time.Second})
 	}()
 
 	// The proxy dials upstream immediately on accepting a connection,
@@ -123,8 +122,7 @@ func TestL1_RFC9112_BadGatewayOnConnectionRefused(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, refusedAddr, provider, testPseudonym,
-			5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
+		handleClient(server, ProxyConfig{Upstream: refusedAddr, Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
 	}()
 
 	// Read the proxy error response without sending a request. The proxy
@@ -274,8 +272,7 @@ func TestJ1_RFC9112_HTTP11AdvertisedInProxyGeneratedResponses(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				handleClient(server, upstreamAddr, provider, testPseudonym,
-					tc.dialTimeout, 5*time.Second, 0, nil, ForwardingConfig{})
+				handleClient(server, ProxyConfig{Upstream: upstreamAddr, Provider: provider, Pseudonym: testPseudonym, DialTimeout: tc.dialTimeout, ReadTimeout: 5 * time.Second})
 			}()
 
 			// Read the full response so that handleClient can complete

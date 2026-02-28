@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,6 +71,18 @@ type ForwardingConfig struct {
 	// and, when the headers are absent, also sets X-Forwarded-Proto (H3) and
 	// X-Forwarded-Host (H4).
 	XForwardedForEnabled bool
+}
+
+// ProxyConfig groups the non-connection parameters for handleClient.
+type ProxyConfig struct {
+	Upstream     string
+	Provider     TokenProvider
+	Pseudonym    string
+	DialTimeout  time.Duration
+	ReadTimeout  time.Duration
+	KeepAlive    time.Duration
+	ConnectPorts []string
+	Forwarding   ForwardingConfig
 }
 
 // generateObfuscatedID returns a random RFC 7239 §6.3 obfuscated identifier
@@ -413,41 +426,33 @@ func writeMaxForwardsResponse(conn net.Conn, req *http.Request) {
 // connectPortAllowed reports whether port is in the allowed set.
 // An empty allowedPorts slice means all ports are permitted.
 func connectPortAllowed(port string, allowedPorts []string) bool {
-	if len(allowedPorts) == 0 {
-		return true
-	}
-	for _, p := range allowedPorts {
-		if p == port {
-			return true
-		}
-	}
-	return false
+	return len(allowedPorts) == 0 || slices.Contains(allowedPorts, port)
 }
 
-// handleClient handles a single client connection. connectPorts restricts
-// which ports are allowed for CONNECT tunneling; nil or empty means all ports
-// are permitted (D4, RFC 9110 §9.3.6). fwdCfg controls optional forwarding
-// header injection (RFC 7239 Forwarded, X-Forwarded-For, etc.).
-func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym string, dialTimeout, readTimeout, keepAlive time.Duration, connectPorts []string, fwdCfg ForwardingConfig) {
+// handleClient handles a single client connection. cfg groups all
+// non-connection parameters including upstream address, token provider,
+// timeouts, CONNECT port restrictions (D4, RFC 9110 §9.3.6), and
+// forwarding header injection (RFC 7239 Forwarded, X-Forwarded-For, etc.).
+func handleClient(conn net.Conn, cfg ProxyConfig) {
 	defer func() { _ = conn.Close() }()
 	clientAddr := conn.RemoteAddr().String()
 	slog.Debug("new client", "client_addr", clientAddr)
 	defer slog.Debug("stop processing request", "client_addr", clientAddr)
-	proxyConn, err := net.DialTimeout("tcp", proxy, dialTimeout)
+	proxyConn, err := net.DialTimeout("tcp", cfg.Upstream, cfg.DialTimeout)
 	if err != nil {
 		var ne net.Error
 		if errors.As(err, &ne) && ne.Timeout() {
-			slog.Error("failed to connect to proxy", "error", err, "error_type", errConnectionTimeout.errorType, "client_addr", clientAddr, "upstream_addr", proxy)
+			slog.Error("failed to connect to proxy", "error", err, "error_type", errConnectionTimeout.errorType, "client_addr", clientAddr, "upstream_addr", cfg.Upstream)
 			writeHTTPError(conn, errConnectionTimeout)
 		} else {
-			slog.Error("failed to connect to proxy", "error", err, "error_type", errConnectionRefused.errorType, "client_addr", clientAddr, "upstream_addr", proxy)
+			slog.Error("failed to connect to proxy", "error", err, "error_type", errConnectionRefused.errorType, "client_addr", clientAddr, "upstream_addr", cfg.Upstream)
 			writeHTTPError(conn, errConnectionRefused)
 		}
 		return
 	}
 	defer func() { _ = proxyConn.Close() }()
 	reqReader := bufio.NewReader(conn)
-	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+	_ = conn.SetReadDeadline(time.Now().Add(cfg.ReadTimeout))
 	req, err := http.ReadRequest(reqReader)
 	_ = conn.SetReadDeadline(time.Time{}) // clear after read
 	if err != nil {
@@ -461,8 +466,8 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 	// incoming Via header already contains this proxy instance's pseudonym.
 	// This must precede sanitizeHopByHop: a client sending
 	// "Connection: Via" would strip Via before the loop check otherwise.
-	if prior := req.Header.Get("Via"); prior != "" && strings.Contains(prior, pseudonym) {
-		slog.Warn("proxy loop detected", "via", prior, "pseudonym", pseudonym, "client_addr", clientAddr, "method", req.Method, "host", req.Host)
+	if prior := req.Header.Get("Via"); prior != "" && strings.Contains(prior, cfg.Pseudonym) {
+		slog.Warn("proxy loop detected", "via", prior, "pseudonym", cfg.Pseudonym, "client_addr", clientAddr, "method", req.Method, "host", req.Host)
 		writeHTTPError(conn, errProxyLoopDetected)
 		return
 	}
@@ -470,13 +475,13 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 	// D4 (RFC 9110 §9.3.6): restrict CONNECT to allowed ports when
 	// connectPorts is non-empty. Parse the port from req.Host; default to
 	// "443" when no port is present (bare hostname CONNECT).
-	if req.Method == http.MethodConnect && len(connectPorts) > 0 {
+	if req.Method == http.MethodConnect && len(cfg.ConnectPorts) > 0 {
 		_, port, err := net.SplitHostPort(req.Host)
 		if err != nil {
 			// No port in host — RFC convention is to default to 443.
 			port = "443"
 		}
-		if !connectPortAllowed(port, connectPorts) {
+		if !connectPortAllowed(port, cfg.ConnectPorts) {
 			slog.Warn("CONNECT port not allowed", "host", req.Host, "port", port, "client_addr", clientAddr)
 			writeHTTPError(conn, errForbiddenPort)
 			return
@@ -508,9 +513,9 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 
 	// H1–H4: inject optional forwarding headers after hop-by-hop sanitization
 	// so that any client-sent hop-by-hop headers are stripped first.
-	injectForwardingHeaders(req, clientAddr, fwdCfg)
+	injectForwardingHeaders(req, clientAddr, cfg.Forwarding)
 
-	token, err := provider.GetToken()
+	token, err := cfg.Provider.GetToken()
 	if err != nil {
 		pe := errTokenAcquisition
 		var cbErr *CircuitBreakerError
@@ -524,7 +529,7 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 		case errors.As(err, &negErr):
 			pe = errNegotiationFailure
 		}
-		slog.Error("failed to get SPNEGO token", "error", err, "error_type", pe.errorType, "client_addr", clientAddr, "upstream_addr", proxy, "method", req.Method, "host", req.Host)
+		slog.Error("failed to get SPNEGO token", "error", err, "error_type", pe.errorType, "client_addr", clientAddr, "upstream_addr", cfg.Upstream, "method", req.Method, "host", req.Host)
 		writeHTTPError(conn, pe)
 		return
 	}
@@ -532,17 +537,17 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 
 	// RFC 9110 §7.6.3: intermediaries MUST add a Via entry identifying
 	// the protocol version received and the proxy instance.
-	injectVia(req.Header, req.Proto, pseudonym)
+	injectVia(req.Header, req.Proto, cfg.Pseudonym)
 
-	slog.Debug("proxy request", "method", req.Method, "uri", req.RequestURI, "proto", req.Proto, "headers", len(req.Header), "client_addr", clientAddr, "upstream_addr", proxy, "via", req.Header.Get("Via"))
+	slog.Debug("proxy request", "method", req.Method, "uri", req.RequestURI, "proto", req.Proto, "headers", len(req.Header), "client_addr", clientAddr, "upstream_addr", cfg.Upstream, "via", req.Header.Get("Via"))
 	if err := req.WriteProxy(proxyConn); err != nil {
-		slog.Error("failed to write request to proxy", "error", err, "error_type", errConnectionTerminated.errorType, "client_addr", clientAddr, "upstream_addr", proxy, "method", req.Method, "host", req.Host)
+		slog.Error("failed to write request to proxy", "error", err, "error_type", errConnectionTerminated.errorType, "client_addr", clientAddr, "upstream_addr", cfg.Upstream, "method", req.Method, "host", req.Host)
 		writeHTTPError(conn, errConnectionTerminated)
 		return
 	}
-	if keepAlive > 0 {
-		enableKeepAlive(conn, keepAlive)
-		enableKeepAlive(proxyConn, keepAlive)
+	if cfg.KeepAlive > 0 {
+		enableKeepAlive(conn, cfg.KeepAlive)
+		enableKeepAlive(proxyConn, cfg.KeepAlive)
 	}
 
 	if req.Method == http.MethodConnect {
@@ -550,7 +555,7 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 		// BEFORE starting to forward client payload. This ensures client
 		// data (e.g. TLS ClientHello) is not sent to the upstream until
 		// after the upstream has confirmed tunnel establishment with 2xx.
-		handleConnectTunnel(conn, proxyConn, reqReader, req, pseudonym, clientAddr)
+		handleConnectTunnel(conn, proxyConn, reqReader, req, cfg.Pseudonym, clientAddr)
 		return
 	}
 
@@ -643,7 +648,7 @@ func handleClient(conn net.Conn, proxy string, provider TokenProvider, pseudonym
 		}
 
 		// RFC 9110 §7.6.3: a forward proxy MUST add Via to responses.
-		injectVia(resp.Header, resp.Proto, pseudonym)
+		injectVia(resp.Header, resp.Proto, cfg.Pseudonym)
 
 		if err := resp.Write(conn); err != nil {
 			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
@@ -823,9 +828,18 @@ func main() {
 		}
 	}
 
-	fwdCfg := ForwardingConfig{
-		ForwardedEnabled:     *forwardedFlag,
-		XForwardedForEnabled: *xForwardedForFlag,
+	cfg := ProxyConfig{
+		Upstream:  *proxy,
+		Provider:  provider,
+		Pseudonym: pseudonym,
+		DialTimeout:  *dialTimeout,
+		ReadTimeout:  *readTimeout,
+		KeepAlive:    *keepAlive,
+		ConnectPorts: connectPorts,
+		Forwarding: ForwardingConfig{
+			ForwardedEnabled:     *forwardedFlag,
+			XForwardedForEnabled: *xForwardedForFlag,
+		},
 	}
 
 	if *maxConns > 0 {
@@ -854,7 +868,7 @@ func main() {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleClient(conn, *proxy, provider, pseudonym, *dialTimeout, *readTimeout, *keepAlive, connectPorts, fwdCfg)
+				handleClient(conn, cfg)
 			}()
 		}
 	}()

@@ -159,10 +159,10 @@ func (m *MockUpstreamProxy) Close() {
 // backed by a stubTokenProvider.  It removes the per-test boilerplate of
 // creating listeners, token providers, and pseudonyms.
 //
-// Exported fields (Provider, Pseudonym, DialTimeout, ReadTimeout, KeepAlive)
-// may be customised after construction but before the first client connects.
-// ConnectPorts must be set via SetConnectPorts and ForwardingConfig must be
-// set via SetForwardingConfig to avoid data races.
+// The Provider field may be customised after construction but before the
+// first client connects. ConnectPorts and Forwarding must be set via
+// SetConnectPorts and SetForwardingConfig to avoid data races with the
+// accept loop goroutine.
 type ProxyUnderTest struct {
 	listener net.Listener
 
@@ -170,32 +170,20 @@ type ProxyUnderTest struct {
 	// replace it or adjust its fields before sending requests.
 	Provider *stubTokenProvider
 
-	// Pseudonym is the Via header pseudonym.  Defaults to testPseudonym.
-	Pseudonym string
+	// mu protects cfg so mutable fields (ConnectPorts, Forwarding) can
+	// be set after construction without a data race with acceptLoop.
+	mu  sync.RWMutex
+	cfg ProxyConfig
 
-	// DialTimeout, ReadTimeout, and KeepAlive mirror the handleClient
-	// parameters.  Defaults are generous (5 s) so tests that do not care
-	// about timeouts need not set them.
-	DialTimeout time.Duration
-	ReadTimeout time.Duration
-	KeepAlive   time.Duration
-
-	// mu protects connectPorts and forwardingConfig so they can be set
-	// after construction without a data race with the acceptLoop goroutine.
-	mu               sync.RWMutex
-	connectPorts     []string
-	forwardingConfig ForwardingConfig
-
-	upstream string
-	wg       sync.WaitGroup
-	closed   chan struct{}
+	wg     sync.WaitGroup
+	closed chan struct{}
 }
 
-// ConnectPorts returns the current allowed CONNECT port list (thread-safe).
-func (p *ProxyUnderTest) getConnectPorts() []string {
+// getConfig returns a snapshot of the current ProxyConfig (thread-safe).
+func (p *ProxyUnderTest) getConfig() ProxyConfig {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.connectPorts
+	return p.cfg
 }
 
 // SetConnectPorts sets the allowed CONNECT port list (thread-safe).
@@ -203,22 +191,15 @@ func (p *ProxyUnderTest) getConnectPorts() []string {
 func (p *ProxyUnderTest) SetConnectPorts(ports []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.connectPorts = ports
-}
-
-// getForwardingConfig returns the current ForwardingConfig (thread-safe).
-func (p *ProxyUnderTest) getForwardingConfig() ForwardingConfig {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.forwardingConfig
+	p.cfg.ConnectPorts = ports
 }
 
 // SetForwardingConfig sets the ForwardingConfig (thread-safe).
 // It must be called before the first client connects to avoid data races.
-func (p *ProxyUnderTest) SetForwardingConfig(cfg ForwardingConfig) {
+func (p *ProxyUnderTest) SetForwardingConfig(fwd ForwardingConfig) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.forwardingConfig = cfg
+	p.cfg.Forwarding = fwd
 }
 
 // NewProxyUnderTest creates and starts a proxy listening on a dynamic port.
@@ -229,15 +210,19 @@ func NewProxyUnderTest(t *testing.T, upstream string) *ProxyUnderTest {
 	if err != nil {
 		t.Fatalf("ProxyUnderTest: listen: %v", err)
 	}
+	provider := &stubTokenProvider{token: "test-token"}
 	p := &ProxyUnderTest{
-		listener:    l,
-		Provider:    &stubTokenProvider{token: "test-token"},
-		upstream:    upstream,
-		Pseudonym:   testPseudonym,
-		DialTimeout: 5 * time.Second,
-		ReadTimeout: 5 * time.Second,
-		KeepAlive:   0,
-		closed:      make(chan struct{}),
+		listener: l,
+		Provider: provider,
+		cfg: ProxyConfig{
+			Upstream:    upstream,
+			Provider:    provider,
+			Pseudonym:   testPseudonym,
+			DialTimeout: 5 * time.Second,
+			ReadTimeout: 5 * time.Second,
+			KeepAlive:   0,
+		},
+		closed: make(chan struct{}),
 	}
 	p.wg.Add(1)
 	go p.acceptLoop()
@@ -259,9 +244,7 @@ func (p *ProxyUnderTest) acceptLoop() {
 		p.wg.Add(1)
 		go func() {
 			defer p.wg.Done()
-			handleClient(conn, p.upstream, p.Provider, p.Pseudonym,
-				p.DialTimeout, p.ReadTimeout, p.KeepAlive, p.getConnectPorts(),
-				p.getForwardingConfig())
+			handleClient(conn, p.getConfig())
 		}()
 	}
 }

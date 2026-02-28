@@ -287,7 +287,7 @@ func TestGSSProxyChainWithEphemeralKDC(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleClient(conn, upstream.Addr().String(), provider, testPseudonym, 5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
+		handleClient(conn, ProxyConfig{Upstream: upstream.Addr().String(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
 	}()
 
 	// Connect and send a request through the proxy.

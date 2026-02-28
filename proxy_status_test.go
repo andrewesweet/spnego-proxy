@@ -76,8 +76,7 @@ func TestA3_RFC9209_ProxyStatusOnTokenAcquisitionFailure(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr(), provider, testPseudonym,
-			5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
+		handleClient(server, ProxyConfig{Upstream: upstream.Addr(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
 	}()
 
 	sendRequest(t, client, "http://example.com/test")
@@ -133,8 +132,7 @@ func TestA3_RFC9209_ProxyStatusOnCircuitBreakerOpen(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr(), provider, testPseudonym,
-			5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
+		handleClient(server, ProxyConfig{Upstream: upstream.Addr(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
 	}()
 
 	sendRequest(t, client, "http://example.com/test")
@@ -192,8 +190,7 @@ func TestA3_RFC9209_ProxyStatusOnCredentialFailure(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr(), provider, testPseudonym,
-			5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
+		handleClient(server, ProxyConfig{Upstream: upstream.Addr(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
 	}()
 
 	sendRequest(t, client, "http://example.com/test")
@@ -251,8 +248,7 @@ func TestA3_RFC9209_ProxyStatusOnNegotiationFailure(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr(), provider, testPseudonym,
-			5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
+		handleClient(server, ProxyConfig{Upstream: upstream.Addr(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
 	}()
 
 	sendRequest(t, client, "http://example.com/test")
@@ -306,8 +302,7 @@ func TestA3_RFC9209_ProxyStatusOnMalformedRequest(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, upstream.Addr(), provider, testPseudonym,
-			5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
+		handleClient(server, ProxyConfig{Upstream: upstream.Addr(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
 	}()
 
 	// Send data that is not a valid HTTP request — deliberately malformed
@@ -535,8 +530,7 @@ func TestA3_RFC9209_ProxyIdentifierIsSpnegoProxy(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				handleClient(server, upstream.Addr(), provider, testPseudonym,
-					5*time.Second, 5*time.Second, 0, nil, ForwardingConfig{})
+				handleClient(server, ProxyConfig{Upstream: upstream.Addr(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
 			}()
 
 			sendRequest(t, client, "http://example.com/identifier-test")
