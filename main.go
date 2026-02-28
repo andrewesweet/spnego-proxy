@@ -820,9 +820,9 @@ func main() {
 	}
 
 	cfg := ProxyConfig{
-		Upstream:  *proxy,
-		Provider:  provider,
-		Pseudonym: pseudonym,
+		Upstream:     *proxy,
+		Provider:     provider,
+		Pseudonym:    pseudonym,
 		DialTimeout:  *dialTimeout,
 		ReadTimeout:  *readTimeout,
 		KeepAlive:    *keepAlive,
