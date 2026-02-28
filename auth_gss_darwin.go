@@ -37,17 +37,7 @@ func NewGSSTokenProvider(proxyHost, explicitSPN string) (*GSSTokenProvider, erro
 		spn = normalizeSPN(spn, '@', '/')
 	}
 	slog.Info("using macOS GSS-API", "spn", spn)
-	g := &GSSTokenProvider{spn: spn}
-
-	// Validate credentials are available at startup. This is a warning,
-	// not a fatal error, because credentials may become available later
-	// (e.g. kinit run after the proxy starts).
-	if _, err := g.GetToken(); err != nil {
-		slog.Warn("initial credential check failed", "error", err)
-		slog.Warn("the proxy will retry on each request; run 'kinit' to obtain credentials")
-	}
-
-	return g, nil
+	return &GSSTokenProvider{spn: spn}, nil
 }
 
 func (g *GSSTokenProvider) GetToken() (string, error) {
