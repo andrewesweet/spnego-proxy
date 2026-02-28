@@ -50,11 +50,6 @@ func NewGSSTokenProvider(proxyHost, explicitSPN string) (*GSSTokenProvider, erro
 	return g, nil
 }
 
-// SPN returns the service principal name used for token acquisition.
-func (g *GSSTokenProvider) SPN() string {
-	return g.spn
-}
-
 func (g *GSSTokenProvider) GetToken() (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -65,19 +60,16 @@ func (g *GSSTokenProvider) GetToken() (string, error) {
 	result := C.acquire_spnego_token(cspn)
 	if result.error_code != 0 {
 		msg := C.GoString(&result.error_msg[0])
+		hint := ""
 		if ccname := os.Getenv("KRB5CCNAME"); ccname != "" {
-			return "", &CredentialError{
-				msg: fmt.Sprintf("GSS-API error: %s (KRB5CCNAME=%s; try 'klist' to check credentials or 'kinit' to refresh)", msg, ccname),
-			}
+			hint = fmt.Sprintf(" (KRB5CCNAME=%s; try 'klist' to check credentials or 'kinit' to refresh)", ccname)
+		} else {
+			hint = " (try 'klist' to check credentials or 'kinit' to refresh)"
 		}
-		return "", &CredentialError{
-			msg: fmt.Sprintf("GSS-API error: %s (try 'klist' to check credentials or 'kinit' to refresh)", msg),
-		}
+		return "", &CredentialError{authError{msg: fmt.Sprintf("GSS-API error: %s%s", msg, hint)}}
 	}
 	if result.data == nil || result.length == 0 {
-		return "", &NegotiationError{
-			msg: "GSS-API returned empty token",
-		}
+		return "", &NegotiationError{authError{msg: "GSS-API returned empty token"}}
 	}
 	defer C.free_token_data(result.data)
 

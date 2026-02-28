@@ -96,10 +96,10 @@ func TestA3_RFC9209_ProxyStatusOnProxyInternalError(t *testing.T) {
 		},
 		{
 			name: "circuit_breaker_open",
-			providerErr: &CircuitBreakerError{
+			providerErr: &CircuitBreakerError{authError{
 				msg:   "circuit breaker open: token acquisition disabled after 3 consecutive failures",
 				cause: errors.New("gobreaker: circuit breaker is open"),
-			},
+			}},
 			wantBodyContains: []string{
 				"proxy_internal_error",
 				"circuit breaker open",
@@ -111,10 +111,10 @@ func TestA3_RFC9209_ProxyStatusOnProxyInternalError(t *testing.T) {
 		},
 		{
 			name: "credential_failure",
-			providerErr: &CredentialError{
+			providerErr: &CredentialError{authError{
 				msg:   "could not acquire client credential: KDC_ERR_PREAUTH_FAILED",
 				cause: errors.New("KDC_ERR_PREAUTH_FAILED"),
-			},
+			}},
 			wantBodyContains: []string{
 				"proxy_internal_error",
 				"Kerberos credentials are expired or unavailable",
@@ -126,10 +126,10 @@ func TestA3_RFC9209_ProxyStatusOnProxyInternalError(t *testing.T) {
 		},
 		{
 			name: "negotiation_failure",
-			providerErr: &NegotiationError{
+			providerErr: &NegotiationError{authError{
 				msg:   "could not initialize context: SPN mismatch",
 				cause: errors.New("SPN mismatch"),
-			},
+			}},
 			wantBodyContains: []string{
 				"proxy_internal_error",
 				"SPNEGO negotiation with the KDC failed",

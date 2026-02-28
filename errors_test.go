@@ -7,7 +7,7 @@ import (
 )
 
 func TestCredentialErrorMessage(t *testing.T) {
-	err := &CredentialError{msg: "could not acquire client credential: KDC_ERR"}
+	err := &CredentialError{authError{msg: "could not acquire client credential: KDC_ERR"}}
 	if got := err.Error(); got != "could not acquire client credential: KDC_ERR" {
 		t.Errorf("expected %q, got %q", "could not acquire client credential: KDC_ERR", got)
 	}
@@ -15,14 +15,14 @@ func TestCredentialErrorMessage(t *testing.T) {
 
 func TestCredentialErrorUnwrap(t *testing.T) {
 	inner := errors.New("kdc unreachable")
-	err := &CredentialError{msg: "cred fail", cause: inner}
+	err := &CredentialError{authError{msg: "cred fail", cause: inner}}
 	if !errors.Is(err, inner) {
 		t.Errorf("expected errors.Is to find inner error through Unwrap")
 	}
 }
 
 func TestCredentialErrorUnwrapNilCause(t *testing.T) {
-	err := &CredentialError{msg: "GSS-API error: no credentials"}
+	err := &CredentialError{authError{msg: "GSS-API error: no credentials"}}
 	if unwrapped := errors.Unwrap(err); unwrapped != nil {
 		t.Errorf("expected Unwrap to return nil for nil cause, got %v", unwrapped)
 	}
@@ -30,7 +30,7 @@ func TestCredentialErrorUnwrapNilCause(t *testing.T) {
 
 func TestCredentialErrorDetectedViaErrorsAs(t *testing.T) {
 	inner := errors.New("expired ticket")
-	err := &CredentialError{msg: "cred fail", cause: inner}
+	err := &CredentialError{authError{msg: "cred fail", cause: inner}}
 
 	var target *CredentialError
 	if !errors.As(err, &target) {
@@ -42,7 +42,7 @@ func TestCredentialErrorDetectedViaErrorsAs(t *testing.T) {
 }
 
 func TestCredentialErrorDetectedThroughFmtWrap(t *testing.T) {
-	inner := &CredentialError{msg: "cred fail", cause: errors.New("kdc")}
+	inner := &CredentialError{authError{msg: "cred fail", cause: errors.New("kdc")}}
 	wrapped := fmt.Errorf("provider error: %w", inner)
 
 	var target *CredentialError
@@ -52,7 +52,7 @@ func TestCredentialErrorDetectedThroughFmtWrap(t *testing.T) {
 }
 
 func TestNegotiationErrorMessage(t *testing.T) {
-	err := &NegotiationError{msg: "could not initialize context: bad SPN"}
+	err := &NegotiationError{authError{msg: "could not initialize context: bad SPN"}}
 	if got := err.Error(); got != "could not initialize context: bad SPN" {
 		t.Errorf("expected %q, got %q", "could not initialize context: bad SPN", got)
 	}
@@ -60,14 +60,14 @@ func TestNegotiationErrorMessage(t *testing.T) {
 
 func TestNegotiationErrorUnwrap(t *testing.T) {
 	inner := errors.New("spn mismatch")
-	err := &NegotiationError{msg: "neg fail", cause: inner}
+	err := &NegotiationError{authError{msg: "neg fail", cause: inner}}
 	if !errors.Is(err, inner) {
 		t.Errorf("expected errors.Is to find inner error through Unwrap")
 	}
 }
 
 func TestNegotiationErrorUnwrapNilCause(t *testing.T) {
-	err := &NegotiationError{msg: "GSS-API returned empty token"}
+	err := &NegotiationError{authError{msg: "GSS-API returned empty token"}}
 	if unwrapped := errors.Unwrap(err); unwrapped != nil {
 		t.Errorf("expected Unwrap to return nil for nil cause, got %v", unwrapped)
 	}
@@ -75,7 +75,7 @@ func TestNegotiationErrorUnwrapNilCause(t *testing.T) {
 
 func TestNegotiationErrorDetectedViaErrorsAs(t *testing.T) {
 	inner := errors.New("marshal failure")
-	err := &NegotiationError{msg: "neg fail", cause: inner}
+	err := &NegotiationError{authError{msg: "neg fail", cause: inner}}
 
 	var target *NegotiationError
 	if !errors.As(err, &target) {
@@ -87,7 +87,7 @@ func TestNegotiationErrorDetectedViaErrorsAs(t *testing.T) {
 }
 
 func TestNegotiationErrorDetectedThroughFmtWrap(t *testing.T) {
-	inner := &NegotiationError{msg: "neg fail", cause: errors.New("ctx")}
+	inner := &NegotiationError{authError{msg: "neg fail", cause: errors.New("ctx")}}
 	wrapped := fmt.Errorf("provider error: %w", inner)
 
 	var target *NegotiationError
@@ -97,8 +97,8 @@ func TestNegotiationErrorDetectedThroughFmtWrap(t *testing.T) {
 }
 
 func TestCredentialAndNegotiationErrorsAreDistinct(t *testing.T) {
-	credErr := &CredentialError{msg: "cred fail"}
-	negErr := &NegotiationError{msg: "neg fail"}
+	credErr := &CredentialError{authError{msg: "cred fail"}}
+	negErr := &NegotiationError{authError{msg: "neg fail"}}
 
 	var credTarget *CredentialError
 	var negTarget *NegotiationError

@@ -110,24 +110,15 @@ func (p *Gokrb5TokenProvider) GetToken() (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err := p.spnegoClient.AcquireCred(); err != nil {
-		return "", &CredentialError{
-			msg:   fmt.Sprintf("could not acquire client credential: %v", err),
-			cause: err,
-		}
+		return "", &CredentialError{authError{msg: fmt.Sprintf("could not acquire client credential: %v", err), cause: err}}
 	}
 	token, err := p.spnegoClient.InitSecContext()
 	if err != nil {
-		return "", &NegotiationError{
-			msg:   fmt.Sprintf("could not initialize context: %v", err),
-			cause: err,
-		}
+		return "", &NegotiationError{authError{msg: fmt.Sprintf("could not initialize context: %v", err), cause: err}}
 	}
 	b, err := token.Marshal()
 	if err != nil {
-		return "", &NegotiationError{
-			msg:   fmt.Sprintf("could not marshal SPNEGO token: %v", err),
-			cause: err,
-		}
+		return "", &NegotiationError{authError{msg: fmt.Sprintf("could not marshal SPNEGO token: %v", err), cause: err}}
 	}
 	return base64.StdEncoding.EncodeToString(b), nil
 }
