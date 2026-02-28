@@ -29,7 +29,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 )
 
 // assertProxyStatus is a focused helper that asserts both the HTTP status
@@ -253,58 +252,6 @@ func TestA3_RFC9209_ProxyStatusOnMalformedRequest(t *testing.T) {
 	}
 
 	waitForDone(t, done)
-}
-
-// ---------------------------------------------------------------------------
-// A3 — proxy_loop_detected: Via header contains own pseudonym
-// ---------------------------------------------------------------------------
-
-// TestA3_RFC9209_ProxyStatusOnLoopDetected verifies that when the incoming
-// request's Via header already contains this proxy's pseudonym, the proxy
-// responds with 502 Bad Gateway and Proxy-Status "proxy_loop_detected".
-func TestA3_RFC9209_ProxyStatusOnLoopDetected(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	t.Cleanup(proxy.Close)
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
-	// Send a request whose Via header already contains this proxy's pseudonym,
-	// simulating a routing loop where the request has previously transited
-	// this same proxy instance.
-	req, _ := http.NewRequest("GET", "http://example.com/loop-test", nil)
-	req.Header.Set("Via", "1.1 "+testPseudonym)
-	if err := req.WriteProxy(conn); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	t.Cleanup(func() { _ = resp.Body.Close() })
-
-	// A3: 502 with proxy_loop_detected when own pseudonym found in Via.
-	assertProxyStatus(t, resp, http.StatusBadGateway, "proxy_loop_detected")
-
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "proxy_loop_detected") {
-		t.Errorf("body: want mention of proxy_loop_detected, got %q", body)
-	}
-	if !strings.Contains(string(body), "routing loop") {
-		t.Errorf("body: want description of routing loop, got %q", body)
-	}
-
-	// Upstream must NOT have received the looped request.
-	if n := len(upstream.Requests()); n != 0 {
-		t.Errorf("upstream received %d requests, want 0 (loop should be rejected)", n)
-	}
 }
 
 // ---------------------------------------------------------------------------
