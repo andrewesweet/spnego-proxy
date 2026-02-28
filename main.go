@@ -132,15 +132,15 @@ func injectForwardingHeaders(req *http.Request, clientAddr string, fwdCfg Forwar
 		appendHeaderValue(req.Header, "Forwarded", entry)
 	}
 
-	// H2/H3/H4: X-Forwarded-* headers.
+	// H2/H3/H4
 	if fwdCfg.XForwardedForEnabled {
-		// H2: X-Forwarded-For — append or set client IP.
+		// H2
 		appendHeaderValue(req.Header, "X-Forwarded-For", clientIP)
-		// H3: X-Forwarded-Proto — set only when absent.
+		// H3
 		if req.Header.Get("X-Forwarded-Proto") == "" {
 			req.Header.Set("X-Forwarded-Proto", "http")
 		}
-		// H4: X-Forwarded-Host — set only when absent.
+		// H4
 		if req.Header.Get("X-Forwarded-Host") == "" {
 			req.Header.Set("X-Forwarded-Host", req.Host)
 		}
@@ -523,6 +523,10 @@ func forwardHalf(wg *sync.WaitGroup, dst net.Conn, src io.Reader, fromAddr, toAd
 // forwarding header injection (RFC 7239 Forwarded, X-Forwarded-For, etc.).
 func handleClient(conn net.Conn, cfg ProxyConfig) {
 	defer func() { _ = conn.Close() }()
+	if cfg.Pseudonym == "" {
+		slog.Error("empty pseudonym in ProxyConfig, refusing connection", "client_addr", conn.RemoteAddr())
+		return
+	}
 	clientAddr := conn.RemoteAddr().String()
 	slog.Debug("new client", "client_addr", clientAddr)
 	defer slog.Debug("stop processing request", "client_addr", clientAddr)

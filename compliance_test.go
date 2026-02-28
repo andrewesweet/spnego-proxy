@@ -166,8 +166,9 @@ func (m *MockUpstreamProxy) Close() {
 type ProxyUnderTest struct {
 	listener net.Listener
 
-	// Provider is the stub token provider used by the proxy.  Tests may
-	// replace it or adjust its fields before sending requests.
+	// Provider is the stub token provider shared with cfg.Provider.
+	// Tests may mutate its fields (e.g., Provider.err) but must NOT replace
+	// the pointer — cfg.Provider would still reference the old value.
 	Provider *stubTokenProvider
 
 	// mu protects cfg so mutable fields (ConnectPorts, Forwarding) can
@@ -186,16 +187,16 @@ func (p *ProxyUnderTest) getConfig() ProxyConfig {
 	return p.cfg
 }
 
-// SetConnectPorts sets the allowed CONNECT port list (thread-safe).
-// It may be called after NewProxyUnderTest before the first client connects.
+// SetConnectPorts sets the allowed CONNECT port list.
+// Thread-safe; may be called at any time after construction.
 func (p *ProxyUnderTest) SetConnectPorts(ports []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.cfg.ConnectPorts = ports
 }
 
-// SetForwardingConfig sets the ForwardingConfig (thread-safe).
-// It must be called before the first client connects to avoid data races.
+// SetForwardingConfig sets the ForwardingConfig.
+// Thread-safe; may be called at any time after construction.
 func (p *ProxyUnderTest) SetForwardingConfig(fwd ForwardingConfig) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

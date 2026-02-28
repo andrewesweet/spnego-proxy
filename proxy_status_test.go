@@ -59,7 +59,7 @@ func sendRequest(t *testing.T, conn net.Conn, target string) {
 // ---------------------------------------------------------------------------
 
 // TestA3_RFC9209_ProxyStatusOnProxyInternalError is a table-driven test that
-// verifies all four token-acquisition error types produce a 502 Bad Gateway
+// verifies that token-acquisition error types produce a 502 Bad Gateway
 // response with the correct Proxy-Status header, proxy identifier prefix,
 // and error-specific body content.
 func TestA3_RFC9209_ProxyStatusOnProxyInternalError(t *testing.T) {
@@ -67,6 +67,9 @@ func TestA3_RFC9209_ProxyStatusOnProxyInternalError(t *testing.T) {
 		name string
 		// providerErr is the error the stubTokenProvider returns.
 		providerErr error
+		// rawRequest, if non-empty, is sent instead of the default GET.
+		// This allows testing CONNECT and other method-specific paths.
+		rawRequest string
 		// wantBodyContains lists substrings that MUST appear in the body.
 		wantBodyContains []string
 		// wantBodyExcludes lists substrings that MUST NOT appear in the body
@@ -80,6 +83,15 @@ func TestA3_RFC9209_ProxyStatusOnProxyInternalError(t *testing.T) {
 				"proxy_internal_error",
 				"failed to acquire a SPNEGO authentication token",
 				"Suggested action:",
+			},
+		},
+		{
+			name:        "generic_token_error_CONNECT",
+			providerErr: errors.New("GSS-API error: An unsupported mechanism was requested"),
+			rawRequest:  "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n",
+			wantBodyContains: []string{
+				"proxy_internal_error",
+				"failed to acquire a SPNEGO authentication token",
 			},
 		},
 		{
@@ -145,7 +157,14 @@ func TestA3_RFC9209_ProxyStatusOnProxyInternalError(t *testing.T) {
 				handleClient(server, defaultTestConfig(upstream.Addr(), provider))
 			}()
 
-			sendRequest(t, client, "http://example.com/test")
+			if tc.rawRequest != "" {
+				_, err := fmt.Fprint(client, tc.rawRequest)
+				if err != nil {
+					t.Fatalf("write raw request to proxy: %v", err)
+				}
+			} else {
+				sendRequest(t, client, "http://example.com/test")
+			}
 
 			resp, err := http.ReadResponse(bufio.NewReader(client), nil)
 			if err != nil {

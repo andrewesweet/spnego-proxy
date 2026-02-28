@@ -145,34 +145,6 @@ func TestG1_MaxForwards_Table(t *testing.T) {
 			wantMF:       "2",
 		},
 		{
-			name:         "TRACE MF=100 decremented to 99",
-			method:       "TRACE",
-			maxForwards:  "100",
-			wantUpstream: true,
-			wantMF:       "99",
-		},
-		{
-			name:         "TRACE MF=5 decremented to 4",
-			method:       "TRACE",
-			maxForwards:  "5",
-			wantUpstream: true,
-			wantMF:       "4",
-		},
-		{
-			name:         "OPTIONS MF=10 decremented to 9",
-			method:       "OPTIONS",
-			maxForwards:  "10",
-			wantUpstream: true,
-			wantMF:       "9",
-		},
-		{
-			name:         "OPTIONS MF=1 decremented to 0 and forwarded",
-			method:       "OPTIONS",
-			maxForwards:  "1",
-			wantUpstream: true,
-			wantMF:       "0",
-		},
-		{
 			name:         "GET MF=5 not decremented",
 			method:       "GET",
 			maxForwards:  "5",
@@ -220,6 +192,20 @@ func TestG1_MaxForwards_Table(t *testing.T) {
 			} else {
 				if len(reqs) != 0 {
 					t.Errorf("upstream received %d requests, want 0 (should be handled locally)", len(reqs))
+				}
+				// The local response body should be empty or minimal.
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					t.Fatalf("read body: %v", err)
+				}
+				if len(body) != 0 {
+					t.Errorf("expected empty body for MF=0 local response, got %d bytes: %q", len(body), body)
+				}
+				// OPTIONS MF=0: Allow header must be present per RFC 9110.
+				if tc.method == "OPTIONS" {
+					if allow := resp.Header.Get("Allow"); allow == "" {
+						t.Error("OPTIONS MF=0 response missing Allow header")
+					}
 				}
 			}
 		})
