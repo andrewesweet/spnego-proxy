@@ -93,22 +93,10 @@ func generateObfuscatedID() string {
 	b := make([]byte, 4)
 	if _, err := crand.Read(b); err != nil {
 		// Fallback: use low 32 bits of nanosecond timestamp.
+		slog.Error("crypto/rand.Read failed, falling back to timestamp-based identifier", "error", err)
 		return fmt.Sprintf("_%08x", time.Now().UnixNano()&0xffffffff)
 	}
 	return fmt.Sprintf("_%x", b)
-}
-
-// formatForwardedFor returns the correct Forwarded "for" token value for the
-// given address string per RFC 7239 §4:
-//   - IPv6 addresses must be quoted and enclosed in brackets: "[addr]"
-//   - IPv4 addresses and obfuscated tokens are used as-is.
-func formatForwardedFor(addr string) string {
-	if strings.Contains(addr, ":") {
-		// net.ParseIP accepts both IPv4-mapped and pure IPv6; any string with
-		// a colon that isn't an IPv4 address needs bracket quoting.
-		return fmt.Sprintf(`"[%s]"`, addr)
-	}
-	return addr
 }
 
 // injectForwardingHeaders adds RFC 7239 Forwarded and/or de-facto
@@ -116,9 +104,12 @@ func formatForwardedFor(addr string) string {
 // after sanitizeHopByHop so that any client-supplied hop-by-hop headers have
 // already been stripped before we append our own values.
 func injectForwardingHeaders(req *http.Request, clientAddr string, fwdCfg ForwardingConfig) {
-	clientIP, _, _ := net.SplitHostPort(clientAddr)
+	clientIP, _, err := net.SplitHostPort(clientAddr)
 	if clientIP == "" {
-		clientIP = clientAddr // fallback for net.Pipe addresses in tests
+		if err != nil {
+			slog.Debug("could not parse host:port from client address, using raw address", "client_addr", clientAddr, "error", err)
+		}
+		clientIP = clientAddr // fallback when address has no port component
 	}
 
 	// H1: RFC 7239 Forwarded header.
@@ -255,6 +246,65 @@ func validateResponseContentLength(resp *http.Response) *proxyError {
 		}
 	}
 	return nil
+}
+
+// errContentLengthInvalid is a sentinel error returned by readUpstreamResponse
+// when the upstream response has an invalid Content-Length header, either
+// detected by Go's ReadResponse or by validateResponseContentLength.
+var errContentLengthInvalid = errors.New("invalid Content-Length in upstream response")
+
+// readUpstreamResponse reads and validates an upstream HTTP response. It
+// performs: ReadResponse, Content-Length error detection, content-length
+// validation, Transfer-Encoding / Content-Length conflict resolution, and
+// Via header injection.
+//
+// On success it returns the parsed response (caller must close Body).
+// On Content-Length errors it returns errContentLengthInvalid so the caller
+// can send a 502. On other parse failures it returns a different error,
+// signalling the caller to fall back to raw relay.
+func readUpstreamResponse(upstreamReader *bufio.Reader, req *http.Request, pseudonym string) (*http.Response, error) {
+	resp, err := http.ReadResponse(upstreamReader, req)
+	if err != nil {
+		// E2 (RFC 9112 §6.1): Go's ReadResponse rejects responses
+		// with invalid Content-Length (e.g. non-numeric values,
+		// conflicting duplicates). Detect this so callers return 502
+		// instead of raw-relaying the malformed response.
+		//
+		// The match on the error string is deliberate: Go's
+		// net/http does not export a typed error for this case.
+		// If the wording changes in a future Go release, the
+		// worst outcome is falling through to the raw-relay path
+		// — not a security issue, since Go already rejected
+		// the malformed response.
+		if strings.Contains(err.Error(), "Content-Length") {
+			return nil, errContentLengthInvalid
+		}
+		return nil, err
+	}
+
+	// E2 (RFC 9112 §6.1): reject responses with invalid Content-Length.
+	// Defense-in-depth: Go's ReadResponse currently rejects most
+	// invalid Content-Length values before this point, but our
+	// validator catches edge cases (e.g. comma-separated differing
+	// values) and guards against future Go stdlib changes.
+	if pe := validateResponseContentLength(resp); pe != nil {
+		_ = resp.Body.Close()
+		return nil, errContentLengthInvalid
+	}
+
+	// RFC 9112 §6.1: if both Transfer-Encoding and Content-Length
+	// are present in the response, remove Content-Length.
+	if len(resp.TransferEncoding) > 0 && resp.Header.Get("Content-Length") != "" {
+		resp.Header.Del("Content-Length")
+		// Reset to -1 so resp.Write uses chunked framing instead
+		// of a fixed-length body derived from the removed header.
+		resp.ContentLength = -1
+	}
+
+	// RFC 9110 §7.6.3: a forward proxy MUST add Via to responses.
+	injectVia(resp.Header, resp.Proto, pseudonym)
+
+	return resp, nil
 }
 
 // TokenProvider acquires SPNEGO tokens for proxy authentication.
@@ -401,7 +451,7 @@ func writeHTTPError(conn net.Conn, pe *proxyError) {
 // For TRACE, RFC 9110 §9.3.8 specifies the body should echo the received
 // message. For OPTIONS, RFC 9110 §9.3.7 specifies a simple 200 OK with an
 // Allow header describing the supported methods. We respond with 200 OK and
-// an informational body for both methods — this satisfies the MUST NOT
+// an empty body for both methods — this satisfies the MUST NOT
 // forward requirement without implementing full TRACE/OPTIONS semantics that
 // are irrelevant to a forwarding proxy.
 func writeMaxForwardsResponse(conn net.Conn, req *http.Request) {
@@ -478,7 +528,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	if req.Method == http.MethodConnect && len(cfg.ConnectPorts) > 0 {
 		_, port, err := net.SplitHostPort(req.Host)
 		if err != nil {
-			// No port in host — RFC convention is to default to 443.
+			slog.Debug("CONNECT host has no explicit port, defaulting to 443", "host", req.Host, "error", err, "client_addr", clientAddr)
 			port = "443"
 		}
 		if !connectPortAllowed(port, cfg.ConnectPorts) {
@@ -494,7 +544,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 		if mf := req.Header.Get("Max-Forwards"); mf != "" {
 			n, err := strconv.Atoi(mf)
 			if err == nil {
-				if n == 0 {
+				if n <= 0 {
 					// This proxy is the final recipient — respond locally.
 					slog.Debug("Max-Forwards: 0, responding locally",
 						"method", req.Method, "client_addr", clientAddr)
@@ -505,6 +555,9 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 			}
 			// If Atoi fails (non-numeric value), forward the header unmodified
 			// per the principle of liberal acceptance.
+			if err != nil {
+				slog.Debug("non-numeric Max-Forwards value, forwarding unmodified", "max_forwards", mf, "client_addr", clientAddr)
+			}
 		}
 	}
 
@@ -559,7 +612,6 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 		return
 	}
 
-	// Non-CONNECT: bidirectional forwarding with concurrent response parsing.
 	var wg sync.WaitGroup
 	forward := func(from io.Reader, to net.Conn, fromAddr, toAddr net.Addr) {
 		defer wg.Done()
@@ -588,20 +640,9 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 		defer slog.Debug("forward done", "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
 
 		upstreamReader := bufio.NewReader(proxyConn)
-		resp, err := http.ReadResponse(upstreamReader, req)
+		resp, err := readUpstreamResponse(upstreamReader, req, cfg.Pseudonym)
 		if err != nil {
-			// E2 (RFC 9112 §6.1): Go's ReadResponse rejects responses
-			// with invalid Content-Length (e.g. non-numeric values,
-			// conflicting duplicates). Detect this so we return 502
-			// instead of raw-relaying the malformed response.
-			//
-			// The match on the error string is deliberate: Go's
-			// net/http does not export a typed error for this case.
-			// If the wording changes in a future Go release, the
-			// worst outcome is falling through to the raw-relay path
-			// below — not a security issue, since Go already rejected
-			// the malformed response.
-			if strings.Contains(err.Error(), "Content-Length") {
+			if errors.Is(err, errContentLengthInvalid) {
 				slog.Error("invalid Content-Length in upstream response",
 					"error", err, "error_type", errInvalidContentLength.errorType,
 					"client_addr", conn.RemoteAddr())
@@ -612,8 +653,6 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 			// upstream response is unparseable, injecting a Via header is
 			// impossible. We relay raw bytes instead of returning an error
 			// so the client still receives whatever the upstream sent.
-			// The warning log ensures operator visibility. See README.md
-			// for the full rationale.
 			slog.Warn("failed to parse upstream response, falling back to raw relay",
 				"error", err, "client_addr", conn.RemoteAddr())
 			if _, err := io.Copy(conn, upstreamReader); err != nil {
@@ -622,33 +661,6 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 			return
 		}
 		defer func() { _ = resp.Body.Close() }()
-
-		// E2 (RFC 9112 §6.1): reject responses with invalid Content-Length.
-		// Defense-in-depth: Go's ReadResponse currently rejects most
-		// invalid Content-Length values before this point, but our
-		// validator catches edge cases (e.g. comma-separated differing
-		// values) and guards against future Go stdlib changes.
-		if pe := validateResponseContentLength(resp); pe != nil {
-			slog.Error("invalid Content-Length in upstream response",
-				"error_type", pe.errorType,
-				"content_length", resp.Header["Content-Length"],
-				"client_addr", conn.RemoteAddr(),
-				"upstream_addr", proxyConn.RemoteAddr())
-			writeHTTPError(conn, pe)
-			return
-		}
-
-		// RFC 9112 §6.1: if both Transfer-Encoding and Content-Length
-		// are present in the response, remove Content-Length.
-		if len(resp.TransferEncoding) > 0 && resp.Header.Get("Content-Length") != "" {
-			resp.Header.Del("Content-Length")
-			// Reset to -1 so resp.Write uses chunked framing instead
-			// of a fixed-length body derived from the removed header.
-			resp.ContentLength = -1
-		}
-
-		// RFC 9110 §7.6.3: a forward proxy MUST add Via to responses.
-		injectVia(resp.Header, resp.Proto, cfg.Pseudonym)
 
 		if err := resp.Write(conn); err != nil {
 			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
@@ -664,9 +676,9 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 // forwarding only after a 2xx is confirmed.
 func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req *http.Request, pseudonym, clientAddr string) {
 	upstreamReader := bufio.NewReader(proxyConn)
-	resp, err := http.ReadResponse(upstreamReader, req)
+	resp, err := readUpstreamResponse(upstreamReader, req, pseudonym)
 	if err != nil {
-		if strings.Contains(err.Error(), "Content-Length") {
+		if errors.Is(err, errContentLengthInvalid) {
 			slog.Error("invalid Content-Length in upstream CONNECT response",
 				"error", err, "error_type", errInvalidContentLength.errorType,
 				"client_addr", clientAddr)
@@ -681,24 +693,6 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
-
-	if pe := validateResponseContentLength(resp); pe != nil {
-		slog.Error("invalid Content-Length in upstream CONNECT response",
-			"error_type", pe.errorType,
-			"content_length", resp.Header["Content-Length"],
-			"client_addr", clientAddr,
-			"upstream_addr", proxyConn.RemoteAddr())
-		writeHTTPError(conn, pe)
-		return
-	}
-
-	if len(resp.TransferEncoding) > 0 && resp.Header.Get("Content-Length") != "" {
-		resp.Header.Del("Content-Length")
-		resp.ContentLength = -1
-	}
-
-	// RFC 9110 §7.6.3: inject Via on the upstream response.
-	injectVia(resp.Header, resp.Proto, pseudonym)
 
 	// For CONNECT responses, the "body" is the raw tunnel data — it must
 	// not be written by resp.Write (that would block waiting for the
@@ -722,7 +716,6 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 		return
 	}
 
-	// 2xx confirmed: start bidirectional tunnel.
 	slog.Debug("CONNECT tunnel established", "client_addr", clientAddr, "upstream_addr", proxyConn.RemoteAddr())
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -773,7 +766,6 @@ func main() {
 	maxConns := flag.Int("max-conns", 512, "maximum number of concurrent connections (0 for unlimited)")
 	connectPortsFlag := flag.String("connect-ports", "", "comma-separated list of ports allowed for CONNECT tunneling (empty = all ports allowed)")
 
-	// Forwarding header flags (both disabled by default).
 	forwardedFlag := flag.Bool("forwarded", false, "inject RFC 7239 Forwarded header with obfuscated client identifier")
 	xForwardedForFlag := flag.Bool("x-forwarded-for", false, "inject X-Forwarded-For, X-Forwarded-Proto, and X-Forwarded-Host headers")
 
@@ -818,7 +810,6 @@ func main() {
 	}
 	pseudonym := generateViaPseudonym()
 
-	// Parse -connect-ports flag into a slice. Empty string means all ports allowed.
 	var connectPorts []string
 	if *connectPortsFlag != "" {
 		for p := range strings.SplitSeq(*connectPortsFlag, ",") {

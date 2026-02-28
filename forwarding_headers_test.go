@@ -319,48 +319,6 @@ func TestGenerateObfuscatedIDRFC7239Compliance(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// IPv6 quoting (RFC 7239 §4)
-// ---------------------------------------------------------------------------
-
-// TestForwardedIPv6QuotingInForValue verifies that IPv6 addresses used in
-// the for= parameter of the Forwarded header are properly quoted as per
-// RFC 7239 §4: for="[IPv6Address]".
-//
-// This test exercises the formatForwardedFor helper directly since the
-// proxy's obfuscated-identifier path never produces raw IPv6 addresses.
-func TestForwardedIPv6QuotingInForValue(t *testing.T) {
-	tests := []struct {
-		name string
-		ip   string
-		want string
-	}{
-		{
-			name: "IPv4 unquoted",
-			ip:   "192.0.2.1",
-			want: "192.0.2.1",
-		},
-		{
-			name: "IPv6 quoted with brackets",
-			ip:   "2001:db8::1",
-			want: `"[2001:db8::1]"`,
-		},
-		{
-			name: "obfuscated token unchanged",
-			ip:   "_abc123",
-			want: "_abc123",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := formatForwardedFor(tc.ip)
-			if got != tc.want {
-				t.Errorf("formatForwardedFor(%q) = %q, want %q", tc.ip, got, tc.want)
-			}
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Validate that forwarding headers do not interfere with existing headers
 // ---------------------------------------------------------------------------
 

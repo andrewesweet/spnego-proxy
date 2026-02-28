@@ -405,20 +405,3 @@ func TestForwardingB3_ProxyAuthenticateNotForwardedToClient(t *testing.T) {
 	// If we reach here, the proxy already handles B3 correctly.
 }
 
-// ---------------------------------------------------------------------------
-// C6 and E3 — handled transparently by Go stdlib (no explicit test)
-// ---------------------------------------------------------------------------
-//
-// C6 — RFC 9112 §5.2: Whitespace between header name and colon in responses.
-//   Go's http.ReadResponse normalizes the wire format during parsing; the
-//   parsed http.Response.Header map never contains such whitespace. When
-//   resp.Write re-serializes the response it always emits "Name: value\r\n"
-//   without spurious whitespace. There is no way to inject a non-conformant
-//   header through Go's HTTP library to write an explicit regression test.
-//
-// E3 — RFC 9112 §5.2: obs-fold (obsolete line folding) in response headers.
-//   Go's http.ReadResponse unfolds obs-fold continuations during parsing and
-//   stores the joined value in Header. resp.Write then emits single-line
-//   headers. An explicit test is impossible via the Go HTTP library because
-//   Go's client never sends folded headers and ReadResponse rejects or unfolds
-//   them transparently.
