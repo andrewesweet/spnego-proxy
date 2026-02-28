@@ -6,7 +6,7 @@ package main
 //
 //	D4 — Restrict CONNECT to safe ports (RFC 9110 §9.3.6 SHOULD)
 //	D5 — Close connection when rejecting a CONNECT request (RFC 9112 §11.2 MUST)
-//	D6 — Wait for upstream 2xx before forwarding client payload (RFC 9112 §11.2 MUST)
+//	D6 — Wait for upstream 2xx before forwarding client payload (RFC 9110 §9.3.6 MUST)
 //	D2 — Drain buffered data on tunnel close (RFC 9110 §9.3.6 MUST)
 //	D7 — Do not send 2xx to client without established upstream connection (RFC 9110 §9.3.6 MUST NOT)
 

@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	crand "crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -96,7 +97,7 @@ func generateObfuscatedID() string {
 		slog.Error("crypto/rand.Read failed, falling back to timestamp-based identifier", "error", err)
 		return fmt.Sprintf("_%08x", time.Now().UnixNano()&0xffffffff)
 	}
-	return fmt.Sprintf("_%x", b)
+	return "_" + hex.EncodeToString(b)
 }
 
 // injectForwardingHeaders adds RFC 7239 Forwarded and/or de-facto
@@ -604,7 +605,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	}
 
 	if req.Method == http.MethodConnect {
-		// D6 (RFC 9112 §11.2): for CONNECT, read the upstream response
+		// D6 (RFC 9110 §9.3.6): for CONNECT, read the upstream response
 		// BEFORE starting to forward client payload. This ensures client
 		// data (e.g. TLS ClientHello) is not sent to the upstream until
 		// after the upstream has confirmed tunnel establishment with 2xx.
@@ -671,7 +672,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	wg.Wait()
 }
 
-// handleConnectTunnel manages the CONNECT tunnel lifecycle per RFC 9112 §11.2.
+// handleConnectTunnel manages the CONNECT tunnel lifecycle per RFC 9110 §9.3.6.
 // It reads the upstream response before forwarding any client payload (D6),
 // relays the response to the client (D7), and then starts bidirectional
 // forwarding only after a 2xx is confirmed.
