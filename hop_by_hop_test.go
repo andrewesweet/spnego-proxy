@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -675,4 +676,398 @@ func TestHopByHop_ConnectionViaCannotBypassLoopDetection(t *testing.T) {
 	if ps := resp.Header.Get("Proxy-Status"); !strings.Contains(ps, "proxy_loop_detected") {
 		t.Errorf("expected Proxy-Status to contain 'proxy_loop_detected', got %q", ps)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Via header injection and loop detection (RFC 9110 §7.6.3)
+// ---------------------------------------------------------------------------
+
+// TestA1_RFC9110_ViaAppendedOnForwardedRequest verifies that a request with
+// no prior Via header is forwarded with a Via entry containing the protocol
+// version and proxy pseudonym.
+func TestA1_RFC9110_ViaAppendedOnForwardedRequest(t *testing.T) {
+	upReq := proxyRoundTrip(t, nil)
+
+	via := upReq.Header.Get("Via")
+	want := "HTTP/1.1 " + testPseudonym
+	if via != want {
+		t.Errorf("Via header: want %q, got %q", want, via)
+	}
+}
+
+// TestA1_RFC9110_ViaPreservesExistingEntries verifies that existing Via
+// entries from upstream proxies are preserved and our entry is appended.
+func TestA1_RFC9110_ViaPreservesExistingEntries(t *testing.T) {
+	upReq := proxyRoundTrip(t, http.Header{
+		"Via": {"1.1 other-proxy"},
+	})
+
+	via := upReq.Header.Get("Via")
+	want := "1.1 other-proxy, HTTP/1.1 " + testPseudonym
+	if via != want {
+		t.Errorf("Via header: want %q, got %q", want, via)
+	}
+}
+
+// TestA1_RFC9110_ViaAppendedOnResponse verifies that the proxy adds a Via
+// header to responses relayed from the upstream back to the client.
+func TestA1_RFC9110_ViaAppendedOnResponse(t *testing.T) {
+	upstream := NewMockUpstreamProxy(t, nil)
+	t.Cleanup(upstream.Close)
+
+	proxy := NewProxyUnderTest(t, upstream.Addr())
+	t.Cleanup(proxy.Close)
+
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	req, _ := http.NewRequest("GET", "http://example.com/a1-resp", nil)
+	if err := req.WriteProxy(conn); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	assertStatusCode(t, resp, http.StatusOK)
+
+	via := resp.Header.Get("Via")
+	want := "HTTP/1.1 " + testPseudonym
+	if via != want {
+		t.Errorf("response Via header: want %q, got %q", want, via)
+	}
+}
+
+// loopDetectionScenario sets up a proxy with its own pseudonym already
+// present in the incoming Via header and returns the proxy's response.
+// It is shared between TestA2_RFC9110_LoopDetectionReturns502 and
+// TestA3_RFC9209_ProxyStatusOnLoopDetected so both can assert different
+// RFC requirements against the same scenario without duplicating setup.
+func loopDetectionScenario(t *testing.T) (*http.Response, *ProxyUnderTest, *MockUpstreamProxy) {
+	t.Helper()
+
+	upstream := NewMockUpstreamProxy(t, nil)
+	t.Cleanup(upstream.Close)
+
+	proxy := NewProxyUnderTest(t, upstream.Addr())
+	t.Cleanup(proxy.Close)
+
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	req, _ := http.NewRequest("GET", "http://example.com/loop-test", nil)
+	req.Header.Set("Via", "1.1 "+testPseudonym)
+	if err := req.WriteProxy(conn); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	return resp, proxy, upstream
+}
+
+// TestA2_RFC9110_LoopDetectionReturns502 verifies that a request whose Via
+// header already contains this proxy's pseudonym is rejected with 502 and
+// not forwarded to the upstream.
+func TestA2_RFC9110_LoopDetectionReturns502(t *testing.T) {
+	resp, proxy, upstream := loopDetectionScenario(t)
+	defer func() { _ = resp.Body.Close() }()
+
+	assertStatusCode(t, resp, http.StatusBadGateway)
+
+	wantPS := "spnego-proxy; error=proxy_loop_detected"
+	if ps := resp.Header.Get("Proxy-Status"); ps != wantPS {
+		t.Errorf("Proxy-Status: want %q, got %q", wantPS, ps)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "spnego-proxy error: proxy_loop_detected") {
+		t.Errorf("body should contain error type, got: %q", body)
+	}
+	if !strings.Contains(string(body), "routing loop was detected") {
+		t.Errorf("body should describe loop detection, got: %q", body)
+	}
+
+	// The upstream must NOT have received the request.
+	if n := len(upstream.Requests()); n != 0 {
+		t.Errorf("upstream received %d requests, want 0", n)
+	}
+
+	// Token acquisition must be skipped when a loop is detected.
+	if calls := proxy.Provider.calls.Load(); calls != 0 {
+		t.Errorf("expected 0 token provider calls, got %d", calls)
+	}
+}
+
+// TestA3_RFC9209_ProxyStatusOnLoopDetected verifies that when the incoming
+// request's Via header already contains this proxy's pseudonym, the proxy
+// responds with 502 Bad Gateway and Proxy-Status "proxy_loop_detected".
+func TestA3_RFC9209_ProxyStatusOnLoopDetected(t *testing.T) {
+	resp, _, upstream := loopDetectionScenario(t)
+	defer func() { _ = resp.Body.Close() }()
+
+	// A3: 502 with proxy_loop_detected when own pseudonym found in Via.
+	assertProxyStatus(t, resp, http.StatusBadGateway, "proxy_loop_detected")
+
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "proxy_loop_detected") {
+		t.Errorf("body: want mention of proxy_loop_detected, got %q", body)
+	}
+	if !strings.Contains(string(body), "routing loop") {
+		t.Errorf("body: want description of routing loop, got %q", body)
+	}
+
+	// Upstream must NOT have received the looped request.
+	if n := len(upstream.Requests()); n != 0 {
+		t.Errorf("upstream received %d requests, want 0 (loop should be rejected)", n)
+	}
+}
+
+// TestA2_RFC9110_DifferentPseudonymNotDetectedAsLoop verifies that a Via
+// header containing a different proxy's identifier does not trigger loop
+// detection — only this instance's own pseudonym indicates a loop.
+func TestA2_RFC9110_DifferentPseudonymNotDetectedAsLoop(t *testing.T) {
+	upReq := proxyRoundTrip(t, http.Header{
+		"Via": {"1.1 some-other-proxy"},
+	})
+
+	via := upReq.Header.Get("Via")
+	want := "1.1 some-other-proxy, HTTP/1.1 " + testPseudonym
+	if via != want {
+		t.Errorf("Via header: want %q, got %q", want, via)
+	}
+}
+
+// TestA2_RFC9110_SubstringPseudonymDetectedAsLoop documents that loop
+// detection uses strings.Contains, so a Via entry containing our pseudonym
+// as a substring triggers loop detection. This is acceptable because
+// production pseudonyms use random hex suffixes, making prefix collisions
+// extremely unlikely.
+func TestA2_RFC9110_SubstringPseudonymDetectedAsLoop(t *testing.T) {
+	upstream := NewMockUpstreamProxy(t, nil)
+	t.Cleanup(upstream.Close)
+
+	proxy := NewProxyUnderTest(t, upstream.Addr())
+	t.Cleanup(proxy.Close)
+
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// Via entry contains our pseudonym as a prefix of a longer identifier.
+	req, _ := http.NewRequest("GET", "http://example.com/a2-substr", nil)
+	req.Header.Set("Via", "1.1 "+testPseudonym+"-extended")
+	if err := req.WriteProxy(conn); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	// Current behavior: substring match triggers loop detection.
+	assertStatusCode(t, resp, http.StatusBadGateway)
+
+	if n := len(upstream.Requests()); n != 0 {
+		t.Errorf("upstream received %d requests, want 0", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for injectVia
+// ---------------------------------------------------------------------------
+
+func TestInjectVia_EmptyHeader(t *testing.T) {
+	h := make(http.Header)
+	injectVia(h, "HTTP/1.1", "test-proxy")
+
+	if got := h.Get("Via"); got != "HTTP/1.1 test-proxy" {
+		t.Errorf("Via: want %q, got %q", "HTTP/1.1 test-proxy", got)
+	}
+}
+
+func TestInjectVia_AppendsToExisting(t *testing.T) {
+	h := http.Header{"Via": {"1.0 first-proxy"}}
+	injectVia(h, "HTTP/1.1", "second-proxy")
+
+	want := "1.0 first-proxy, HTTP/1.1 second-proxy"
+	if got := h.Get("Via"); got != want {
+		t.Errorf("Via: want %q, got %q", want, got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for generateViaPseudonym
+// ---------------------------------------------------------------------------
+
+func TestGenerateViaPseudonym_HasPrefix(t *testing.T) {
+	p := generateViaPseudonym()
+	if !strings.HasPrefix(p, "spnego-proxy-") {
+		t.Errorf("pseudonym %q should have prefix %q", p, "spnego-proxy-")
+	}
+}
+
+func TestGenerateViaPseudonym_Unique(t *testing.T) {
+	seen := make(map[string]bool)
+	for range 100 {
+		p := generateViaPseudonym()
+		if seen[p] {
+			t.Fatalf("duplicate pseudonym after %d iterations: %s", len(seen), p)
+		}
+		seen[p] = true
+	}
+}
+
+// ---------------------------------------------------------------------------
+// A1 — Via header injection on responses (RFC 9110 §7.6.3)
+// ---------------------------------------------------------------------------
+
+// TestHandleClientAppendsToExistingResponseVia verifies that handleClient
+// appends to an existing Via header on upstream responses rather than
+// replacing it (RFC 9110 §7.6.3).
+func TestHandleClientAppendsToExistingResponseVia(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		conn, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		req, err := http.ReadRequest(bufio.NewReader(conn))
+		if err != nil {
+			return
+		}
+		_ = req.Body.Close()
+		// Send a response that already has a Via header from the upstream proxy.
+		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nVia: 1.0 upstream-proxy\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"))
+	}()
+
+	provider := &stubTokenProvider{token: "tok"}
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
+	addr, done := acceptOneAndHandle(t, cfg)
+
+	client, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	req, _ := http.NewRequest("GET", "http://example.com/", nil)
+	if err := req.WriteProxy(client); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(client), req)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	_ = client.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	want := "1.0 upstream-proxy, HTTP/1.1 " + testPseudonym
+	if got := resp.Header.Get("Via"); got != want {
+		t.Errorf("response Via header = %q, want %q", got, want)
+	}
+
+	waitForDone(t, done)
+}
+
+// TestHandleClientAddsViaToConnectResponse verifies that handleClient adds
+// a Via header to CONNECT 200 responses and that the tunnel data still flows
+// correctly after the Via-injected response is written (RFC 9110 §7.6.3).
+func TestHandleClientAddsViaToConnectResponse(t *testing.T) {
+	const tunnelPayload = "TUNNEL-DATA-FROM-UPSTREAM"
+
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = upstream.Close() }()
+	go func() {
+		conn, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		req, err := http.ReadRequest(bufio.NewReader(conn))
+		if err != nil {
+			return
+		}
+		_ = req.Body.Close()
+		// Send CONNECT 200 response, then tunnel data.
+		_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+		_, _ = conn.Write([]byte(tunnelPayload))
+	}()
+
+	provider := &stubTokenProvider{token: "tok"}
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
+	addr, done := acceptOneAndHandle(t, cfg)
+
+	client, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	_, err = io.WriteString(client, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+	if err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+
+	clientReader := bufio.NewReader(client)
+	resp, err := http.ReadResponse(clientReader, nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	// Verify Via header on the CONNECT response.
+	want := "HTTP/1.1 " + testPseudonym
+	if got := resp.Header.Get("Via"); got != want {
+		t.Errorf("response Via header = %q, want %q", got, want)
+	}
+
+	// Verify tunnel data still flows through after the Via-injected response.
+	buf := make([]byte, 4096)
+	n, err := clientReader.Read(buf)
+	if err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("read tunnel data: %v", err)
+	}
+	if got := string(buf[:n]); got != tunnelPayload {
+		t.Errorf("tunnel data = %q, want %q", got, tunnelPayload)
+	}
+
+	_ = client.Close()
+
+	waitForDone(t, done)
 }

@@ -86,18 +86,24 @@ type ProxyConfig struct {
 	Forwarding   ForwardingConfig
 }
 
+// randomHex returns n random bytes encoded as 2*n lowercase hex characters.
+// On the extremely unlikely failure of crypto/rand, it falls back to the
+// low bits of the nanosecond timestamp.
+func randomHex(n int) string {
+	b := make([]byte, n)
+	if _, err := crand.Read(b); err != nil {
+		slog.Error("crypto/rand.Read failed, falling back to timestamp", "error", err)
+		return fmt.Sprintf("%08x", time.Now().UnixNano()&0xffffffff)
+	}
+	return hex.EncodeToString(b)
+}
+
 // generateObfuscatedID returns a random RFC 7239 §6.3 obfuscated identifier
 // of the form "_xxxxxxxx" (underscore followed by 8 lowercase hex characters).
 // Using 4 random bytes gives 2^32 unique values — sufficient to avoid
 // collisions in practice while keeping the identifier short.
 func generateObfuscatedID() string {
-	b := make([]byte, 4)
-	if _, err := crand.Read(b); err != nil {
-		// Fallback: use low 32 bits of nanosecond timestamp.
-		slog.Error("crypto/rand.Read failed, falling back to timestamp-based identifier", "error", err)
-		return fmt.Sprintf("_%08x", time.Now().UnixNano()&0xffffffff)
-	}
-	return "_" + hex.EncodeToString(b)
+	return "_" + randomHex(4)
 }
 
 // appendHeaderValue appends value to the existing comma-separated header
@@ -119,12 +125,6 @@ func injectForwardingHeaders(req *http.Request, clientAddr string, fwdCfg Forwar
 		return
 	}
 
-	clientIP, _, err := net.SplitHostPort(clientAddr)
-	if err != nil {
-		slog.Debug("could not parse host:port from client address, using raw address", "client_addr", clientAddr, "error", err)
-		clientIP = clientAddr // fallback when address has no port component
-	}
-
 	// H1: RFC 7239 Forwarded header.
 	if fwdCfg.ForwardedEnabled {
 		obfID := generateObfuscatedID()
@@ -134,6 +134,11 @@ func injectForwardingHeaders(req *http.Request, clientAddr string, fwdCfg Forwar
 
 	// H2/H3/H4
 	if fwdCfg.XForwardedForEnabled {
+		clientIP, _, err := net.SplitHostPort(clientAddr)
+		if err != nil {
+			slog.Debug("could not parse host:port from client address, using raw address", "client_addr", clientAddr, "error", err)
+			clientIP = clientAddr // fallback when address has no port component
+		}
 		// H2
 		appendHeaderValue(req.Header, "X-Forwarded-For", clientIP)
 		// H3
@@ -152,12 +157,7 @@ func injectForwardingHeaders(req *http.Request, clientAddr string, fwdCfg Forwar
 // "spnego-proxy-<8-hex-chars>", providing 2^32 unique identifiers — sufficient
 // for loop detection across chains of spnego-proxy instances.
 func generateViaPseudonym() string {
-	b := make([]byte, 4)
-	if _, err := crand.Read(b); err != nil {
-		slog.Error("crypto/rand.Read failed, falling back to timestamp-based pseudonym", "error", err)
-		return fmt.Sprintf("spnego-proxy-%08x", time.Now().UnixNano()&0xffffffff)
-	}
-	return fmt.Sprintf("spnego-proxy-%x", b)
+	return "spnego-proxy-" + randomHex(4)
 }
 
 // injectVia appends a Via header entry to the given HTTP headers per
@@ -185,7 +185,7 @@ func sanitizeHopByHop(req *http.Request) {
 	// B1 (RFC 9110 §7.6.1): parse the Connection header for additional
 	// field names to remove, then remove Connection itself.
 	for _, v := range header["Connection"] {
-		for _, name := range strings.Split(v, ",") {
+		for name := range strings.SplitSeq(v, ",") {
 			if name = strings.TrimSpace(name); name != "" {
 				header.Del(name)
 			}
@@ -229,7 +229,7 @@ func validateResponseContentLength(resp *http.Response) *proxyError {
 	var first uint64
 	var seen bool
 	for _, v := range clValues {
-		for _, part := range strings.Split(v, ",") {
+		for part := range strings.SplitSeq(v, ",") {
 			part = strings.TrimSpace(part)
 			if part == "" {
 				continue
@@ -347,79 +347,89 @@ type proxyError struct {
 
 // body renders the structured plain-text response body.
 func (e *proxyError) body() string {
-	var buf strings.Builder
-	fmt.Fprintf(&buf, "spnego-proxy error: %s\n\n%s\n", e.errorType, e.message)
-	if e.action != "" {
-		fmt.Fprintf(&buf, "\nSuggested action: %s\n", e.action)
+	if e.action == "" {
+		return fmt.Sprintf("spnego-proxy error: %s\n\n%s\n", e.errorType, e.message)
 	}
-	return buf.String()
+	return fmt.Sprintf("spnego-proxy error: %s\n\n%s\n\nSuggested action: %s\n", e.errorType, e.message, e.action)
 }
+
+// RFC 9209 Proxy-Status error type tokens.
+const (
+	errorTypeConnectionTimeout    = "connection_timeout"
+	errorTypeConnectionRefused    = "connection_refused"
+	errorTypeConnectionTerminated = "connection_terminated"
+	errorTypeProxyInternalError   = "proxy_internal_error"
+	errorTypeHTTPRequestError     = "http_request_error"
+	errorTypeProxyLoopDetected    = "proxy_loop_detected"
+	errorTypeHTTPProtocolError    = "http_protocol_error"
+	errorTypeHTTPRequestDenied    = "http_request_denied"
+)
 
 // Pre-defined proxy errors for each scenario the proxy can encounter.
 var (
 	errConnectionTimeout = &proxyError{
 		statusCode: http.StatusGatewayTimeout,
-		errorType:  "connection_timeout",
+		errorType:  errorTypeConnectionTimeout,
 		message:    "The proxy timed out connecting to the upstream proxy.",
 		action:     "Verify the upstream proxy address and that it is reachable from this host. Check for network connectivity issues or firewall rules.",
 	}
 	errConnectionRefused = &proxyError{
 		statusCode: http.StatusBadGateway,
-		errorType:  "connection_refused",
+		errorType:  errorTypeConnectionRefused,
 		message:    "The upstream proxy refused the connection.",
 		action:     "Verify the upstream proxy is running and listening on the configured address. Check firewall rules and network connectivity.",
 	}
 	errTokenAcquisition = &proxyError{
 		statusCode: http.StatusBadGateway,
-		errorType:  "proxy_internal_error",
+		errorType:  errorTypeProxyInternalError,
 		message:    "The proxy failed to acquire a SPNEGO authentication token.",
 		action:     "Check Kerberos credentials. Run 'klist' to verify a valid ticket exists, or 'kinit' to obtain a new one.",
 	}
 	errCredentialFailure = &proxyError{
 		statusCode: http.StatusBadGateway,
-		errorType:  "proxy_internal_error",
+		errorType:  errorTypeProxyInternalError,
 		message:    "Kerberos credentials are expired or unavailable.",
 		action:     "Run 'kinit' to obtain or refresh Kerberos credentials, then retry. Run 'klist' to check current ticket status.",
 	}
 	errNegotiationFailure = &proxyError{
 		statusCode: http.StatusBadGateway,
-		errorType:  "proxy_internal_error",
+		errorType:  errorTypeProxyInternalError,
 		message:    "SPNEGO negotiation with the KDC failed.",
 		action:     "Check the service principal name (-spn flag) and Kerberos realm configuration. Verify the KDC is reachable.",
 	}
 	errCircuitBreakerOpen = &proxyError{
 		statusCode: http.StatusBadGateway,
-		errorType:  "proxy_internal_error",
+		errorType:  errorTypeProxyInternalError,
 		message:    "Token acquisition is temporarily disabled after repeated failures (circuit breaker open).",
 		action:     "The proxy will automatically retry after a cooldown period. Check Kerberos credentials and the KDC. Run 'klist' to verify ticket status.",
 	}
 	errHTTPRequestError = &proxyError{
 		statusCode: http.StatusBadRequest,
-		errorType:  "http_request_error",
+		errorType:  errorTypeHTTPRequestError,
 		message:    "The proxy could not read or parse the HTTP request.",
 		action:     "Verify the client is sending a well-formed HTTP request to the proxy.",
 	}
 	errConnectionTerminated = &proxyError{
 		statusCode: http.StatusBadGateway,
-		errorType:  "connection_terminated",
+		errorType:  errorTypeConnectionTerminated,
 		message:    "The connection to the upstream proxy was lost while relaying the request.",
 		action:     "The upstream proxy may have closed the connection unexpectedly. Retry the request.",
 	}
 	errProxyLoopDetected = &proxyError{
 		statusCode: http.StatusBadGateway,
-		errorType:  "proxy_loop_detected",
+		errorType:  errorTypeProxyLoopDetected,
 		message:    "A routing loop was detected: the request has already passed through this proxy instance.",
 		action:     "Check the proxy chain configuration for circular routing. The Via header in the request contains this proxy's identity.",
 	}
 	errInvalidContentLength = &proxyError{
 		statusCode: http.StatusBadGateway,
-		errorType:  "http_protocol_error",
+		errorType:  errorTypeHTTPProtocolError,
 		message:    "The upstream proxy sent a response with an invalid Content-Length header.",
 		action:     "This may indicate a misconfigured upstream proxy or an attempt at response splitting. Contact the upstream proxy administrator.",
 	}
 	errForbiddenPort = &proxyError{
 		statusCode: http.StatusForbidden,
-		errorType:  "http_request_denied",
+		errorType:  errorTypeHTTPRequestDenied,
 		message:    "CONNECT to the requested port is not allowed.",
 		action:     "The proxy restricts CONNECT tunneling to specific ports. Contact the proxy administrator.",
 	}
@@ -431,12 +441,12 @@ var (
 // closed.
 func writeHTTPError(conn net.Conn, pe *proxyError) {
 	body := pe.body()
+	// RFC 9209 Proxy-Status header with RFC 8941 Structured Fields syntax.
 	header := http.Header{
 		"Content-Type": {"text/plain; charset=utf-8"},
 		"Connection":   {"close"},
+		"Proxy-Status": {"spnego-proxy; error=" + pe.errorType},
 	}
-	// RFC 9209 Proxy-Status header with RFC 8941 Structured Fields syntax.
-	header.Set("Proxy-Status", "spnego-proxy; error="+pe.errorType)
 
 	resp := &http.Response{
 		StatusCode:    pe.statusCode,
@@ -469,8 +479,7 @@ func writeMaxForwardsResponse(conn net.Conn, req *http.Request) {
 			"Content-Type": {"text/plain; charset=utf-8"},
 			"Connection":   {"close"},
 		},
-		Body:          http.NoBody,
-		ContentLength: 0,
+		Body: http.NoBody,
 	}
 	// OPTIONS: advertise the request methods this proxy accepts.
 	if req.Method == http.MethodOptions {
@@ -479,10 +488,39 @@ func writeMaxForwardsResponse(conn net.Conn, req *http.Request) {
 	_ = resp.Write(conn)
 }
 
+// splitCSV splits a comma-separated string into trimmed, non-empty tokens.
+func splitCSV(s string) []string {
+	var out []string
+	for part := range strings.SplitSeq(s, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 // connectPortAllowed reports whether port is in the allowed set.
 // An empty allowedPorts slice means all ports are permitted.
 func connectPortAllowed(port string, allowedPorts []string) bool {
 	return len(allowedPorts) == 0 || slices.Contains(allowedPorts, port)
+}
+
+// tokenErrorToProxyError maps a GetToken error to the most specific proxyError
+// sentinel, falling back to errTokenAcquisition for unrecognised errors.
+func tokenErrorToProxyError(err error) *proxyError {
+	var cbErr *CircuitBreakerError
+	var credErr *CredentialError
+	var negErr *NegotiationError
+	switch {
+	case errors.As(err, &cbErr):
+		return errCircuitBreakerOpen
+	case errors.As(err, &credErr):
+		return errCredentialFailure
+	case errors.As(err, &negErr):
+		return errNegotiationFailure
+	default:
+		return errTokenAcquisition
+	}
 }
 
 // handleUpstreamResponseError handles errors from readUpstreamResponse.
@@ -504,17 +542,22 @@ func handleUpstreamResponseError(conn, proxyConn net.Conn, upstreamReader *bufio
 	}
 }
 
+// closeWrite calls CloseWrite on conn if the underlying type supports it.
+// This signals the remote peer that no more data will be sent on this half
+// of the connection, allowing it to read EOF and finish gracefully.
+func closeWrite(conn net.Conn) {
+	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+	}
+}
+
 // forwardHalf copies data from src to dst, calling CloseWrite on dst when
 // done. It logs the start, completion, and any errors. wg.Done is deferred
 // so callers can use a WaitGroup to synchronise the two halves of a
 // bidirectional forwarding pair.
 func forwardHalf(wg *sync.WaitGroup, dst net.Conn, src io.Reader, fromAddr, toAddr net.Addr) {
 	defer wg.Done()
-	defer func() {
-		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-			_ = cw.CloseWrite()
-		}
-	}()
+	defer closeWrite(dst)
 	slog.Debug("forward start", "from", fromAddr, "to", toAddr)
 	defer slog.Debug("forward done", "from", fromAddr, "to", toAddr)
 	if _, err := io.Copy(dst, src); err != nil {
@@ -535,19 +578,10 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	clientAddr := conn.RemoteAddr().String()
 	slog.Debug("new client", "client_addr", clientAddr)
 	defer slog.Debug("stop processing request", "client_addr", clientAddr)
-	proxyConn, err := net.DialTimeout("tcp", cfg.Upstream, cfg.DialTimeout)
-	if err != nil {
-		var ne net.Error
-		if errors.As(err, &ne) && ne.Timeout() {
-			slog.Error("failed to connect to proxy", "error", err, "error_type", errConnectionTimeout.errorType, "client_addr", clientAddr, "upstream_addr", cfg.Upstream)
-			writeHTTPError(conn, errConnectionTimeout)
-		} else {
-			slog.Error("failed to connect to proxy", "error", err, "error_type", errConnectionRefused.errorType, "client_addr", clientAddr, "upstream_addr", cfg.Upstream)
-			writeHTTPError(conn, errConnectionRefused)
-		}
-		return
-	}
-	defer func() { _ = proxyConn.Close() }()
+
+	// Read and validate the client request before dialing upstream so that
+	// rejected requests (malformed, loop, forbidden port, Max-Forwards: 0,
+	// token failure) never open a wasted TCP connection.
 	reqReader := bufio.NewReader(conn)
 	_ = conn.SetReadDeadline(time.Now().Add(cfg.ReadTimeout))
 	req, err := http.ReadRequest(reqReader)
@@ -590,20 +624,17 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	if req.Method == http.MethodTrace || req.Method == http.MethodOptions {
 		if mf := req.Header.Get("Max-Forwards"); mf != "" {
 			n, err := strconv.Atoi(mf)
-			if err == nil {
-				if n <= 0 {
-					// This proxy is the final recipient — respond locally.
-					slog.Debug("Max-Forwards: 0, responding locally",
-						"method", req.Method, "client_addr", clientAddr)
-					writeMaxForwardsResponse(conn, req)
-					return
-				}
-				req.Header.Set("Max-Forwards", strconv.Itoa(n-1))
-			}
-			// If Atoi fails (non-numeric value), forward the header unmodified
-			// per the principle of liberal acceptance.
 			if err != nil {
+				// Non-numeric value: forward unmodified per the principle of liberal acceptance.
 				slog.Debug("non-numeric Max-Forwards value, forwarding unmodified", "max_forwards", mf, "client_addr", clientAddr)
+			} else if n <= 0 {
+				// This proxy is the final recipient — respond locally.
+				slog.Debug("Max-Forwards: 0, responding locally",
+					"method", req.Method, "client_addr", clientAddr)
+				writeMaxForwardsResponse(conn, req)
+				return
+			} else {
+				req.Header.Set("Max-Forwards", strconv.Itoa(n-1))
 			}
 		}
 	}
@@ -617,18 +648,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 
 	token, err := cfg.Provider.GetToken()
 	if err != nil {
-		pe := errTokenAcquisition
-		var cbErr *CircuitBreakerError
-		var credErr *CredentialError
-		var negErr *NegotiationError
-		switch {
-		case errors.As(err, &cbErr):
-			pe = errCircuitBreakerOpen
-		case errors.As(err, &credErr):
-			pe = errCredentialFailure
-		case errors.As(err, &negErr):
-			pe = errNegotiationFailure
-		}
+		pe := tokenErrorToProxyError(err)
 		slog.Error("failed to get SPNEGO token", "error", err, "error_type", pe.errorType, "client_addr", clientAddr, "upstream_addr", cfg.Upstream, "method", req.Method, "host", req.Host)
 		writeHTTPError(conn, pe)
 		return
@@ -638,6 +658,21 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	// RFC 9110 §7.6.3: intermediaries MUST add a Via entry identifying
 	// the protocol version received and the proxy instance.
 	injectVia(req.Header, req.Proto, cfg.Pseudonym)
+
+	// Now that the request is validated and prepared, dial upstream.
+	proxyConn, err := net.DialTimeout("tcp", cfg.Upstream, cfg.DialTimeout)
+	if err != nil {
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			slog.Error("failed to connect to proxy", "error", err, "error_type", errConnectionTimeout.errorType, "client_addr", clientAddr, "upstream_addr", cfg.Upstream)
+			writeHTTPError(conn, errConnectionTimeout)
+		} else {
+			slog.Error("failed to connect to proxy", "error", err, "error_type", errConnectionRefused.errorType, "client_addr", clientAddr, "upstream_addr", cfg.Upstream)
+			writeHTTPError(conn, errConnectionRefused)
+		}
+		return
+	}
+	defer func() { _ = proxyConn.Close() }()
 
 	slog.Debug("proxy request", "method", req.Method, "uri", req.RequestURI, "proto", req.Proto, "headers", len(req.Header), "client_addr", clientAddr, "upstream_addr", cfg.Upstream, "via", req.Header.Get("Via"))
 	if err := req.WriteProxy(proxyConn); err != nil {
@@ -665,11 +700,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	// Upstream→client: parse response headers to inject Via, then relay body.
 	go func() {
 		defer wg.Done()
-		defer func() {
-			if cw, ok := conn.(interface{ CloseWrite() error }); ok {
-				_ = cw.CloseWrite()
-			}
-		}()
+		defer closeWrite(conn)
 		slog.Debug("forward start", "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
 		defer slog.Debug("forward done", "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
 
@@ -788,14 +819,7 @@ func main() {
 	}
 	pseudonym := generateViaPseudonym()
 
-	var connectPorts []string
-	if *connectPortsFlag != "" {
-		for p := range strings.SplitSeq(*connectPortsFlag, ",") {
-			if p = strings.TrimSpace(p); p != "" {
-				connectPorts = append(connectPorts, p)
-			}
-		}
-	}
+	connectPorts := splitCSV(*connectPortsFlag)
 
 	cfg := ProxyConfig{
 		Upstream:     *proxy,
@@ -813,10 +837,12 @@ func main() {
 
 	if *maxConns > 0 {
 		l = netutil.LimitListener(l, *maxConns)
-		slog.Info("listening", "addr", *addr, "proxy", *proxy, "max_conns", *maxConns, "via_pseudonym", pseudonym)
-	} else {
-		slog.Info("listening", "addr", *addr, "proxy", *proxy, "via_pseudonym", pseudonym)
 	}
+	logArgs := []any{"addr", *addr, "proxy", *proxy, "via_pseudonym", pseudonym}
+	if *maxConns > 0 {
+		logArgs = append(logArgs, "max_conns", *maxConns)
+	}
+	slog.Info("listening", logArgs...)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

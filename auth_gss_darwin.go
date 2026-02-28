@@ -37,22 +37,7 @@ func NewGSSTokenProvider(proxyHost, explicitSPN string) (*GSSTokenProvider, erro
 		spn = normalizeSPN(spn, '@', '/')
 	}
 	slog.Info("using macOS GSS-API", "spn", spn)
-	g := &GSSTokenProvider{spn: spn}
-
-	// Validate credentials are available at startup. This is a warning,
-	// not a fatal error, because credentials may become available later
-	// (e.g. kinit run after the proxy starts).
-	if _, err := g.GetToken(); err != nil {
-		slog.Warn("initial credential check failed", "error", err)
-		slog.Warn("the proxy will retry on each request; run 'kinit' to obtain credentials")
-	}
-
-	return g, nil
-}
-
-// SPN returns the service principal name used for token acquisition.
-func (g *GSSTokenProvider) SPN() string {
-	return g.spn
+	return &GSSTokenProvider{spn: spn}, nil
 }
 
 func (g *GSSTokenProvider) GetToken() (string, error) {
@@ -65,19 +50,16 @@ func (g *GSSTokenProvider) GetToken() (string, error) {
 	result := C.acquire_spnego_token(cspn)
 	if result.error_code != 0 {
 		msg := C.GoString(&result.error_msg[0])
+		hint := ""
 		if ccname := os.Getenv("KRB5CCNAME"); ccname != "" {
-			return "", &CredentialError{
-				msg: fmt.Sprintf("GSS-API error: %s (KRB5CCNAME=%s; try 'klist' to check credentials or 'kinit' to refresh)", msg, ccname),
-			}
+			hint = fmt.Sprintf(" (KRB5CCNAME=%s; try 'klist' to check credentials or 'kinit' to refresh)", ccname)
+		} else {
+			hint = " (try 'klist' to check credentials or 'kinit' to refresh)"
 		}
-		return "", &CredentialError{
-			msg: fmt.Sprintf("GSS-API error: %s (try 'klist' to check credentials or 'kinit' to refresh)", msg),
-		}
+		return "", &CredentialError{authError{msg: fmt.Sprintf("GSS-API error: %s%s", msg, hint)}}
 	}
 	if result.data == nil || result.length == 0 {
-		return "", &NegotiationError{
-			msg: "GSS-API returned empty token",
-		}
+		return "", &NegotiationError{authError{msg: "GSS-API returned empty token"}}
 	}
 	defer C.free_token_data(result.data)
 
@@ -90,6 +72,16 @@ func (g *GSSTokenProvider) Close() error {
 }
 
 // newNativeTokenProvider on darwin uses the GSS-API framework.
+// It probes credentials at startup so the user gets an early warning
+// if kinit is needed, but a probe failure is not fatal.
 func newNativeTokenProvider(proxy, spn string) (TokenProvider, error) {
-	return NewGSSTokenProvider(proxy, spn)
+	g, err := NewGSSTokenProvider(proxy, spn)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := g.GetToken(); err != nil {
+		slog.Warn("initial credential check failed", "error", err)
+		slog.Warn("the proxy will retry on each request; run 'kinit' to obtain credentials")
+	}
+	return g, nil
 }

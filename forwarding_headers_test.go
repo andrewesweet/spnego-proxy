@@ -1,68 +1,19 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
-	"net"
 	"net/http"
 	"regexp"
 	"strings"
 	"testing"
-	"time"
 )
 
-// ---------------------------------------------------------------------------
-// Helpers specific to forwarding-header tests
-// ---------------------------------------------------------------------------
-
-// newProxyWithFwdConfig creates a ProxyUnderTest with the given ForwardingConfig.
-// It wires up an upstream mock and returns both so the caller can inspect
-// recorded requests.
-func newProxyWithFwdConfig(t *testing.T, cfg ForwardingConfig) (*ProxyUnderTest, *MockUpstreamProxy) {
-	t.Helper()
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	proxy.SetForwardingConfig(cfg)
-	t.Cleanup(proxy.Close)
-	return proxy, upstream
-}
-
-// sendGetAndRecord sends a single GET http://example.com/test through the
-// proxy (optionally with extra headers) and returns the upstream's recorded
-// request.
-func sendGetAndRecord(t *testing.T, proxy *ProxyUnderTest, upstream *MockUpstreamProxy, extraHeaders http.Header) *RecordedRequest {
-	t.Helper()
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
+// withForwardingConfig returns a ProxyUnderTest setup function that applies
+// the given ForwardingConfig. Used with proxyRoundTrip and proxyRawRoundTrip.
+func withForwardingConfig(cfg ForwardingConfig) func(*ProxyUnderTest) {
+	return func(p *ProxyUnderTest) {
+		p.SetForwardingConfig(cfg)
 	}
-	t.Cleanup(func() { _ = conn.Close() })
-
-	req, _ := http.NewRequest("GET", "http://example.com/test", nil)
-	for k, vs := range extraHeaders {
-		for _, v := range vs {
-			req.Header.Add(k, v)
-		}
-	}
-	if err := req.WriteProxy(conn); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	_ = resp.Body.Close()
-	assertStatusCode(t, resp, http.StatusOK)
-
-	reqs := upstream.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("upstream received %d requests, want 1", len(reqs))
-	}
-	return reqs[0]
 }
 
 // ---------------------------------------------------------------------------
@@ -72,8 +23,7 @@ func sendGetAndRecord(t *testing.T, proxy *ProxyUnderTest, upstream *MockUpstrea
 // TestForwardedDisabledByDefault verifies that the Forwarded header is NOT
 // added when ForwardingConfig.ForwardedEnabled is false (the zero value).
 func TestForwardedDisabledByDefault(t *testing.T) {
-	proxy, upstream := newProxyWithFwdConfig(t, ForwardingConfig{})
-	rec := sendGetAndRecord(t, proxy, upstream, nil)
+	rec := proxyRoundTrip(t, nil, withForwardingConfig(ForwardingConfig{}))
 	assertHeaderAbsent(t, rec.Header, "Forwarded")
 }
 
@@ -81,8 +31,7 @@ func TestForwardedDisabledByDefault(t *testing.T) {
 // proxy injects a Forwarded header whose "for" token matches the RFC 7239
 // §6.3 obfuscated identifier format (_xxxxxxxx).
 func TestForwardedHeaderAdded(t *testing.T) {
-	proxy, upstream := newProxyWithFwdConfig(t, ForwardingConfig{ForwardedEnabled: true})
-	rec := sendGetAndRecord(t, proxy, upstream, nil)
+	rec := proxyRoundTrip(t, nil, withForwardingConfig(ForwardingConfig{ForwardedEnabled: true}))
 
 	fwd := rec.Header.Get("Forwarded")
 	if fwd == "" {
@@ -102,10 +51,11 @@ func TestForwardedHeaderAdded(t *testing.T) {
 // TestForwardedChaining verifies that when the client sends a pre-existing
 // Forwarded header, the proxy appends its entry rather than replacing it.
 func TestForwardedChaining(t *testing.T) {
-	proxy, upstream := newProxyWithFwdConfig(t, ForwardingConfig{ForwardedEnabled: true})
-
 	existing := "for=192.0.2.60;proto=http;by=203.0.113.43"
-	rec := sendGetAndRecord(t, proxy, upstream, http.Header{"Forwarded": {existing}})
+	rec := proxyRoundTrip(t,
+		http.Header{"Forwarded": {existing}},
+		withForwardingConfig(ForwardingConfig{ForwardedEnabled: true}),
+	)
 
 	fwd := rec.Header.Get("Forwarded")
 	if fwd == "" {
@@ -159,16 +109,14 @@ func TestForwardedObfuscatedFormat(t *testing.T) {
 // TestXForwardedForDisabledByDefault verifies that X-Forwarded-For is NOT
 // added when ForwardingConfig.XForwardedForEnabled is false (the zero value).
 func TestXForwardedForDisabledByDefault(t *testing.T) {
-	proxy, upstream := newProxyWithFwdConfig(t, ForwardingConfig{})
-	rec := sendGetAndRecord(t, proxy, upstream, nil)
+	rec := proxyRoundTrip(t, nil, withForwardingConfig(ForwardingConfig{}))
 	assertHeaderAbsent(t, rec.Header, "X-Forwarded-For")
 }
 
 // TestXForwardedForAdded verifies that when XForwardedForEnabled is true, the
 // proxy adds an X-Forwarded-For header containing the client IP (127.0.0.1).
 func TestXForwardedForAdded(t *testing.T) {
-	proxy, upstream := newProxyWithFwdConfig(t, ForwardingConfig{XForwardedForEnabled: true})
-	rec := sendGetAndRecord(t, proxy, upstream, nil)
+	rec := proxyRoundTrip(t, nil, withForwardingConfig(ForwardingConfig{XForwardedForEnabled: true}))
 
 	xff := rec.Header.Get("X-Forwarded-For")
 	if xff == "" {
@@ -183,10 +131,11 @@ func TestXForwardedForAdded(t *testing.T) {
 // TestXForwardedForChaining verifies that an existing X-Forwarded-For value
 // is preserved and the new IP is appended.
 func TestXForwardedForChaining(t *testing.T) {
-	proxy, upstream := newProxyWithFwdConfig(t, ForwardingConfig{XForwardedForEnabled: true})
-
 	existing := "10.0.0.1"
-	rec := sendGetAndRecord(t, proxy, upstream, http.Header{"X-Forwarded-For": {existing}})
+	rec := proxyRoundTrip(t,
+		http.Header{"X-Forwarded-For": {existing}},
+		withForwardingConfig(ForwardingConfig{XForwardedForEnabled: true}),
+	)
 
 	xff := rec.Header.Get("X-Forwarded-For")
 	if !strings.HasPrefix(xff, existing) {
@@ -204,8 +153,7 @@ func TestXForwardedForChaining(t *testing.T) {
 // TestXForwardedProtoAddedWithXFF verifies that X-Forwarded-Proto is set to
 // "http" when XForwardedForEnabled is true and the header is absent.
 func TestXForwardedProtoAddedWithXFF(t *testing.T) {
-	proxy, upstream := newProxyWithFwdConfig(t, ForwardingConfig{XForwardedForEnabled: true})
-	rec := sendGetAndRecord(t, proxy, upstream, nil)
+	rec := proxyRoundTrip(t, nil, withForwardingConfig(ForwardingConfig{XForwardedForEnabled: true}))
 
 	if got := rec.Header.Get("X-Forwarded-Proto"); got != "http" {
 		t.Errorf("X-Forwarded-Proto: want %q, got %q", "http", got)
@@ -215,9 +163,10 @@ func TestXForwardedProtoAddedWithXFF(t *testing.T) {
 // TestXForwardedProtoNotOverwritten verifies that a pre-existing
 // X-Forwarded-Proto value is not replaced.
 func TestXForwardedProtoNotOverwritten(t *testing.T) {
-	proxy, upstream := newProxyWithFwdConfig(t, ForwardingConfig{XForwardedForEnabled: true})
-
-	rec := sendGetAndRecord(t, proxy, upstream, http.Header{"X-Forwarded-Proto": {"https"}})
+	rec := proxyRoundTrip(t,
+		http.Header{"X-Forwarded-Proto": {"https"}},
+		withForwardingConfig(ForwardingConfig{XForwardedForEnabled: true}),
+	)
 
 	if got := rec.Header.Get("X-Forwarded-Proto"); got != "https" {
 		t.Errorf("X-Forwarded-Proto: want existing %q preserved, got %q", "https", got)
@@ -227,8 +176,7 @@ func TestXForwardedProtoNotOverwritten(t *testing.T) {
 // TestXForwardedProtoAbsentWhenDisabled verifies that X-Forwarded-Proto is
 // not injected when XForwardedForEnabled is false.
 func TestXForwardedProtoAbsentWhenDisabled(t *testing.T) {
-	proxy, upstream := newProxyWithFwdConfig(t, ForwardingConfig{})
-	rec := sendGetAndRecord(t, proxy, upstream, nil)
+	rec := proxyRoundTrip(t, nil, withForwardingConfig(ForwardingConfig{}))
 	assertHeaderAbsent(t, rec.Header, "X-Forwarded-Proto")
 }
 
@@ -239,8 +187,7 @@ func TestXForwardedProtoAbsentWhenDisabled(t *testing.T) {
 // TestXForwardedHostAddedWithXFF verifies that X-Forwarded-Host is set to the
 // request Host when XForwardedForEnabled is true and the header is absent.
 func TestXForwardedHostAddedWithXFF(t *testing.T) {
-	proxy, upstream := newProxyWithFwdConfig(t, ForwardingConfig{XForwardedForEnabled: true})
-	rec := sendGetAndRecord(t, proxy, upstream, nil)
+	rec := proxyRoundTrip(t, nil, withForwardingConfig(ForwardingConfig{XForwardedForEnabled: true}))
 
 	if got := rec.Header.Get("X-Forwarded-Host"); got != "example.com" {
 		t.Errorf("X-Forwarded-Host: want %q, got %q", "example.com", got)
@@ -250,9 +197,10 @@ func TestXForwardedHostAddedWithXFF(t *testing.T) {
 // TestXForwardedHostNotOverwritten verifies that a pre-existing
 // X-Forwarded-Host value is not replaced.
 func TestXForwardedHostNotOverwritten(t *testing.T) {
-	proxy, upstream := newProxyWithFwdConfig(t, ForwardingConfig{XForwardedForEnabled: true})
-
-	rec := sendGetAndRecord(t, proxy, upstream, http.Header{"X-Forwarded-Host": {"original.example.com"}})
+	rec := proxyRoundTrip(t,
+		http.Header{"X-Forwarded-Host": {"original.example.com"}},
+		withForwardingConfig(ForwardingConfig{XForwardedForEnabled: true}),
+	)
 
 	if got := rec.Header.Get("X-Forwarded-Host"); got != "original.example.com" {
 		t.Errorf("X-Forwarded-Host: want existing %q preserved, got %q", "original.example.com", got)
@@ -262,8 +210,7 @@ func TestXForwardedHostNotOverwritten(t *testing.T) {
 // TestXForwardedHostAbsentWhenDisabled verifies that X-Forwarded-Host is not
 // injected when XForwardedForEnabled is false.
 func TestXForwardedHostAbsentWhenDisabled(t *testing.T) {
-	proxy, upstream := newProxyWithFwdConfig(t, ForwardingConfig{})
-	rec := sendGetAndRecord(t, proxy, upstream, nil)
+	rec := proxyRoundTrip(t, nil, withForwardingConfig(ForwardingConfig{}))
 	assertHeaderAbsent(t, rec.Header, "X-Forwarded-Host")
 }
 
@@ -278,8 +225,7 @@ func TestBothForwardingHeadersEnabled(t *testing.T) {
 		ForwardedEnabled:     true,
 		XForwardedForEnabled: true,
 	}
-	proxy, upstream := newProxyWithFwdConfig(t, cfg)
-	rec := sendGetAndRecord(t, proxy, upstream, nil)
+	rec := proxyRoundTrip(t, nil, withForwardingConfig(cfg))
 
 	if fwd := rec.Header.Get("Forwarded"); fwd == "" {
 		t.Error("expected Forwarded header, got none")
@@ -323,8 +269,7 @@ func TestForwardingHeadersDoNotAffectVia(t *testing.T) {
 		ForwardedEnabled:     true,
 		XForwardedForEnabled: true,
 	}
-	proxy, upstream := newProxyWithFwdConfig(t, cfg)
-	rec := sendGetAndRecord(t, proxy, upstream, nil)
+	rec := proxyRoundTrip(t, nil, withForwardingConfig(cfg))
 
 	via := rec.Header.Get("Via")
 	if via == "" {
@@ -337,13 +282,13 @@ func TestForwardingHeadersDoNotAffectVia(t *testing.T) {
 
 // TestForwardingHeadersDoNotAffectProxyAuthorization confirms that
 // Proxy-Authorization is still injected when forwarding headers are enabled.
+// NewProxyUnderTest always uses "test-token" as the stub provider token.
 func TestForwardingHeadersDoNotAffectProxyAuthorization(t *testing.T) {
 	cfg := ForwardingConfig{
 		ForwardedEnabled:     true,
 		XForwardedForEnabled: true,
 	}
-	proxy, upstream := newProxyWithFwdConfig(t, cfg)
-	rec := sendGetAndRecord(t, proxy, upstream, nil)
+	rec := proxyRoundTrip(t, nil, withForwardingConfig(cfg))
 
-	assertHeaderPresent(t, rec.Header, "Proxy-Authorization", fmt.Sprintf("Negotiate %s", proxy.Provider.token))
+	assertHeaderPresent(t, rec.Header, "Proxy-Authorization", fmt.Sprintf("Negotiate %s", "test-token"))
 }

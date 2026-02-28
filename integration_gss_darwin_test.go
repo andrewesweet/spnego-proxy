@@ -33,8 +33,8 @@ func TestGSSTokenProviderWithEphemeralKDC(t *testing.T) {
 	}
 	defer func() { _ = provider.Close() }()
 
-	if provider.SPN() != "HTTP@localhost" {
-		t.Errorf("expected SPN HTTP@localhost, got %s", provider.SPN())
+	if provider.spn != "HTTP@localhost" {
+		t.Errorf("expected SPN HTTP@localhost, got %s", provider.spn)
 	}
 
 	token, err := provider.GetToken()
@@ -75,8 +75,8 @@ func TestGSSTokenProviderExplicitSPNWithKDC(t *testing.T) {
 	}
 	defer func() { _ = provider.Close() }()
 
-	if provider.SPN() != "HTTP@localhost" {
-		t.Errorf("expected normalized SPN HTTP@localhost, got %s", provider.SPN())
+	if provider.spn != "HTTP@localhost" {
+		t.Errorf("expected normalized SPN HTTP@localhost, got %s", provider.spn)
 	}
 
 	token, err := provider.GetToken()
@@ -111,8 +111,8 @@ func TestGSSTokenProviderHostWithPort(t *testing.T) {
 	}
 	defer func() { _ = provider.Close() }()
 
-	if provider.SPN() != "HTTP@localhost" {
-		t.Errorf("expected SPN HTTP@localhost, got %s", provider.SPN())
+	if provider.spn != "HTTP@localhost" {
+		t.Errorf("expected SPN HTTP@localhost, got %s", provider.spn)
 	}
 
 	token, err := provider.GetToken()
@@ -147,7 +147,7 @@ func TestGSSTokenProviderReacquire(t *testing.T) {
 	}
 	defer func() { _ = provider.Close() }()
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		token, err := provider.GetToken()
 		if err != nil {
 			t.Fatalf("GetToken call %d: %v", i+1, err)

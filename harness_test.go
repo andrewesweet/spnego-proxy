@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -295,13 +296,17 @@ func assertStatusCode(t *testing.T, resp *http.Response, expected int) {
 
 // proxyRoundTrip sends a GET request with the given headers through a fresh
 // proxy→upstream chain and returns the upstream's recorded request.  It
-// assumes the default 200 OK mock response.
-func proxyRoundTrip(t *testing.T, headers http.Header) *RecordedRequest {
+// assumes the default 200 OK mock response. Optional setup funcs can
+// configure the ProxyUnderTest before the first request (e.g., SetForwardingConfig).
+func proxyRoundTrip(t *testing.T, headers http.Header, setup ...func(*ProxyUnderTest)) *RecordedRequest {
 	t.Helper()
 	upstream := NewMockUpstreamProxy(t, nil)
 	t.Cleanup(upstream.Close)
 
 	proxy := NewProxyUnderTest(t, upstream.Addr())
+	for _, fn := range setup {
+		fn(proxy)
+	}
 	t.Cleanup(proxy.Close)
 
 	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
@@ -482,4 +487,37 @@ func TestComplianceHarnessSmokeTest(t *testing.T) {
 
 	// Headers that should NOT appear on the forwarded request.
 	assertHeaderAbsent(t, upstreamReq.Header, "X-Nonexistent")
+}
+
+// ---------------------------------------------------------------------------
+// Shared test utilities
+// ---------------------------------------------------------------------------
+
+// testPseudonym is a fixed Via pseudonym used across tests for deterministic
+// assertions on the Via header value.
+const testPseudonym = "spnego-proxy-test"
+
+// stubTokenProvider is a controllable TokenProvider for testing.
+type stubTokenProvider struct {
+	calls  atomic.Int64
+	err    error         // when non-nil, GetToken returns this error
+	token  string        // returned on success
+	delay  time.Duration // artificial latency before returning
+	closed atomic.Bool
+}
+
+func (s *stubTokenProvider) GetToken() (string, error) {
+	s.calls.Add(1)
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+	}
+	if s.err != nil {
+		return "", s.err
+	}
+	return s.token, nil
+}
+
+func (s *stubTokenProvider) Close() error {
+	s.closed.Store(true)
+	return nil
 }
