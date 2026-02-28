@@ -62,9 +62,6 @@ func sendRequest(t *testing.T, conn net.Conn, target string) {
 // token provider returns a generic (non-typed) error, the proxy responds with
 // 502 Bad Gateway and a Proxy-Status header carrying the
 // "proxy_internal_error" error type.
-//
-// Per RFC 9209 §2.3: proxy_internal_error is used when the proxy encountered
-// an internal error not covered by a more specific type.
 func TestA3_RFC9209_ProxyStatusOnTokenAcquisitionFailure(t *testing.T) {
 	upstream := NewMockUpstreamProxy(t, nil)
 	t.Cleanup(upstream.Close)
@@ -76,7 +73,7 @@ func TestA3_RFC9209_ProxyStatusOnTokenAcquisitionFailure(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, ProxyConfig{Upstream: upstream.Addr(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
+		handleClient(server, defaultTestConfig(upstream.Addr(), provider))
 	}()
 
 	sendRequest(t, client, "http://example.com/test")
@@ -100,11 +97,7 @@ func TestA3_RFC9209_ProxyStatusOnTokenAcquisitionFailure(t *testing.T) {
 		t.Errorf("upstream received %d requests, want 0", n)
 	}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5 s after token failure")
-	}
+	waitForDone(t, done)
 }
 
 // ---------------------------------------------------------------------------
@@ -114,9 +107,6 @@ func TestA3_RFC9209_ProxyStatusOnTokenAcquisitionFailure(t *testing.T) {
 // TestA3_RFC9209_ProxyStatusOnCircuitBreakerOpen verifies that when the token
 // provider returns a *CircuitBreakerError, the proxy responds with 502 Bad
 // Gateway and Proxy-Status "proxy_internal_error".
-//
-// Per RFC 9209 §2.3: proxy_internal_error covers internal proxy failures
-// including self-imposed rate limiting that prevents request processing.
 func TestA3_RFC9209_ProxyStatusOnCircuitBreakerOpen(t *testing.T) {
 	upstream := NewMockUpstreamProxy(t, nil)
 	t.Cleanup(upstream.Close)
@@ -132,7 +122,7 @@ func TestA3_RFC9209_ProxyStatusOnCircuitBreakerOpen(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, ProxyConfig{Upstream: upstream.Addr(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
+		handleClient(server, defaultTestConfig(upstream.Addr(), provider))
 	}()
 
 	sendRequest(t, client, "http://example.com/test")
@@ -158,11 +148,7 @@ func TestA3_RFC9209_ProxyStatusOnCircuitBreakerOpen(t *testing.T) {
 		t.Errorf("upstream received %d requests, want 0", n)
 	}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5 s after circuit breaker error")
-	}
+	waitForDone(t, done)
 }
 
 // ---------------------------------------------------------------------------
@@ -172,9 +158,6 @@ func TestA3_RFC9209_ProxyStatusOnCircuitBreakerOpen(t *testing.T) {
 // TestA3_RFC9209_ProxyStatusOnCredentialFailure verifies that when the token
 // provider returns a *CredentialError, the proxy responds with 502 Bad Gateway
 // and Proxy-Status "proxy_internal_error".
-//
-// Per RFC 9209 §2.3: proxy_internal_error is used for authentication
-// subsystem failures that prevent the proxy from authenticating to upstream.
 func TestA3_RFC9209_ProxyStatusOnCredentialFailure(t *testing.T) {
 	upstream := NewMockUpstreamProxy(t, nil)
 	t.Cleanup(upstream.Close)
@@ -190,7 +173,7 @@ func TestA3_RFC9209_ProxyStatusOnCredentialFailure(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, ProxyConfig{Upstream: upstream.Addr(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
+		handleClient(server, defaultTestConfig(upstream.Addr(), provider))
 	}()
 
 	sendRequest(t, client, "http://example.com/test")
@@ -216,11 +199,7 @@ func TestA3_RFC9209_ProxyStatusOnCredentialFailure(t *testing.T) {
 		t.Errorf("upstream received %d requests, want 0", n)
 	}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5 s after credential error")
-	}
+	waitForDone(t, done)
 }
 
 // ---------------------------------------------------------------------------
@@ -230,9 +209,6 @@ func TestA3_RFC9209_ProxyStatusOnCredentialFailure(t *testing.T) {
 // TestA3_RFC9209_ProxyStatusOnNegotiationFailure verifies that when the token
 // provider returns a *NegotiationError, the proxy responds with 502 Bad
 // Gateway and Proxy-Status "proxy_internal_error".
-//
-// Per RFC 9209 §2.3: proxy_internal_error is used when the proxy cannot
-// complete the authentication protocol required to serve the request.
 func TestA3_RFC9209_ProxyStatusOnNegotiationFailure(t *testing.T) {
 	upstream := NewMockUpstreamProxy(t, nil)
 	t.Cleanup(upstream.Close)
@@ -248,7 +224,7 @@ func TestA3_RFC9209_ProxyStatusOnNegotiationFailure(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, ProxyConfig{Upstream: upstream.Addr(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
+		handleClient(server, defaultTestConfig(upstream.Addr(), provider))
 	}()
 
 	sendRequest(t, client, "http://example.com/test")
@@ -274,11 +250,7 @@ func TestA3_RFC9209_ProxyStatusOnNegotiationFailure(t *testing.T) {
 		t.Errorf("upstream received %d requests, want 0", n)
 	}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5 s after negotiation error")
-	}
+	waitForDone(t, done)
 }
 
 // ---------------------------------------------------------------------------
@@ -288,9 +260,6 @@ func TestA3_RFC9209_ProxyStatusOnNegotiationFailure(t *testing.T) {
 // TestA3_RFC9209_ProxyStatusOnMalformedRequest verifies that when the client
 // sends malformed HTTP data that cannot be parsed, the proxy responds with
 // 400 Bad Request and Proxy-Status "http_request_error".
-//
-// Per RFC 9209 §2.3: http_request_error is used when the proxy cannot parse
-// or process the client's request due to a client-side protocol error.
 func TestA3_RFC9209_ProxyStatusOnMalformedRequest(t *testing.T) {
 	upstream := NewMockUpstreamProxy(t, nil)
 	t.Cleanup(upstream.Close)
@@ -302,7 +271,7 @@ func TestA3_RFC9209_ProxyStatusOnMalformedRequest(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleClient(server, ProxyConfig{Upstream: upstream.Addr(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
+		handleClient(server, defaultTestConfig(upstream.Addr(), provider))
 	}()
 
 	// Send data that is not a valid HTTP request — deliberately malformed
@@ -331,11 +300,7 @@ func TestA3_RFC9209_ProxyStatusOnMalformedRequest(t *testing.T) {
 		t.Errorf("upstream received %d requests, want 0", n)
 	}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5 s after malformed request")
-	}
+	waitForDone(t, done)
 }
 
 // ---------------------------------------------------------------------------
@@ -345,12 +310,6 @@ func TestA3_RFC9209_ProxyStatusOnMalformedRequest(t *testing.T) {
 // TestA3_RFC9209_ProxyStatusOnLoopDetected verifies that when the incoming
 // request's Via header already contains this proxy's pseudonym, the proxy
 // responds with 502 Bad Gateway and Proxy-Status "proxy_loop_detected".
-//
-// Per RFC 9209 §2.3: proxy_loop_detected is used when the proxy identifies
-// a request routing loop based on its own identifier in the Via chain.
-//
-// Per RFC 9110 §7.6.3: proxies MUST check the Via header for their own
-// identifier before forwarding a request to detect forwarding loops.
 func TestA3_RFC9209_ProxyStatusOnLoopDetected(t *testing.T) {
 	upstream := NewMockUpstreamProxy(t, nil)
 	t.Cleanup(upstream.Close)
@@ -403,23 +362,6 @@ func TestA3_RFC9209_ProxyStatusOnLoopDetected(t *testing.T) {
 // TestA3_RFC9209_ProxyStatusOnConnectionTerminated verifies that
 // writeHTTPError sends a 502 Bad Gateway response with Proxy-Status header
 // carrying the "connection_terminated" error type.
-//
-// Per RFC 9209 §2.3: connection_terminated is used when the connection to
-// the next-hop server was closed before a complete response was received.
-//
-// The connection_terminated error path in handleClient fires when
-// req.WriteProxy(proxyConn) fails (main.go:362–366). Triggering this
-// deterministically via a live TCP connection is unreliable because the OS
-// kernel buffers small writes; the write can succeed even if the peer has
-// closed the connection, and the error only surfaces after the kernel flushes
-// the send buffer (a non-deterministic timing event).
-//
-// This test therefore validates the writeHTTPError call directly with
-// errConnectionTerminated — confirming that the error type token, status
-// code, and response body are all correct per RFC 9209 §2. The integration
-// between handleClient and writeHTTPError is already exercised by the other
-// error-type tests in this file (e.g. proxy_internal_error, http_request_error)
-// which use the same writeHTTPError function.
 func TestA3_RFC9209_ProxyStatusOnConnectionTerminated(t *testing.T) {
 	// Use net.Pipe so the response can be read back synchronously without
 	// involving a listener. writeHTTPError writes directly to a net.Conn.
@@ -452,11 +394,7 @@ func TestA3_RFC9209_ProxyStatusOnConnectionTerminated(t *testing.T) {
 		t.Errorf("body: want description of upstream closure, got %q", body)
 	}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("writeHTTPError did not return within 5 s")
-	}
+	waitForDone(t, done)
 }
 
 // ---------------------------------------------------------------------------
@@ -467,9 +405,6 @@ func TestA3_RFC9209_ProxyStatusOnConnectionTerminated(t *testing.T) {
 // portion of the Proxy-Status header is exactly "spnego-proxy" across all
 // error type variants, confirming RFC 9209 §2 compliance for the proxy
 // identifier field.
-//
-// This table-driven test covers each distinct error type to ensure the
-// identifier is consistent regardless of the error path taken.
 func TestA3_RFC9209_ProxyIdentifierIsSpnegoProxy(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -530,7 +465,7 @@ func TestA3_RFC9209_ProxyIdentifierIsSpnegoProxy(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				handleClient(server, ProxyConfig{Upstream: upstream.Addr(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
+				handleClient(server, defaultTestConfig(upstream.Addr(), provider))
 			}()
 
 			sendRequest(t, client, "http://example.com/identifier-test")
@@ -555,11 +490,7 @@ func TestA3_RFC9209_ProxyIdentifierIsSpnegoProxy(t *testing.T) {
 				t.Errorf("Proxy-Status: want %q, got %q", wantPS, ps)
 			}
 
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-				t.Fatalf("handleClient did not return within 5 s for %s", tc.name)
-			}
+			waitForDone(t, done)
 		})
 	}
 }

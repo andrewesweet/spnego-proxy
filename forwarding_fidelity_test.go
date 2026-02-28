@@ -43,18 +43,6 @@ import (
 // headers as a slice preserving insertion order; req.WriteProxy emits them in
 // that same order.
 func TestForwardingC1_SameNameHeaderOrderPreserved(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	t.Cleanup(proxy.Close)
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
 	// Send the request as raw bytes to guarantee wire order of the three
 	// X-Custom values. http.NewRequest+WriteProxy would canonicalize them
 	// into a single comma-joined header, defeating the order assertion.
@@ -64,18 +52,10 @@ func TestForwardingC1_SameNameHeaderOrderPreserved(t *testing.T) {
 		"X-Custom: beta\r\n" +
 		"X-Custom: gamma\r\n" +
 		"\r\n"
-	if _, err := conn.Write([]byte(raw)); err != nil {
-		t.Fatalf("write raw request: %v", err)
-	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	resp, reqs := proxyRawRoundTrip(t, raw)
 	assertStatusCode(t, resp, http.StatusOK)
 
-	reqs := upstream.Requests()
 	if len(reqs) != 1 {
 		t.Fatalf("upstream received %d requests, want 1", len(reqs))
 	}
@@ -137,35 +117,15 @@ func TestForwardingC2_MultipleUnrecognizedHeadersForwarded(t *testing.T) {
 // URI when forwarding. req.WriteProxy implements this: it sets Host from
 // req.URL.Host, overriding req.Header["Host"] and req.Host.
 func TestForwardingC3_HostRegeneratedFromRequestTarget(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	t.Cleanup(proxy.Close)
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
 	// Send a request whose Host header differs from the absolute-form URI.
 	// The proxy must forward Host: example.com (from the URI), not other.com.
 	raw := "GET http://example.com/c3 HTTP/1.1\r\n" +
 		"Host: other.com\r\n" +
 		"\r\n"
-	if _, err := conn.Write([]byte(raw)); err != nil {
-		t.Fatalf("write raw request: %v", err)
-	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	resp, reqs := proxyRawRoundTrip(t, raw)
 	assertStatusCode(t, resp, http.StatusOK)
 
-	reqs := upstream.Requests()
 	if len(reqs) != 1 {
 		t.Fatalf("upstream received %d requests, want 1", len(reqs))
 	}
@@ -188,36 +148,16 @@ func TestForwardingC3_HostRegeneratedFromRequestTarget(t *testing.T) {
 // request-target path or query string. Go's req.WriteProxy writes req.URL
 // unchanged, so path and query survive the proxy hop unmodified.
 func TestForwardingC4_PathAndQueryPreserved(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	t.Cleanup(proxy.Close)
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
 	// The path contains segments and the query contains a percent-encoded space.
 	targetPath := "/path/to/resource"
 	targetQuery := "q=1&r=2%20"
 	raw := "GET http://example.com" + targetPath + "?" + targetQuery + " HTTP/1.1\r\n" +
 		"Host: example.com\r\n" +
 		"\r\n"
-	if _, err := conn.Write([]byte(raw)); err != nil {
-		t.Fatalf("write raw request: %v", err)
-	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	resp, reqs := proxyRawRoundTrip(t, raw)
 	assertStatusCode(t, resp, http.StatusOK)
 
-	reqs := upstream.Requests()
 	if len(reqs) != 1 {
 		t.Fatalf("upstream received %d requests, want 1", len(reqs))
 	}
@@ -358,7 +298,7 @@ func TestForwardingC7_NoTransformBodyPreserved(t *testing.T) {
 // before the injectVia + resp.Write call in the upstream-to-client goroutine.
 // See GitHub issue #125 for tracking.
 func TestForwardingB3_ProxyAuthenticateNotForwardedToClient(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, func(_ *http.Request) *http.Response {
+	respFunc := func(_ *http.Request) *http.Response {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			ProtoMajor: 1,
@@ -369,28 +309,13 @@ func TestForwardingB3_ProxyAuthenticateNotForwardedToClient(t *testing.T) {
 			Body:          http.NoBody,
 			ContentLength: 0,
 		}
-	})
-	t.Cleanup(upstream.Close)
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	t.Cleanup(proxy.Close)
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
-	req, _ := http.NewRequest("GET", "http://example.com/b3", nil)
-	if err := req.WriteProxy(conn); err != nil {
-		t.Fatalf("write request: %v", err)
 	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	raw := "GET http://example.com/b3 HTTP/1.1\r\n" +
+		"Host: example.com\r\n" +
+		"\r\n"
+
+	resp, _ := proxyRawRoundTripWithUpstream(t, raw, respFunc)
 	assertStatusCode(t, resp, http.StatusOK)
 
 	// KNOWN GAP: The assertion below is written as the desired post-fix
@@ -404,4 +329,3 @@ func TestForwardingB3_ProxyAuthenticateNotForwardedToClient(t *testing.T) {
 	}
 	// If we reach here, the proxy already handles B3 correctly.
 }
-

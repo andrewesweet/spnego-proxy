@@ -37,21 +37,6 @@ import (
 // serialized request before sending it. We must re-inject the header after
 // WriteProxy if it was present on the incoming request.
 func TestF1_ExpectHeaderForwardedToUpstream(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	t.Cleanup(proxy.Close)
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
-	// Send a raw HTTP/1.1 request with Expect: 100-continue and a small body
-	// so the proxy can fully forward the request to the upstream. We include
-	// the body bytes immediately after the headers (the proxy forwards both).
 	body := "hello"
 	raw := "POST http://example.com/upload HTTP/1.1\r\n" +
 		"Host: example.com\r\n" +
@@ -60,19 +45,10 @@ func TestF1_ExpectHeaderForwardedToUpstream(t *testing.T) {
 		"Expect: 100-continue\r\n" +
 		"\r\n" +
 		body
-	if _, err := conn.Write([]byte(raw)); err != nil {
-		t.Fatalf("write raw request: %v", err)
-	}
 
-	// The upstream mock responds with 200 OK.
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	resp, reqs := proxyRawRoundTrip(t, raw)
 	assertStatusCode(t, resp, http.StatusOK)
 
-	reqs := upstream.Requests()
 	if len(reqs) != 1 {
 		t.Fatalf("upstream received %d requests, want 1", len(reqs))
 	}
@@ -93,18 +69,6 @@ func TestF1_ExpectHeaderNotAddedWhenAbsent(t *testing.T) {
 // TestF1_ExpectHeaderPreservedCaseInsensitive verifies that a request with
 // Expect: 100-Continue (mixed case) is forwarded correctly.
 func TestF1_ExpectHeaderPreservedCaseInsensitive(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	t.Cleanup(proxy.Close)
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
 	body2 := "hello"
 	raw := "POST http://example.com/upload HTTP/1.1\r\n" +
 		"Host: example.com\r\n" +
@@ -112,18 +76,10 @@ func TestF1_ExpectHeaderPreservedCaseInsensitive(t *testing.T) {
 		"Expect: 100-Continue\r\n" +
 		"\r\n" +
 		body2
-	if _, err := conn.Write([]byte(raw)); err != nil {
-		t.Fatalf("write raw request: %v", err)
-	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	resp, reqs := proxyRawRoundTrip(t, raw)
 	assertStatusCode(t, resp, http.StatusOK)
 
-	reqs := upstream.Requests()
 	if len(reqs) != 1 {
 		t.Fatalf("upstream received %d requests, want 1", len(reqs))
 	}
@@ -166,34 +122,14 @@ func TestF1_ExpectHeaderPreservedCaseInsensitive(t *testing.T) {
 // RFC 9110 §7.6.2: each proxy that forwards a TRACE or OPTIONS request MUST
 // decrement the Max-Forwards value by 1 before forwarding.
 func TestG1_MaxForwards_DecrementedForTRACE(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	t.Cleanup(proxy.Close)
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
 	raw := "TRACE http://example.com/ HTTP/1.1\r\n" +
 		"Host: example.com\r\n" +
 		"Max-Forwards: 5\r\n" +
 		"\r\n"
-	if _, err := conn.Write([]byte(raw)); err != nil {
-		t.Fatalf("write raw request: %v", err)
-	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	resp, reqs := proxyRawRoundTrip(t, raw)
 	assertStatusCode(t, resp, http.StatusOK)
 
-	reqs := upstream.Requests()
 	if len(reqs) != 1 {
 		t.Fatalf("upstream received %d requests, want 1", len(reqs))
 	}
@@ -207,34 +143,14 @@ func TestG1_MaxForwards_DecrementedForTRACE(t *testing.T) {
 // TestG1_MaxForwards_DecrementedForOPTIONS verifies the same decrement
 // behaviour for OPTIONS requests.
 func TestG1_MaxForwards_DecrementedForOPTIONS(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	t.Cleanup(proxy.Close)
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
 	raw := "OPTIONS http://example.com/ HTTP/1.1\r\n" +
 		"Host: example.com\r\n" +
 		"Max-Forwards: 10\r\n" +
 		"\r\n"
-	if _, err := conn.Write([]byte(raw)); err != nil {
-		t.Fatalf("write raw request: %v", err)
-	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	resp, reqs := proxyRawRoundTrip(t, raw)
 	assertStatusCode(t, resp, http.StatusOK)
 
-	reqs := upstream.Requests()
 	if len(reqs) != 1 {
 		t.Fatalf("upstream received %d requests, want 1", len(reqs))
 	}
@@ -251,108 +167,49 @@ func TestG1_MaxForwards_DecrementedForOPTIONS(t *testing.T) {
 // RFC 9110 §7.6.2: if the received value is 0, the recipient MUST NOT forward
 // the request; instead, it MUST respond as the final recipient.
 func TestG1_MaxForwards_ZeroTRACE_ReturnedLocally(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	t.Cleanup(proxy.Close)
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
 	raw := "TRACE http://example.com/ HTTP/1.1\r\n" +
 		"Host: example.com\r\n" +
 		"Max-Forwards: 0\r\n" +
 		"\r\n"
-	if _, err := conn.Write([]byte(raw)); err != nil {
-		t.Fatalf("write raw request: %v", err)
-	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	resp, reqs := proxyRawRoundTrip(t, raw)
 
 	// Proxy must respond locally with 200 OK.
 	assertStatusCode(t, resp, http.StatusOK)
 
 	// The upstream must NOT have received anything.
-	if got := upstream.Requests(); len(got) != 0 {
-		t.Errorf("upstream received %d requests, want 0 (should be handled locally)", len(got))
+	if len(reqs) != 0 {
+		t.Errorf("upstream received %d requests, want 0 (should be handled locally)", len(reqs))
 	}
 }
 
 // TestG1_MaxForwards_ZeroOPTIONS_ReturnedLocally verifies the same zero
 // Max-Forwards behavior for OPTIONS.
 func TestG1_MaxForwards_ZeroOPTIONS_ReturnedLocally(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	t.Cleanup(proxy.Close)
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
 	raw := "OPTIONS http://example.com/ HTTP/1.1\r\n" +
 		"Host: example.com\r\n" +
 		"Max-Forwards: 0\r\n" +
 		"\r\n"
-	if _, err := conn.Write([]byte(raw)); err != nil {
-		t.Fatalf("write raw request: %v", err)
-	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
+	resp, reqs := proxyRawRoundTrip(t, raw)
 	assertStatusCode(t, resp, http.StatusOK)
 
-	if got := upstream.Requests(); len(got) != 0 {
-		t.Errorf("upstream received %d requests, want 0", len(got))
+	if len(reqs) != 0 {
+		t.Errorf("upstream received %d requests, want 0", len(reqs))
 	}
 }
 
 // TestG1_MaxForwards_DecrementedForOPTIONS_One verifies that Max-Forwards: 1
 // is decremented to 0 and the request is forwarded (not handled locally).
 func TestG1_MaxForwards_DecrementedForOPTIONS_One(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	t.Cleanup(proxy.Close)
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
 	raw := "OPTIONS http://example.com/ HTTP/1.1\r\n" +
 		"Host: example.com\r\n" +
 		"Max-Forwards: 1\r\n" +
 		"\r\n"
-	if _, err := conn.Write([]byte(raw)); err != nil {
-		t.Fatalf("write raw request: %v", err)
-	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	resp, reqs := proxyRawRoundTrip(t, raw)
 	assertStatusCode(t, resp, http.StatusOK)
 
-	reqs := upstream.Requests()
 	if len(reqs) != 1 {
 		t.Fatalf("upstream received %d requests, want 1", len(reqs))
 	}
@@ -368,34 +225,14 @@ func TestG1_MaxForwards_DecrementedForOPTIONS_One(t *testing.T) {
 // RFC 9110 §7.6.2 restricts the Max-Forwards decrement rule to TRACE and
 // OPTIONS only.
 func TestG1_MaxForwards_NotDecrementedForGET(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	t.Cleanup(proxy.Close)
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
 	raw := "GET http://example.com/ HTTP/1.1\r\n" +
 		"Host: example.com\r\n" +
 		"Max-Forwards: 5\r\n" +
 		"\r\n"
-	if _, err := conn.Write([]byte(raw)); err != nil {
-		t.Fatalf("write raw request: %v", err)
-	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	resp, reqs := proxyRawRoundTrip(t, raw)
 	assertStatusCode(t, resp, http.StatusOK)
 
-	reqs := upstream.Requests()
 	if len(reqs) != 1 {
 		t.Fatalf("upstream received %d requests, want 1", len(reqs))
 	}
@@ -409,33 +246,13 @@ func TestG1_MaxForwards_NotDecrementedForGET(t *testing.T) {
 // TestG1_MaxForwards_AbsentNotAdded verifies that the proxy does not add a
 // Max-Forwards header to TRACE/OPTIONS requests that did not include one.
 func TestG1_MaxForwards_AbsentNotAdded(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	t.Cleanup(proxy.Close)
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
 	raw := "TRACE http://example.com/ HTTP/1.1\r\n" +
 		"Host: example.com\r\n" +
 		"\r\n"
-	if _, err := conn.Write([]byte(raw)); err != nil {
-		t.Fatalf("write raw request: %v", err)
-	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	resp, reqs := proxyRawRoundTrip(t, raw)
 	assertStatusCode(t, resp, http.StatusOK)
 
-	reqs := upstream.Requests()
 	if len(reqs) != 1 {
 		t.Fatalf("upstream received %d requests, want 1", len(reqs))
 	}
@@ -450,35 +267,15 @@ func TestG1_MaxForwards_AbsentNotAdded(t *testing.T) {
 // encounters a value it cannot parse SHOULD forward the request without
 // modifying the header.
 func TestG1_MaxForwards_InvalidValueForwarded(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	t.Cleanup(proxy.Close)
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
 	raw := "TRACE http://example.com/ HTTP/1.1\r\n" +
 		"Host: example.com\r\n" +
 		"Max-Forwards: not-a-number\r\n" +
 		"\r\n"
-	if _, err := conn.Write([]byte(raw)); err != nil {
-		t.Fatalf("write raw request: %v", err)
-	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	resp, reqs := proxyRawRoundTrip(t, raw)
 	assertStatusCode(t, resp, http.StatusOK)
 
 	// The proxy must forward without error (no 502, no panic).
-	reqs := upstream.Requests()
 	if len(reqs) != 1 {
 		t.Fatalf("upstream received %d requests, want 1 (invalid Max-Forwards must be forwarded)", len(reqs))
 	}
@@ -496,6 +293,22 @@ func TestG1_MaxForwards_InvalidValueForwarded(t *testing.T) {
 // handles exactly one request per connection (the conn.Close is always deferred
 // in handleClient), this is already satisfied structurally.
 func TestI1_HTTP10_ConnectionClosedAfterResponse(t *testing.T) {
+	raw := "GET http://example.com/ HTTP/1.0\r\n" +
+		"Host: example.com\r\n" +
+		"\r\n"
+
+	resp, _ := proxyRawRoundTrip(t, raw)
+	assertStatusCode(t, resp, http.StatusOK)
+	// Drain the body so the connection can close cleanly.
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	// After the response, the proxy must close the connection. The
+	// proxyRawRoundTrip helper registers conn cleanup, but we need the
+	// raw conn to verify closure. For this specific assertion we keep
+	// a separate connection-level test.
+	// NOTE: The closure assertion requires direct conn access, which
+	// proxyRawRoundTrip doesn't expose. We keep this test using direct
+	// setup for the conn.Read check.
 	upstream := NewMockUpstreamProxy(t, nil)
 	t.Cleanup(upstream.Close)
 
@@ -508,25 +321,19 @@ func TestI1_HTTP10_ConnectionClosedAfterResponse(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	// Send an HTTP/1.0 request (no persistent connection implied).
-	raw := "GET http://example.com/ HTTP/1.0\r\n" +
-		"Host: example.com\r\n" +
-		"\r\n"
 	if _, err := conn.Write([]byte(raw)); err != nil {
 		t.Fatalf("write raw request: %v", err)
 	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	resp2, err := http.ReadResponse(bufio.NewReader(conn), nil)
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	assertStatusCode(t, resp, http.StatusOK)
-	// Drain the body so the connection can close cleanly.
-	_, _ = io.Copy(io.Discard, resp.Body)
+	defer func() { _ = resp2.Body.Close() }()
+	assertStatusCode(t, resp2, http.StatusOK)
+	_, _ = io.Copy(io.Discard, resp2.Body)
 
-	// After the response, the proxy must close the connection. Attempting
-	// to read again must return io.EOF (or an error indicating closure).
+	// After the response the proxy must close the connection.
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	buf := make([]byte, 1)
 	n, readErr := conn.Read(buf)
@@ -549,6 +356,7 @@ func TestI1_HTTP10_ConnectionClosedAfterResponse(t *testing.T) {
 // the connection after sending the response. Since this proxy closes after
 // every request unconditionally, this is always satisfied.
 func TestI2_ConnectionClose_ConnectionClosedAfterResponse(t *testing.T) {
+	// This test needs direct conn access for the Read-after-close check.
 	upstream := NewMockUpstreamProxy(t, nil)
 	t.Cleanup(upstream.Close)
 
@@ -672,32 +480,12 @@ func TestG1_MaxForwards_Table(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			upstream := NewMockUpstreamProxy(t, nil)
-			t.Cleanup(upstream.Close)
-
-			proxy := NewProxyUnderTest(t, upstream.Addr())
-			t.Cleanup(proxy.Close)
-
-			conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-			if err != nil {
-				t.Fatalf("dial proxy: %v", err)
-			}
-			t.Cleanup(func() { _ = conn.Close() })
-
 			raw := fmt.Sprintf("%s http://example.com/ HTTP/1.1\r\nHost: example.com\r\nMax-Forwards: %s\r\n\r\n",
 				tc.method, tc.maxForwards)
-			if _, err := conn.Write([]byte(raw)); err != nil {
-				t.Fatalf("write raw request: %v", err)
-			}
 
-			resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-			if err != nil {
-				t.Fatalf("read response: %v", err)
-			}
-			defer func() { _ = resp.Body.Close() }()
+			resp, reqs := proxyRawRoundTrip(t, raw)
 			assertStatusCode(t, resp, http.StatusOK)
 
-			reqs := upstream.Requests()
 			if tc.wantUpstream {
 				if len(reqs) != 1 {
 					t.Fatalf("upstream received %d requests, want 1", len(reqs))

@@ -333,6 +333,69 @@ func proxyRoundTrip(t *testing.T, headers http.Header) *RecordedRequest {
 	return reqs[0]
 }
 
+// proxyRawRoundTrip creates a fresh upstream+proxy pair, sends the given raw
+// HTTP request bytes through the proxy, and returns the response and recorded
+// upstream requests. Optional setup funcs can configure the ProxyUnderTest
+// before the first request (e.g., SetConnectPorts).
+func proxyRawRoundTrip(t *testing.T, rawReq string, setup ...func(*ProxyUnderTest)) (*http.Response, []*RecordedRequest) {
+	t.Helper()
+	return proxyRawRoundTripWithUpstream(t, rawReq, nil, setup...)
+}
+
+// proxyRawRoundTripWithUpstream is like proxyRawRoundTrip but accepts a custom
+// upstream response function. If respFunc is nil, the default 200 OK mock is
+// used.
+func proxyRawRoundTripWithUpstream(t *testing.T, rawReq string, respFunc func(*http.Request) *http.Response, setup ...func(*ProxyUnderTest)) (*http.Response, []*RecordedRequest) {
+	t.Helper()
+	upstream := NewMockUpstreamProxy(t, respFunc)
+	t.Cleanup(upstream.Close)
+	proxy := NewProxyUnderTest(t, upstream.Addr())
+	for _, fn := range setup {
+		fn(proxy)
+	}
+	t.Cleanup(proxy.Close)
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if _, err := conn.Write([]byte(rawReq)); err != nil {
+		t.Fatalf("write raw request: %v", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	return resp, upstream.Requests()
+}
+
+// waitForDone waits for a done channel to be closed, failing the test if it
+// does not close within 5 seconds. This replaces the repeated
+// select { case <-done: case <-time.After(5*time.Second): t.Fatal(...) }
+// pattern used in tests that launch handleClient in a goroutine.
+func waitForDone(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return within 5s")
+	}
+}
+
+// defaultTestConfig returns a ProxyConfig suitable for most tests. The
+// upstream address and provider are required; all other fields use sensible
+// defaults (testPseudonym, 5 s timeouts, no keep-alive).
+func defaultTestConfig(upstream string, provider TokenProvider) ProxyConfig {
+	return ProxyConfig{
+		Upstream:    upstream,
+		Provider:    provider,
+		Pseudonym:   testPseudonym,
+		DialTimeout: 5 * time.Second,
+		ReadTimeout: 5 * time.Second,
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Smoke test
 // ---------------------------------------------------------------------------

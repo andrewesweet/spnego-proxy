@@ -30,15 +30,8 @@ import (
 // and the target port is in the allowed list, the CONNECT tunnel is established
 // successfully.
 func TestD4_ConnectToAllowedPortSucceeds(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, func(_ *http.Request) *http.Response {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			ProtoMajor: 1,
-			ProtoMinor: 1,
-			Header:     make(http.Header),
-			Body:       http.NoBody,
-		}
-	})
+	// nil respFunc: the default 200 OK mock is sufficient for CONNECT.
+	upstream := NewMockUpstreamProxy(t, nil)
 	t.Cleanup(upstream.Close)
 
 	proxy := NewProxyUnderTest(t, upstream.Addr())
@@ -69,29 +62,11 @@ func TestD4_ConnectToAllowedPortSucceeds(t *testing.T) {
 // connectPorts is non-empty and the target port is not in the allowed list,
 // the proxy returns 403 Forbidden.
 func TestD4_ConnectToDisallowedPortReturnsForbidden(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
+	raw := "CONNECT example.com:25 HTTP/1.1\r\nHost: example.com:25\r\n\r\n"
 
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	proxy.SetConnectPorts([]string{"443", "8443"})
-	t.Cleanup(proxy.Close)
-
-	client, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	t.Cleanup(func() { _ = client.Close() })
-
-	_, err = io.WriteString(client, "CONNECT example.com:25 HTTP/1.1\r\nHost: example.com:25\r\n\r\n")
-	if err != nil {
-		t.Fatalf("write CONNECT: %v", err)
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	resp, reqs := proxyRawRoundTrip(t, raw, func(p *ProxyUnderTest) {
+		p.SetConnectPorts([]string{"443", "8443"})
+	})
 
 	assertStatusCode(t, resp, http.StatusForbidden)
 
@@ -106,7 +81,7 @@ func TestD4_ConnectToDisallowedPortReturnsForbidden(t *testing.T) {
 	}
 
 	// Upstream must not have received any request.
-	if n := len(upstream.Requests()); n != 0 {
+	if n := len(reqs); n != 0 {
 		t.Errorf("upstream received %d request(s), want 0", n)
 	}
 }
@@ -114,15 +89,8 @@ func TestD4_ConnectToDisallowedPortReturnsForbidden(t *testing.T) {
 // TestD4_EmptyPortListAllowsAll verifies that when connectPorts is empty
 // (the default), any port is allowed for CONNECT.
 func TestD4_EmptyPortListAllowsAll(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, func(_ *http.Request) *http.Response {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			ProtoMajor: 1,
-			ProtoMinor: 1,
-			Header:     make(http.Header),
-			Body:       http.NoBody,
-		}
-	})
+	// nil respFunc: the default 200 OK mock is sufficient for CONNECT.
+	upstream := NewMockUpstreamProxy(t, nil)
 	t.Cleanup(upstream.Close)
 
 	proxy := NewProxyUnderTest(t, upstream.Addr())
@@ -159,15 +127,8 @@ func TestD4_EmptyPortListAllowsAll(t *testing.T) {
 // with no explicit port (e.g. "example.com") is treated as port 443 when
 // checking against the allowed port list.
 func TestD4_DefaultPort443WhenNoPortSpecified(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, func(_ *http.Request) *http.Response {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			ProtoMajor: 1,
-			ProtoMinor: 1,
-			Header:     make(http.Header),
-			Body:       http.NoBody,
-		}
-	})
+	// nil respFunc: the default 200 OK mock is sufficient for CONNECT.
+	upstream := NewMockUpstreamProxy(t, nil)
 	t.Cleanup(upstream.Close)
 
 	proxy := NewProxyUnderTest(t, upstream.Addr())
@@ -271,7 +232,7 @@ func TestD6_ClientPayloadNotSentBeforeUpstream2xx(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleClient(conn, ProxyConfig{Upstream: upstreamLn.Addr().String(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
+		handleClient(conn, defaultTestConfig(upstreamLn.Addr().String(), provider))
 	}()
 
 	client, err := net.Dial("tcp", ln.Addr().String())
@@ -310,11 +271,7 @@ func TestD6_ClientPayloadNotSentBeforeUpstream2xx(t *testing.T) {
 	}
 
 	_ = client.Close()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s")
-	}
+	waitForDone(t, done)
 }
 
 // ---------------------------------------------------------------------------
@@ -353,7 +310,7 @@ func TestD7_UpstreamNon2xxRelayedToClient(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleClient(conn, ProxyConfig{Upstream: upstream.Addr(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
+		handleClient(conn, defaultTestConfig(upstream.Addr(), provider))
 	}()
 
 	client, err := net.Dial("tcp", ln.Addr().String())
@@ -376,11 +333,7 @@ func TestD7_UpstreamNon2xxRelayedToClient(t *testing.T) {
 	// D7: client must receive the upstream's actual status, not a synthetic 200.
 	assertStatusCode(t, resp, http.StatusForbidden)
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return within 5s")
-	}
+	waitForDone(t, done)
 }
 
 // ---------------------------------------------------------------------------
@@ -436,26 +389,13 @@ func TestD5_ConnectionClosedAfterConnectRejection(t *testing.T) {
 
 // TestD2_UpstreamBufferedDataDrainedOnClose verifies that when the upstream
 // closes its side of the CONNECT tunnel with pending data, all buffered bytes
-// are delivered to the client before EOF. This tests the upstream→client
+// are delivered to the client before EOF. This tests the upstream->client
 // direction of D2 (RFC 9110 §9.3.6).
 func TestD2_UpstreamBufferedDataDrainedOnClose(t *testing.T) {
 	const tunnelPayload = "TUNNEL-DATA-FROM-UPSTREAM-THAT-MUST-ARRIVE"
 
-	// The mock upstream sends a 200 for CONNECT, then writes tunnel data
-	// and closes the connection.
-	upstream := NewMockUpstreamProxy(t, func(_ *http.Request) *http.Response {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			ProtoMajor: 1,
-			ProtoMinor: 1,
-			Header:     make(http.Header),
-			Body:       http.NoBody,
-		}
-	})
-	// We need to inject tunnel data after the 200 response. Override the
-	// mock's handleConn by using a raw listener instead.
-	upstream.Close()
-
+	// We need to inject tunnel data after the 200 response, so use a raw
+	// listener instead of MockUpstreamProxy.
 	rawUpstream, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
