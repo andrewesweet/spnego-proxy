@@ -55,202 +55,135 @@ func sendRequest(t *testing.T, conn net.Conn, target string) {
 }
 
 // ---------------------------------------------------------------------------
-// A3 — proxy_internal_error: generic SPNEGO token acquisition failure
+// A3 — proxy_internal_error: all SPNEGO token acquisition failure variants
 // ---------------------------------------------------------------------------
 
-// TestA3_RFC9209_ProxyStatusOnTokenAcquisitionFailure verifies that when the
-// token provider returns a generic (non-typed) error, the proxy responds with
-// 502 Bad Gateway and a Proxy-Status header carrying the
-// "proxy_internal_error" error type.
-func TestA3_RFC9209_ProxyStatusOnTokenAcquisitionFailure(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	client, server := net.Pipe()
-	t.Cleanup(func() { _ = client.Close() })
-
-	provider := &stubTokenProvider{err: errors.New("generic token error")}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		handleClient(server, defaultTestConfig(upstream.Addr(), provider))
-	}()
-
-	sendRequest(t, client, "http://example.com/test")
-
-	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	t.Cleanup(func() { _ = resp.Body.Close() })
-
-	// A3: 502 with proxy_internal_error for generic token failure.
-	assertProxyStatus(t, resp, http.StatusBadGateway, "proxy_internal_error")
-
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "proxy_internal_error") {
-		t.Errorf("body: want mention of proxy_internal_error, got %q", body)
-	}
-
-	// Upstream must NOT have received the request — token failure is pre-dial.
-	if n := len(upstream.Requests()); n != 0 {
-		t.Errorf("upstream received %d requests, want 0", n)
-	}
-
-	waitForDone(t, done)
-}
-
-// ---------------------------------------------------------------------------
-// A3 — proxy_internal_error: circuit breaker open
-// ---------------------------------------------------------------------------
-
-// TestA3_RFC9209_ProxyStatusOnCircuitBreakerOpen verifies that when the token
-// provider returns a *CircuitBreakerError, the proxy responds with 502 Bad
-// Gateway and Proxy-Status "proxy_internal_error".
-func TestA3_RFC9209_ProxyStatusOnCircuitBreakerOpen(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	client, server := net.Pipe()
-	t.Cleanup(func() { _ = client.Close() })
-
-	cbErr := &CircuitBreakerError{
-		msg:   "circuit breaker open: token acquisition disabled after 3 consecutive failures",
-		cause: errors.New("gobreaker: circuit breaker is open"),
-	}
-	provider := &stubTokenProvider{err: cbErr}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		handleClient(server, defaultTestConfig(upstream.Addr(), provider))
-	}()
-
-	sendRequest(t, client, "http://example.com/test")
-
-	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	t.Cleanup(func() { _ = resp.Body.Close() })
-
-	// A3: 502 with proxy_internal_error for circuit breaker rejection.
-	assertProxyStatus(t, resp, http.StatusBadGateway, "proxy_internal_error")
-
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "proxy_internal_error") {
-		t.Errorf("body: want mention of proxy_internal_error, got %q", body)
-	}
-	if !strings.Contains(string(body), "circuit breaker") {
-		t.Errorf("body: want mention of circuit breaker, got %q", body)
+// TestA3_RFC9209_ProxyStatusOnProxyInternalError is a table-driven test that
+// verifies all four token-acquisition error types produce a 502 Bad Gateway
+// response with the correct Proxy-Status header, proxy identifier prefix,
+// and error-specific body content.
+func TestA3_RFC9209_ProxyStatusOnProxyInternalError(t *testing.T) {
+	tests := []struct {
+		name string
+		// providerErr is the error the stubTokenProvider returns.
+		providerErr error
+		// wantBodyContains lists substrings that MUST appear in the body.
+		wantBodyContains []string
+		// wantBodyExcludes lists substrings that MUST NOT appear in the body
+		// (used to confirm each error type produces a distinct message).
+		wantBodyExcludes []string
+	}{
+		{
+			name:        "generic_token_error",
+			providerErr: errors.New("GSS-API error: An unsupported mechanism was requested"),
+			wantBodyContains: []string{
+				"proxy_internal_error",
+				"failed to acquire a SPNEGO authentication token",
+				"Suggested action:",
+			},
+		},
+		{
+			name: "circuit_breaker_open",
+			providerErr: &CircuitBreakerError{
+				msg:   "circuit breaker open: token acquisition disabled after 3 consecutive failures",
+				cause: errors.New("gobreaker: circuit breaker is open"),
+			},
+			wantBodyContains: []string{
+				"proxy_internal_error",
+				"circuit breaker open",
+				"temporarily disabled after repeated failures",
+			},
+			wantBodyExcludes: []string{
+				"failed to acquire a SPNEGO authentication token",
+			},
+		},
+		{
+			name: "credential_failure",
+			providerErr: &CredentialError{
+				msg:   "could not acquire client credential: KDC_ERR_PREAUTH_FAILED",
+				cause: errors.New("KDC_ERR_PREAUTH_FAILED"),
+			},
+			wantBodyContains: []string{
+				"proxy_internal_error",
+				"Kerberos credentials are expired or unavailable",
+				"kinit",
+			},
+			wantBodyExcludes: []string{
+				"failed to acquire a SPNEGO authentication token",
+			},
+		},
+		{
+			name: "negotiation_failure",
+			providerErr: &NegotiationError{
+				msg:   "could not initialize context: SPN mismatch",
+				cause: errors.New("SPN mismatch"),
+			},
+			wantBodyContains: []string{
+				"proxy_internal_error",
+				"SPNEGO negotiation with the KDC failed",
+				"service principal name",
+			},
+			wantBodyExcludes: []string{
+				"failed to acquire a SPNEGO authentication token",
+				"Kerberos credentials are expired or unavailable",
+			},
+		},
 	}
 
-	if n := len(upstream.Requests()); n != 0 {
-		t.Errorf("upstream received %d requests, want 0", n)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := NewMockUpstreamProxy(t, nil)
+			t.Cleanup(upstream.Close)
+
+			client, server := net.Pipe()
+			t.Cleanup(func() { _ = client.Close() })
+
+			provider := &stubTokenProvider{err: tc.providerErr}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				handleClient(server, defaultTestConfig(upstream.Addr(), provider))
+			}()
+
+			sendRequest(t, client, "http://example.com/test")
+
+			resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+			if err != nil {
+				t.Fatalf("read response: %v", err)
+			}
+			t.Cleanup(func() { _ = resp.Body.Close() })
+
+			// A3: 502 with proxy_internal_error for all token failure variants.
+			assertProxyStatus(t, resp, http.StatusBadGateway, "proxy_internal_error")
+
+			// Verify the proxy identifier prefix is exactly "spnego-proxy;".
+			ps := resp.Header.Get("Proxy-Status")
+			if !strings.HasPrefix(ps, "spnego-proxy;") {
+				t.Errorf("Proxy-Status %q: identifier must start with %q", ps, "spnego-proxy;")
+			}
+
+			body, _ := io.ReadAll(resp.Body)
+			bodyStr := string(body)
+
+			for _, want := range tc.wantBodyContains {
+				if !strings.Contains(bodyStr, want) {
+					t.Errorf("body: want substring %q, got %q", want, bodyStr)
+				}
+			}
+			for _, exclude := range tc.wantBodyExcludes {
+				if strings.Contains(bodyStr, exclude) {
+					t.Errorf("body: must NOT contain %q, got %q", exclude, bodyStr)
+				}
+			}
+
+			// Upstream must NOT have received the request — token failure is pre-dial.
+			if n := len(upstream.Requests()); n != 0 {
+				t.Errorf("upstream received %d requests, want 0", n)
+			}
+
+			waitForDone(t, done)
+		})
 	}
-
-	waitForDone(t, done)
-}
-
-// ---------------------------------------------------------------------------
-// A3 — proxy_internal_error: credential failure
-// ---------------------------------------------------------------------------
-
-// TestA3_RFC9209_ProxyStatusOnCredentialFailure verifies that when the token
-// provider returns a *CredentialError, the proxy responds with 502 Bad Gateway
-// and Proxy-Status "proxy_internal_error".
-func TestA3_RFC9209_ProxyStatusOnCredentialFailure(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	client, server := net.Pipe()
-	t.Cleanup(func() { _ = client.Close() })
-
-	credErr := &CredentialError{
-		msg:   "Kerberos credentials are expired or unavailable",
-		cause: errors.New("no credentials cache found"),
-	}
-	provider := &stubTokenProvider{err: credErr}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		handleClient(server, defaultTestConfig(upstream.Addr(), provider))
-	}()
-
-	sendRequest(t, client, "http://example.com/test")
-
-	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	t.Cleanup(func() { _ = resp.Body.Close() })
-
-	// A3: 502 with proxy_internal_error for Kerberos credential failure.
-	assertProxyStatus(t, resp, http.StatusBadGateway, "proxy_internal_error")
-
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "proxy_internal_error") {
-		t.Errorf("body: want mention of proxy_internal_error, got %q", body)
-	}
-	if !strings.Contains(string(body), "credentials") {
-		t.Errorf("body: want mention of credentials, got %q", body)
-	}
-
-	if n := len(upstream.Requests()); n != 0 {
-		t.Errorf("upstream received %d requests, want 0", n)
-	}
-
-	waitForDone(t, done)
-}
-
-// ---------------------------------------------------------------------------
-// A3 — proxy_internal_error: SPNEGO negotiation failure
-// ---------------------------------------------------------------------------
-
-// TestA3_RFC9209_ProxyStatusOnNegotiationFailure verifies that when the token
-// provider returns a *NegotiationError, the proxy responds with 502 Bad
-// Gateway and Proxy-Status "proxy_internal_error".
-func TestA3_RFC9209_ProxyStatusOnNegotiationFailure(t *testing.T) {
-	upstream := NewMockUpstreamProxy(t, nil)
-	t.Cleanup(upstream.Close)
-
-	client, server := net.Pipe()
-	t.Cleanup(func() { _ = client.Close() })
-
-	negErr := &NegotiationError{
-		msg:   "SPNEGO negotiation with the KDC failed",
-		cause: errors.New("KDC unreachable: connection timed out"),
-	}
-	provider := &stubTokenProvider{err: negErr}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		handleClient(server, defaultTestConfig(upstream.Addr(), provider))
-	}()
-
-	sendRequest(t, client, "http://example.com/test")
-
-	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	t.Cleanup(func() { _ = resp.Body.Close() })
-
-	// A3: 502 with proxy_internal_error for SPNEGO negotiation failure.
-	assertProxyStatus(t, resp, http.StatusBadGateway, "proxy_internal_error")
-
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "proxy_internal_error") {
-		t.Errorf("body: want mention of proxy_internal_error, got %q", body)
-	}
-	if !strings.Contains(string(body), "negotiation") {
-		t.Errorf("body: want mention of negotiation, got %q", body)
-	}
-
-	if n := len(upstream.Requests()); n != 0 {
-		t.Errorf("upstream received %d requests, want 0", n)
-	}
-
-	waitForDone(t, done)
 }
 
 // ---------------------------------------------------------------------------
@@ -397,100 +330,3 @@ func TestA3_RFC9209_ProxyStatusOnConnectionTerminated(t *testing.T) {
 	waitForDone(t, done)
 }
 
-// ---------------------------------------------------------------------------
-// A3 — Proxy-Status identifier matches "spnego-proxy"
-// ---------------------------------------------------------------------------
-
-// TestA3_RFC9209_ProxyIdentifierIsSpnegoProxy verifies that the proxy name
-// portion of the Proxy-Status header is exactly "spnego-proxy" across all
-// error type variants, confirming RFC 9209 §2 compliance for the proxy
-// identifier field.
-func TestA3_RFC9209_ProxyIdentifierIsSpnegoProxy(t *testing.T) {
-	tests := []struct {
-		name          string
-		wantErrorType string
-		setupProvider func() *stubTokenProvider
-		requestVia    string
-		wantCode      int
-	}{
-		{
-			name:          "proxy_internal_error/generic",
-			wantErrorType: "proxy_internal_error",
-			setupProvider: func() *stubTokenProvider {
-				return &stubTokenProvider{err: errors.New("generic failure")}
-			},
-			wantCode: http.StatusBadGateway,
-		},
-		{
-			name:          "proxy_internal_error/circuit_breaker",
-			wantErrorType: "proxy_internal_error",
-			setupProvider: func() *stubTokenProvider {
-				return &stubTokenProvider{err: &CircuitBreakerError{
-					msg: "circuit breaker open",
-				}}
-			},
-			wantCode: http.StatusBadGateway,
-		},
-		{
-			name:          "proxy_internal_error/credential",
-			wantErrorType: "proxy_internal_error",
-			setupProvider: func() *stubTokenProvider {
-				return &stubTokenProvider{err: &CredentialError{
-					msg: "expired credentials",
-				}}
-			},
-			wantCode: http.StatusBadGateway,
-		},
-		{
-			name:          "proxy_internal_error/negotiation",
-			wantErrorType: "proxy_internal_error",
-			setupProvider: func() *stubTokenProvider {
-				return &stubTokenProvider{err: &NegotiationError{
-					msg: "KDC unreachable",
-				}}
-			},
-			wantCode: http.StatusBadGateway,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			upstream := NewMockUpstreamProxy(t, nil)
-			t.Cleanup(upstream.Close)
-
-			client, server := net.Pipe()
-			t.Cleanup(func() { _ = client.Close() })
-
-			provider := tc.setupProvider()
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				handleClient(server, defaultTestConfig(upstream.Addr(), provider))
-			}()
-
-			sendRequest(t, client, "http://example.com/identifier-test")
-
-			resp, err := http.ReadResponse(bufio.NewReader(client), nil)
-			if err != nil {
-				t.Fatalf("read response: %v", err)
-			}
-			t.Cleanup(func() { _ = resp.Body.Close() })
-			_, _ = io.Copy(io.Discard, resp.Body)
-
-			assertStatusCode(t, resp, tc.wantCode)
-
-			ps := resp.Header.Get("Proxy-Status")
-			// RFC 9209 §2: the proxy identifier MUST be the first parameter.
-			if !strings.HasPrefix(ps, "spnego-proxy;") {
-				t.Errorf("Proxy-Status %q: identifier must be %q", ps, "spnego-proxy")
-			}
-
-			wantPS := "spnego-proxy; error=" + tc.wantErrorType
-			if ps != wantPS {
-				t.Errorf("Proxy-Status: want %q, got %q", wantPS, ps)
-			}
-
-			waitForDone(t, done)
-		})
-	}
-}
