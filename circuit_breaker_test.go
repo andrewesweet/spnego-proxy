@@ -14,7 +14,7 @@ import (
 // open the circuit. The inner stub must already have a non-nil err.
 func tripBreaker(t *testing.T, cb *CircuitBreakerTokenProvider) {
 	t.Helper()
-	for i := 0; i < int(cbConsecutiveFailures); i++ {
+	for i := range int(cbConsecutiveFailures) {
 		_, err := cb.GetToken()
 		if err == nil {
 			t.Fatalf("expected error on call %d", i+1)
@@ -67,7 +67,7 @@ func TestCircuitBreakerDoesNotTripOnIntermittentFailures(t *testing.T) {
 
 	// Fail twice (below threshold), then succeed
 	inner.err = errors.New("transient")
-	for i := 0; i < int(cbConsecutiveFailures)-1; i++ {
+	for range int(cbConsecutiveFailures) - 1 {
 		_, _ = cb.GetToken()
 	}
 
@@ -166,7 +166,7 @@ func TestCircuitBreakerHalfOpenRejectsConcurrentRequests(t *testing.T) {
 	tokens := make([]string, concurrency)
 	var wg sync.WaitGroup
 	wg.Add(concurrency)
-	for i := 0; i < concurrency; i++ {
+	for i := range concurrency {
 		go func(idx int) {
 			defer wg.Done()
 			tokens[idx], errs[idx] = cb.GetToken()
@@ -175,7 +175,7 @@ func TestCircuitBreakerHalfOpenRejectsConcurrentRequests(t *testing.T) {
 	wg.Wait()
 
 	var successes, tooMany int
-	for i := 0; i < concurrency; i++ {
+	for i := range concurrency {
 		if errs[i] == nil {
 			successes++
 			if tokens[i] != "recovered" {

@@ -330,7 +330,7 @@ func TestCircuitBreakerWithRealProvider(t *testing.T) {
 	cb2 := NewCircuitBreakerTokenProvider(failProvider)
 
 	// Drive consecutive failures to trip the circuit breaker.
-	for i := 0; i < int(cbConsecutiveFailures); i++ {
+	for i := range int(cbConsecutiveFailures) {
 		_, err := cb2.GetToken()
 		if err == nil {
 			t.Fatalf("expected error on call %d with closed KDC, got success", i+1)

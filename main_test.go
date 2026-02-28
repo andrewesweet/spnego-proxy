@@ -137,7 +137,7 @@ func TestLimitListenerBlocksAtCapacity(t *testing.T) {
 	// Fill all slots.
 	clients := make([]net.Conn, limit)
 	servers := make([]net.Conn, limit)
-	for i := 0; i < limit; i++ {
+	for i := range limit {
 		c, err := net.Dial("tcp", ln.Addr().String())
 		if err != nil {
 			t.Fatalf("dial %d: %v", i, err)
@@ -201,7 +201,7 @@ func TestShutdownStopsAcceptingNewConnections(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 
 	// Run the same accept-loop pattern used in main().
 	acceptDone := make(chan struct{})
@@ -273,7 +273,7 @@ func TestShutdownDrainsInFlightConnections(t *testing.T) {
 
 	provider := &stubTokenProvider{token: "tok"}
 	cfg := defaultTestConfig(upstream.Addr().String(), provider)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 
 	var wg sync.WaitGroup
 	go func() {
@@ -376,7 +376,7 @@ func TestShutdownDrainTimeout(t *testing.T) {
 
 	provider := &stubTokenProvider{token: "tok"}
 	cfg := defaultTestConfig(upstream.Addr().String(), provider)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 
 	var wg sync.WaitGroup
 	go func() {

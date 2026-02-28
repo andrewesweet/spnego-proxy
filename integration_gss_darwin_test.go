@@ -147,7 +147,7 @@ func TestGSSTokenProviderReacquire(t *testing.T) {
 	}
 	defer func() { _ = provider.Close() }()
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		token, err := provider.GetToken()
 		if err != nil {
 			t.Fatalf("GetToken call %d: %v", i+1, err)

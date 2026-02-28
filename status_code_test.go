@@ -49,6 +49,9 @@ func TestL2_RFC9110_GatewayTimeoutOnDialTimeout(t *testing.T) {
 		handleClient(server, cfg)
 	}()
 
+	// Send a request so handleClient can read it before attempting to dial.
+	sendRequest(t, client, "http://example.com/timeout-test")
+
 	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
 	if err != nil {
 		t.Fatalf("read response: %v", err)
@@ -104,6 +107,9 @@ func TestL1_RFC9112_BadGatewayOnConnectionRefused(t *testing.T) {
 		defer close(done)
 		handleClient(server, defaultTestConfig(refusedAddr, provider))
 	}()
+
+	// Send a request so handleClient can read it before attempting to dial.
+	sendRequest(t, client, "http://example.com/refused-test")
 
 	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
 	if err != nil {
@@ -233,6 +239,9 @@ func TestJ1_RFC9112_HTTP11AdvertisedInProxyGeneratedResponses(t *testing.T) {
 				defer close(done)
 				handleClient(server, cfg)
 			}()
+
+			// Send a request so handleClient can read it before attempting to dial.
+			sendRequest(t, client, "http://example.com/j1-test")
 
 			resp, err := http.ReadResponse(bufio.NewReader(client), nil)
 			if err != nil {
