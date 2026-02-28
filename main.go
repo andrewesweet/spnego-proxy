@@ -810,15 +810,6 @@ func main() {
 		slog.Error("failed to create token provider", "error", err)
 		os.Exit(1)
 	}
-	if *user == "" {
-		// Validate native (GSS-API) credentials are available at startup.
-		// This is a warning, not a fatal error, because credentials may
-		// become available later (e.g. kinit run after the proxy starts).
-		if _, err := provider.GetToken(); err != nil {
-			slog.Warn("initial credential check failed", "error", err)
-			slog.Warn("the proxy will retry on each request; run 'kinit' to obtain credentials")
-		}
-	}
 	provider = NewCircuitBreakerTokenProvider(provider)
 
 	l, err := net.Listen("tcp", *addr)
