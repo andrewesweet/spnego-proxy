@@ -12,6 +12,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -444,7 +445,7 @@ func TestD2_UpstreamBufferedDataDrainedOnClose(t *testing.T) {
 
 	// The mock upstream sends a 200 for CONNECT, then writes tunnel data
 	// and closes the connection.
-	upstream := NewMockUpstreamProxy(t, func(req *http.Request) *http.Response {
+	upstream := NewMockUpstreamProxy(t, func(_ *http.Request) *http.Response {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			ProtoMajor: 1,
@@ -533,7 +534,7 @@ func isEOForClosed(err error) bool {
 		return false
 	}
 	s := err.Error()
-	return err == io.EOF ||
+	return errors.Is(err, io.EOF) ||
 		strings.Contains(s, "EOF") ||
 		strings.Contains(s, "closed") ||
 		strings.Contains(s, "reset by peer") ||

@@ -207,8 +207,7 @@ func TestD3_RFC9112_NoTransferEncodingInCONNECTResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read CONNECT response: %v", err)
 	}
-	// Note: do not close resp.Body — for CONNECT 200 the body represents
-	// the open tunnel; closing it would close the underlying connection.
+	defer func() { _ = resp.Body.Close() }()
 
 	// The upstream returned 200; verify the forwarded response.
 	assertStatusCode(t, resp, http.StatusOK)
@@ -241,7 +240,7 @@ func TestJ1_RFC9112_HTTP11AdvertisedInProxyGeneratedResponses(t *testing.T) {
 	}{
 		{
 			name: "504 GatewayTimeout",
-			setupFunc: func(t *testing.T) string {
+			setupFunc: func(_ *testing.T) string {
 				// RFC 5737 TEST-NET-1: unreachable, forces dial timeout.
 				return "192.0.2.1:1"
 			},

@@ -768,7 +768,7 @@ func TestI1I2_ConcurrentConnectionsClosed(t *testing.T) {
 			buf := make([]byte, 1)
 			n, connErr := conn.Read(buf)
 			if n > 0 || connErr == nil {
-				errs <- fmt.Errorf("client %d: expected closed connection, got %d bytes, err=%v", idx, n, connErr)
+				errs <- fmt.Errorf("client %d: expected closed connection, got %d bytes, err=%w", idx, n, connErr)
 			}
 		}(i)
 	}

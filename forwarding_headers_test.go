@@ -139,7 +139,7 @@ func TestForwardedObfuscatedFormat(t *testing.T) {
 			t.Errorf("generateObfuscatedID() = %q: hex part length want 8, got %d", id, len(hex))
 		}
 		for _, c := range hex {
-			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 				t.Errorf("generateObfuscatedID() = %q: non-lowercase-hex char %q", id, c)
 			}
 		}
