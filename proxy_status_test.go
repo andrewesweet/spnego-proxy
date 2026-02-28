@@ -329,4 +329,3 @@ func TestA3_RFC9209_ProxyStatusOnConnectionTerminated(t *testing.T) {
 
 	waitForDone(t, done)
 }
-

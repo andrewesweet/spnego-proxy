@@ -54,6 +54,7 @@ func TestForwardingC1_SameNameHeaderOrderPreserved(t *testing.T) {
 		"\r\n"
 
 	resp, reqs := proxyRawRoundTrip(t, raw)
+	defer func() { _ = resp.Body.Close() }()
 	assertStatusCode(t, resp, http.StatusOK)
 
 	if len(reqs) != 1 {
@@ -124,6 +125,7 @@ func TestForwardingC3_HostRegeneratedFromRequestTarget(t *testing.T) {
 		"\r\n"
 
 	resp, reqs := proxyRawRoundTrip(t, raw)
+	defer func() { _ = resp.Body.Close() }()
 	assertStatusCode(t, resp, http.StatusOK)
 
 	if len(reqs) != 1 {
@@ -156,6 +158,7 @@ func TestForwardingC4_PathAndQueryPreserved(t *testing.T) {
 		"\r\n"
 
 	resp, reqs := proxyRawRoundTrip(t, raw)
+	defer func() { _ = resp.Body.Close() }()
 	assertStatusCode(t, resp, http.StatusOK)
 
 	if len(reqs) != 1 {
@@ -316,6 +319,7 @@ func TestForwardingB3_ProxyAuthenticateNotForwardedToClient(t *testing.T) {
 		"\r\n"
 
 	resp, _ := proxyRawRoundTripWithUpstream(t, raw, respFunc)
+	defer func() { _ = resp.Body.Close() }()
 	assertStatusCode(t, resp, http.StatusOK)
 
 	// KNOWN GAP: The assertion below is written as the desired post-fix

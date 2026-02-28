@@ -48,6 +48,7 @@ func TestD4_ConnectPortRestriction(t *testing.T) {
 			resp, reqs := proxyRawRoundTrip(t, raw, func(p *ProxyUnderTest) {
 				p.SetConnectPorts(tc.ports)
 			})
+			defer func() { _ = resp.Body.Close() }()
 
 			assertStatusCode(t, resp, tc.wantStatus)
 

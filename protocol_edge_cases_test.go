@@ -53,6 +53,7 @@ func TestF1_ExpectHeaderForwarded(t *testing.T) {
 				body
 
 			resp, reqs := proxyRawRoundTrip(t, raw)
+			defer func() { _ = resp.Body.Close() }()
 			assertStatusCode(t, resp, http.StatusOK)
 
 			if len(reqs) != 1 {
@@ -204,6 +205,7 @@ func TestG1_MaxForwards_Table(t *testing.T) {
 				tc.method, mfLine)
 
 			resp, reqs := proxyRawRoundTrip(t, raw)
+			defer func() { _ = resp.Body.Close() }()
 			assertStatusCode(t, resp, http.StatusOK)
 
 			if tc.wantUpstream {
