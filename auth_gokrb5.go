@@ -104,9 +104,7 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 	// copied them. string(passwd) creates a copy for the client; this
 	// zeroing reduces the window during which plaintext credentials exist
 	// in process memory (CWE-316).
-	for i := range passwd {
-		passwd[i] = 0
-	}
+	clear(passwd)
 
 	return &Gokrb5TokenProvider{
 		krbClient:    cli,

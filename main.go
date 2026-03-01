@@ -615,7 +615,7 @@ func ipAllowed(ip net.IP, allowList []*net.IPNet) bool {
 // connectPortAllowed reports whether port is in the allowed set.
 // An empty allowedPorts slice means all ports are permitted.
 func connectPortAllowed(port string, allowedPorts []string) bool {
-	return len(allowedPorts) == 0 || slices.Contains(allowedPorts, "*") || slices.Contains(allowedPorts, port)
+	return len(allowedPorts) == 0 || slices.ContainsFunc(allowedPorts, func(p string) bool { return p == "*" || p == port })
 }
 
 // tokenErrorToProxyError maps a GetToken error to the most specific proxyError

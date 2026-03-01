@@ -348,9 +348,7 @@ func TestGetPasswordBytesCanBeZeroed(t *testing.T) {
 		t.Fatalf("want %q, got %q", "secret", pw)
 	}
 	// Zero it — must not panic.
-	for i := range pw {
-		pw[i] = 0
-	}
+	clear(pw)
 	if string(pw) != "\x00\x00\x00\x00\x00\x00" {
 		t.Error("password bytes were not zeroed")
 	}
