@@ -61,8 +61,7 @@ func NewMockUpstreamProxy(t *testing.T, responseFunc func(*http.Request) *http.R
 		responseFunc: responseFunc,
 		closed:       make(chan struct{}),
 	}
-	m.wg.Add(1)
-	go m.acceptLoop()
+	m.wg.Go(m.acceptLoop)
 	return m
 }
 
@@ -78,7 +77,6 @@ func defaultMockResponse(_ *http.Request) *http.Response {
 }
 
 func (m *MockUpstreamProxy) acceptLoop() {
-	defer m.wg.Done()
 	for {
 		conn, err := m.listener.Accept()
 		if err != nil {
@@ -89,13 +87,11 @@ func (m *MockUpstreamProxy) acceptLoop() {
 			}
 			continue
 		}
-		m.wg.Add(1)
-		go m.handleConn(conn)
+		m.wg.Go(func() { m.handleConn(conn) })
 	}
 }
 
 func (m *MockUpstreamProxy) handleConn(conn net.Conn) {
-	defer m.wg.Done()
 	defer func() { _ = conn.Close() }()
 
 	reader := bufio.NewReader(conn)
@@ -226,13 +222,11 @@ func NewProxyUnderTest(t *testing.T, upstream string) *ProxyUnderTest {
 		},
 		closed: make(chan struct{}),
 	}
-	p.wg.Add(1)
-	go p.acceptLoop()
+	p.wg.Go(p.acceptLoop)
 	return p
 }
 
 func (p *ProxyUnderTest) acceptLoop() {
-	defer p.wg.Done()
 	for {
 		conn, err := p.listener.Accept()
 		if err != nil {
@@ -243,11 +237,9 @@ func (p *ProxyUnderTest) acceptLoop() {
 			}
 			continue
 		}
-		p.wg.Add(1)
-		go func() {
-			defer p.wg.Done()
+		p.wg.Go(func() {
 			handleClient(conn, p.getConfig())
-		}()
+		})
 	}
 }
 

@@ -151,9 +151,7 @@ func TestE2_RFC9112_InvalidContentLengthInResponse(t *testing.T) {
 	defer func() { _ = rawUpstream.Close() }()
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		conn, err := rawUpstream.Accept()
 		if err != nil {
 			return
@@ -168,7 +166,7 @@ func TestE2_RFC9112_InvalidContentLengthInResponse(t *testing.T) {
 			"\r\n" +
 			"body"
 		_, _ = conn.Write([]byte(resp))
-	}()
+	})
 	t.Cleanup(wg.Wait)
 
 	proxy := NewProxyUnderTest(t, rawUpstream.Addr().String())
@@ -257,9 +255,7 @@ func TestE1_RFC9112_ResponseTEAndCLConflictRemovesCL(t *testing.T) {
 	defer func() { _ = rawUpstream.Close() }()
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		conn, err := rawUpstream.Accept()
 		if err != nil {
 			return
@@ -275,7 +271,7 @@ func TestE1_RFC9112_ResponseTEAndCLConflictRemovesCL(t *testing.T) {
 			"\r\n" +
 			"5\r\nhello\r\n0\r\n\r\n"
 		_, _ = conn.Write([]byte(resp))
-	}()
+	})
 	t.Cleanup(wg.Wait)
 
 	proxy := NewProxyUnderTest(t, rawUpstream.Addr().String())
@@ -500,9 +496,7 @@ func TestE2_RFC9112_MultipleDifferingCLInResponse(t *testing.T) {
 	defer func() { _ = rawUpstream.Close() }()
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		conn, err := rawUpstream.Accept()
 		if err != nil {
 			return
@@ -517,7 +511,7 @@ func TestE2_RFC9112_MultipleDifferingCLInResponse(t *testing.T) {
 			"\r\n" +
 			"hello"
 		_, _ = conn.Write([]byte(resp))
-	}()
+	})
 	t.Cleanup(wg.Wait)
 
 	proxy := NewProxyUnderTest(t, rawUpstream.Addr().String())
