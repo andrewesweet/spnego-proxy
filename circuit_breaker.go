@@ -28,34 +28,37 @@ const (
 // account lockout from rapid authentication failures (e.g. stale Kerberos
 // tickets triggering KDC password-attempt counters).
 type CircuitBreakerTokenProvider struct {
-	inner TokenProvider
-	cb    *gobreaker.CircuitBreaker[string]
+	inner     TokenProvider
+	cb        *gobreaker.CircuitBreaker[string]
+	threshold uint32
 }
 
 // NewCircuitBreakerTokenProvider wraps the given TokenProvider with a circuit
-// breaker. When cbConsecutiveFailures consecutive GetToken calls fail, the
-// circuit opens and immediately rejects further attempts for cbTimeout. After
-// the timeout, a single probe request is allowed through (half-open); if it
-// succeeds the circuit closes, otherwise it reopens.
-func NewCircuitBreakerTokenProvider(inner TokenProvider) *CircuitBreakerTokenProvider {
-	return newCircuitBreakerTokenProvider(inner, gobreaker.Settings{
+// breaker. When threshold consecutive GetToken calls fail, the circuit opens
+// and immediately rejects further attempts for timeout. After the timeout, a
+// single probe request is allowed through (half-open); if it succeeds the
+// circuit closes, otherwise it reopens.
+func NewCircuitBreakerTokenProvider(inner TokenProvider, threshold uint32, timeout time.Duration) *CircuitBreakerTokenProvider {
+	settings := gobreaker.Settings{
 		Name:        "spnego-token",
 		MaxRequests: 1,
-		Timeout:     cbTimeout,
+		Timeout:     timeout,
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
-			return counts.ConsecutiveFailures >= cbConsecutiveFailures
+			return counts.ConsecutiveFailures >= threshold
 		},
 		OnStateChange: func(name string, from gobreaker.State, to gobreaker.State) {
 			slog.Warn("circuit breaker state change", "name", name, "from", from.String(), "to", to.String())
 		},
-	})
+	}
+	cb := gobreaker.NewCircuitBreaker[string](settings)
+	return &CircuitBreakerTokenProvider{inner: inner, cb: cb, threshold: threshold}
 }
 
 // newCircuitBreakerTokenProvider is the internal constructor that accepts
 // explicit gobreaker.Settings, used by tests to override timeouts.
-func newCircuitBreakerTokenProvider(inner TokenProvider, settings gobreaker.Settings) *CircuitBreakerTokenProvider {
+func newCircuitBreakerTokenProvider(inner TokenProvider, settings gobreaker.Settings, threshold uint32) *CircuitBreakerTokenProvider {
 	cb := gobreaker.NewCircuitBreaker[string](settings)
-	return &CircuitBreakerTokenProvider{inner: inner, cb: cb}
+	return &CircuitBreakerTokenProvider{inner: inner, cb: cb, threshold: threshold}
 }
 
 // CircuitBreakerError indicates that the circuit breaker rejected a request.
@@ -75,7 +78,7 @@ func (p *CircuitBreakerTokenProvider) GetToken() (string, error) {
 		var msg string
 		switch {
 		case errors.Is(err, gobreaker.ErrOpenState):
-			msg = fmt.Sprintf("circuit breaker open: token acquisition disabled after %d consecutive failures", cbConsecutiveFailures)
+			msg = fmt.Sprintf("circuit breaker open: token acquisition disabled after %d consecutive failures", p.threshold)
 		case errors.Is(err, gobreaker.ErrTooManyRequests):
 			msg = "circuit breaker half-open: probe in progress, rejecting concurrent request"
 		default:

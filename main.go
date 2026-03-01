@@ -209,6 +209,11 @@ func sanitizeHopByHop(req *http.Request) {
 	// ReadRequest moves Transfer-Encoding into req.TransferEncoding, so
 	// we check that field rather than the header map.
 	if len(req.TransferEncoding) > 0 && header.Get("Content-Length") != "" {
+		slog.Warn("TE/CL conflict resolved",
+			"action", "removed Content-Length",
+			"transfer_encoding", req.TransferEncoding,
+			"content_length", header.Get("Content-Length"),
+		)
 		header.Del("Content-Length")
 	}
 }
@@ -295,6 +300,11 @@ func readUpstreamResponse(upstreamReader *bufio.Reader, req *http.Request, pseud
 	// RFC 9112 §6.1: if both Transfer-Encoding and Content-Length
 	// are present in the response, remove Content-Length.
 	if len(resp.TransferEncoding) > 0 && resp.Header.Get("Content-Length") != "" {
+		slog.Warn("TE/CL conflict resolved in upstream response",
+			"action", "removed Content-Length",
+			"transfer_encoding", resp.TransferEncoding,
+			"content_length", resp.Header.Get("Content-Length"),
+		)
 		resp.Header.Del("Content-Length")
 		// Reset to -1 so resp.Write uses chunked framing instead
 		// of a fixed-length body derived from the removed header.
@@ -774,6 +784,10 @@ func main() {
 	keepAlive := flag.Duration("keepalive", 30*time.Second, "TCP keepalive period for idle connection detection (0 to disable)")
 	maxConns := flag.Int("max-conns", 512, "maximum number of concurrent connections (0 for unlimited)")
 	connectPortsFlag := flag.String("connect-ports", "443", "comma-separated list of ports allowed for CONNECT tunneling (default: 443; use * for all)")
+	cbThreshold := flag.Uint("cb-threshold", 3,
+		"consecutive failures before circuit breaker opens")
+	cbTimeout := flag.Duration("cb-timeout", 30*time.Second,
+		"circuit breaker cooldown duration")
 
 	forwardedFlag := flag.Bool("forwarded", false, "inject RFC 7239 Forwarded header with obfuscated client identifier")
 	xForwardedForFlag := flag.Bool("x-forwarded-for", false, "inject X-Forwarded-For, X-Forwarded-Proto, and X-Forwarded-Host headers")
@@ -810,7 +824,7 @@ func main() {
 		slog.Error("failed to create token provider", "error", err)
 		os.Exit(1)
 	}
-	provider = NewCircuitBreakerTokenProvider(provider)
+	provider = NewCircuitBreakerTokenProvider(provider, uint32(*cbThreshold), *cbTimeout)
 
 	l, err := net.Listen("tcp", *addr)
 	if err != nil {
