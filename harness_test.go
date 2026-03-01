@@ -200,6 +200,14 @@ func (p *ProxyUnderTest) SetForwardingConfig(fwd ForwardingConfig) {
 	p.cfg.Forwarding = fwd
 }
 
+// SetIdleTimeout sets the idle timeout for CONNECT tunnels.
+// Thread-safe; may be called at any time after construction.
+func (p *ProxyUnderTest) SetIdleTimeout(d time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cfg.IdleTimeout = d
+}
+
 // NewProxyUnderTest creates and starts a proxy listening on a dynamic port.
 // upstream is the address of the mock upstream to forward to.
 func NewProxyUnderTest(t *testing.T, upstream string) *ProxyUnderTest {

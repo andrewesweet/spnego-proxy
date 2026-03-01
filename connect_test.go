@@ -482,6 +482,155 @@ func TestD3_RFC9112_NoTransferEncodingInCONNECTResponse(t *testing.T) {
 	assertHeaderAbsent(t, resp.Header, "Transfer-Encoding")
 }
 
+// ---------------------------------------------------------------------------
+// VR-006 — Idle timeout for CONNECT tunnels (issue #145)
+// ---------------------------------------------------------------------------
+
+// TestConnectTunnelIdleTimeout verifies that a CONNECT tunnel is closed by the
+// proxy when no data flows in either direction within the idle timeout window.
+func TestConnectTunnelIdleTimeout(t *testing.T) {
+	// Mock upstream that accepts CONNECT and then idles.
+	connectUpstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = connectUpstream.Close() }()
+
+	go func() {
+		conn, err := connectUpstream.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		reader := bufio.NewReader(conn)
+		req, err := http.ReadRequest(reader)
+		if err != nil {
+			return
+		}
+		if req.Method == http.MethodConnect {
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				ProtoMajor: 1, ProtoMinor: 1,
+				Header: make(http.Header),
+			}
+			_ = resp.Write(conn)
+			// Idle — block until closed.
+			buf := make([]byte, 1)
+			_, _ = conn.Read(buf)
+		}
+	}()
+
+	proxy := NewProxyUnderTest(t, connectUpstream.Addr().String())
+	proxy.SetIdleTimeout(100 * time.Millisecond)
+	t.Cleanup(proxy.Close)
+
+	raw := "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	assertStatusCode(t, resp, http.StatusOK)
+
+	// Tunnel should close within the idle timeout + slack.
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1)
+	_, err = conn.Read(buf)
+	if err == nil {
+		t.Fatal("expected connection to be closed due to idle timeout")
+	}
+}
+
+// TestConnectTunnelIdleTimeoutResetOnData verifies that active tunnels that
+// continuously exchange data are NOT interrupted by the idle timeout, because
+// each successful read resets the deadline.
+func TestConnectTunnelIdleTimeoutResetOnData(t *testing.T) {
+	// Mock upstream that echoes data back.
+	connectUpstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = connectUpstream.Close() }()
+
+	go func() {
+		conn, err := connectUpstream.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		reader := bufio.NewReader(conn)
+		req, err := http.ReadRequest(reader)
+		if err != nil {
+			return
+		}
+		if req.Method == http.MethodConnect {
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				ProtoMajor: 1, ProtoMinor: 1,
+				Header: make(http.Header),
+			}
+			_ = resp.Write(conn)
+			// Echo data back.
+			buf := make([]byte, 1024)
+			for {
+				n, err := conn.Read(buf)
+				if err != nil {
+					return
+				}
+				if _, err := conn.Write(buf[:n]); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	proxy := NewProxyUnderTest(t, connectUpstream.Addr().String())
+	proxy.SetIdleTimeout(200 * time.Millisecond)
+	t.Cleanup(proxy.Close)
+
+	raw := "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	assertStatusCode(t, resp, http.StatusOK)
+
+	// Send data every 100ms for 500ms total — all within the 200ms idle timeout
+	// because each send resets the deadline.
+	for range 5 {
+		time.Sleep(100 * time.Millisecond)
+		msg := []byte("ping")
+		if _, err := conn.Write(msg); err != nil {
+			t.Fatalf("write through tunnel: %v", err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		buf := make([]byte, len(msg))
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			t.Fatalf("read echo response: %v", err)
+		}
+		if string(buf) != "ping" {
+			t.Fatalf("echo mismatch: got %q", buf)
+		}
+	}
+}
+
 // isEOForClosed returns true if the error indicates a closed or EOF connection.
 func isEOForClosed(err error) bool {
 	if err == nil {

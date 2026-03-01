@@ -82,6 +82,7 @@ type ProxyConfig struct {
 	DialTimeout  time.Duration
 	ReadTimeout  time.Duration
 	KeepAlive    time.Duration
+	IdleTimeout  time.Duration
 	ConnectPorts []string
 	Forwarding   ForwardingConfig
 }
@@ -566,6 +567,33 @@ func closeWrite(conn net.Conn) {
 	}
 }
 
+// idleCopy copies from src to dst, resetting the read deadline on srcConn
+// after each successful read. If no data arrives within timeout, the read
+// fails with a deadline error and the copy returns. A zero timeout disables
+// the idle check and falls back to plain io.Copy.
+func idleCopy(dst net.Conn, src io.Reader, srcConn net.Conn, timeout time.Duration) (int64, error) {
+	if timeout <= 0 {
+		return io.Copy(dst, src)
+	}
+	buf := make([]byte, 32*1024)
+	var total int64
+	for {
+		_ = srcConn.SetReadDeadline(time.Now().Add(timeout))
+		n, readErr := src.Read(buf)
+		if n > 0 {
+			nw, writeErr := dst.Write(buf[:n])
+			total += int64(nw)
+			if writeErr != nil {
+				return total, writeErr
+			}
+		}
+		if readErr != nil {
+			_ = srcConn.SetReadDeadline(time.Time{}) // clear deadline
+			return total, readErr
+		}
+	}
+}
+
 // forwardHalf copies data from src to dst, calling CloseWrite on dst when
 // done. It logs the start, completion, and any errors. Callers use
 // wg.Go to launch forwardHalf so the WaitGroup is managed automatically.
@@ -703,7 +731,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 		// BEFORE starting to forward client payload. This ensures client
 		// data (e.g. TLS ClientHello) is not sent to the upstream until
 		// after the upstream has confirmed tunnel establishment with 2xx.
-		handleConnectTunnel(conn, proxyConn, reqReader, req, cfg.Pseudonym, clientAddr)
+		handleConnectTunnel(conn, proxyConn, reqReader, req, cfg.Pseudonym, clientAddr, cfg.IdleTimeout)
 		return
 	}
 
@@ -735,7 +763,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 // It reads the upstream response before forwarding any client payload (D6),
 // relays the response to the client (D7), and then starts bidirectional
 // forwarding only after a 2xx is confirmed.
-func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req *http.Request, pseudonym, clientAddr string) {
+func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req *http.Request, pseudonym, clientAddr string, idleTimeout time.Duration) {
 	upstreamReader := bufio.NewReader(proxyConn)
 	resp, err := readUpstreamResponse(upstreamReader, req, pseudonym) //nolint:bodyclose // S3: resp.Body is the raw tunnel stream; closing it would shut down the TCP connection we forward below.
 	if err != nil {
@@ -767,8 +795,22 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 
 	slog.Debug("CONNECT tunnel established", "client_addr", clientAddr, "upstream_addr", proxyConn.RemoteAddr())
 	var wg sync.WaitGroup
-	wg.Go(func() { forwardHalf(proxyConn, reqReader, conn.RemoteAddr(), proxyConn.RemoteAddr()) })
-	wg.Go(func() { forwardHalf(conn, upstreamReader, proxyConn.RemoteAddr(), conn.RemoteAddr()) })
+	wg.Go(func() {
+		defer closeWrite(proxyConn)
+		slog.Debug("forward start", "from", conn.RemoteAddr(), "to", proxyConn.RemoteAddr())
+		defer slog.Debug("forward done", "from", conn.RemoteAddr(), "to", proxyConn.RemoteAddr())
+		if _, err := idleCopy(proxyConn, reqReader, conn, idleTimeout); err != nil {
+			slog.Error("forward error", "error", err, "from", conn.RemoteAddr(), "to", proxyConn.RemoteAddr())
+		}
+	})
+	wg.Go(func() {
+		defer closeWrite(conn)
+		slog.Debug("forward start", "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+		defer slog.Debug("forward done", "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+		if _, err := idleCopy(conn, upstreamReader, proxyConn, idleTimeout); err != nil {
+			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+		}
+	})
 	wg.Wait()
 }
 
@@ -782,6 +824,8 @@ func main() {
 	readTimeout := flag.Duration("read-timeout", 30*time.Second, "timeout for reading client HTTP request")
 	drainTimeout := flag.Duration("drain-timeout", 30*time.Second, "timeout for draining in-flight connections on shutdown")
 	keepAlive := flag.Duration("keepalive", 30*time.Second, "TCP keepalive period for idle connection detection (0 to disable)")
+	idleTimeout := flag.Duration("idle-timeout", 5*time.Minute,
+		"idle timeout for CONNECT tunnels; connections with no data flow are closed after this duration (0 to disable)")
 	maxConns := flag.Int("max-conns", 512, "maximum number of concurrent connections (0 for unlimited)")
 	connectPortsFlag := flag.String("connect-ports", "443", "comma-separated list of ports allowed for CONNECT tunneling (default: 443; use * for all)")
 	cbThreshold := flag.Uint("cb-threshold", 3,
@@ -842,6 +886,7 @@ func main() {
 		DialTimeout:  *dialTimeout,
 		ReadTimeout:  *readTimeout,
 		KeepAlive:    *keepAlive,
+		IdleTimeout:  *idleTimeout,
 		ConnectPorts: connectPorts,
 		Forwarding: ForwardingConfig{
 			ForwardedEnabled:     *forwardedFlag,
