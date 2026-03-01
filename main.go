@@ -30,6 +30,10 @@ import (
 
 var logLevel = new(slog.LevelVar) // default Info
 
+// connectPortWildcard is the sentinel value meaning "allow all ports" in the
+// -connect-ports flag and connectPortAllowed logic.
+const connectPortWildcard = "*"
+
 // copyBufPool pools 32 KiB buffers used by idleCopy to avoid a heap
 // allocation on every tunnel connection.
 var copyBufPool = sync.Pool{New: func() any { b := make([]byte, 32*1024); return &b }}
@@ -211,6 +215,16 @@ func injectVia(header http.Header, proto, pseudonym string) {
 	appendHeaderValue(header, "Via", proto+" "+pseudonym)
 }
 
+// logTECLConflict logs the Transfer-Encoding / Content-Length conflict
+// resolution warning per RFC 9110 §6.2. direction is "request" or "response".
+func logTECLConflict(direction string, te []string, cl string) {
+	slog.Warn("TE/CL conflict resolved",
+		"direction", direction,
+		"action", "removed Content-Length per RFC 9110 §6.2",
+		"transfer_encoding", te,
+		"content_length", cl)
+}
+
 // sanitizeHopByHop removes hop-by-hop headers from the request before
 // forwarding to the upstream proxy per RFC 9110 §7.6.1. It also handles
 // the Transfer-Encoding / Content-Length conflict (RFC 9112 §6.1) and
@@ -253,12 +267,8 @@ func sanitizeHopByHop(req *http.Request) {
 	// are present, remove Content-Length to prevent request smuggling.
 	// ReadRequest moves Transfer-Encoding into req.TransferEncoding, so
 	// we check that field rather than the header map.
-	if len(req.TransferEncoding) > 0 && header.Get("Content-Length") != "" {
-		slog.Warn("TE/CL conflict resolved",
-			"action", "removed Content-Length",
-			"transfer_encoding", req.TransferEncoding,
-			"content_length", header.Get("Content-Length"),
-		)
+	if cl := header.Get("Content-Length"); len(req.TransferEncoding) > 0 && cl != "" {
+		logTECLConflict("request", req.TransferEncoding, cl)
 		header.Del("Content-Length")
 	}
 }
@@ -344,12 +354,8 @@ func readUpstreamResponse(upstreamReader *bufio.Reader, req *http.Request, pseud
 
 	// RFC 9112 §6.1: if both Transfer-Encoding and Content-Length
 	// are present in the response, remove Content-Length.
-	if len(resp.TransferEncoding) > 0 && resp.Header.Get("Content-Length") != "" {
-		slog.Warn("TE/CL conflict resolved in upstream response",
-			"action", "removed Content-Length",
-			"transfer_encoding", resp.TransferEncoding,
-			"content_length", resp.Header.Get("Content-Length"),
-		)
+	if cl := resp.Header.Get("Content-Length"); len(resp.TransferEncoding) > 0 && cl != "" {
+		logTECLConflict("response", resp.TransferEncoding, cl)
 		resp.Header.Del("Content-Length")
 		// Reset to -1 so resp.Write uses chunked framing instead
 		// of a fixed-length body derived from the removed header.
@@ -572,11 +578,7 @@ func parseAllowList(s string) ([]*net.IPNet, error) {
 		return nil, nil
 	}
 	var nets []*net.IPNet
-	for entry := range strings.SplitSeq(s, ",") {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
-		}
+	for _, entry := range splitCSV(s) {
 		if strings.Contains(entry, "/") {
 			_, ipNet, err := net.ParseCIDR(entry)
 			if err != nil {
@@ -615,7 +617,7 @@ func ipAllowed(ip net.IP, allowList []*net.IPNet) bool {
 // connectPortAllowed reports whether port is in the allowed set.
 // An empty allowedPorts slice means all ports are permitted.
 func connectPortAllowed(port string, allowedPorts []string) bool {
-	return len(allowedPorts) == 0 || slices.ContainsFunc(allowedPorts, func(p string) bool { return p == "*" || p == port })
+	return len(allowedPorts) == 0 || slices.ContainsFunc(allowedPorts, func(p string) bool { return p == connectPortWildcard || p == port })
 }
 
 // tokenErrorToProxyError maps a GetToken error to the most specific proxyError
@@ -749,7 +751,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 
 	// Check IP allowlist before processing anything.
 	if len(cfg.AllowedIPs) > 0 {
-		clientHost, _, _ := net.SplitHostPort(clientAddr)
+		clientHost := extractHost(clientAddr)
 		if !ipAllowed(net.ParseIP(clientHost), cfg.AllowedIPs) {
 			slog.Warn("client IP not in allowlist", "client_addr", clientAddr)
 			writeHTTPError(conn, errClientDenied)
@@ -959,12 +961,12 @@ func main() {
 	idleTimeout := flag.Duration("idle-timeout", 5*time.Minute,
 		"idle timeout for CONNECT tunnels; connections with no data flow are closed after this duration (0 to disable)")
 	maxConns := flag.Int("max-conns", 512, "maximum number of concurrent connections (0 for unlimited)")
-	connectPortsFlag := flag.String("connect-ports", "443", "comma-separated list of ports allowed for CONNECT tunneling (default: 443; use * for all)")
+	connectPortsFlag := flag.String("connect-ports", "443", "comma-separated list of ports allowed for CONNECT tunneling (default: 443; use "+connectPortWildcard+" for all)")
 	allowedIPs := flag.String("allowed-ips", "",
 		"comma-separated list of allowed client IPs or CIDR ranges (empty = allow all; recommended when binding to non-loopback)")
-	cbThreshold := flag.Uint("cb-threshold", 3,
+	cbThreshold := flag.Uint("cb-threshold", uint(cbConsecutiveFailures),
 		"consecutive failures before circuit breaker opens")
-	cbTimeout := flag.Duration("cb-timeout", 30*time.Second,
+	cbTimeoutFlag := flag.Duration("cb-timeout", cbTimeout,
 		"circuit breaker cooldown duration")
 
 	forwardedFlag := flag.Bool("forwarded", false, "inject RFC 7239 Forwarded header with obfuscated client identifier")
@@ -1009,7 +1011,7 @@ func main() {
 		slog.Error("failed to create token provider", "error", err)
 		os.Exit(1)
 	}
-	provider = NewCircuitBreakerTokenProvider(provider, uint32(*cbThreshold), *cbTimeout) //nolint:gosec // CLI flag value; overflow not a concern
+	provider = NewCircuitBreakerTokenProvider(provider, uint32(*cbThreshold), *cbTimeoutFlag) //nolint:gosec // CLI flag value; overflow not a concern
 
 	l, err := net.Listen("tcp", *addr)
 	if err != nil {
