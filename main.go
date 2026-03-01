@@ -30,6 +30,10 @@ import (
 
 var logLevel = new(slog.LevelVar) // default Info
 
+// copyBufPool pools 32 KiB buffers used by idleCopy to avoid a heap
+// allocation on every tunnel connection.
+var copyBufPool = sync.Pool{New: func() any { b := make([]byte, 32*1024); return &b }}
+
 func init() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
 		Level: logLevel,
@@ -635,7 +639,7 @@ func tokenErrorToProxyError(err error) *proxyError {
 // handleUpstreamResponseError handles errors from readUpstreamResponse.
 // For invalid Content-Length it sends a 502 error to the client; for all
 // other errors it falls back to raw-relaying the upstream bytes.
-func handleUpstreamResponseError(conn, proxyConn net.Conn, _ *bufio.Reader, err error, clientAddr string) {
+func handleUpstreamResponseError(conn, proxyConn net.Conn, err error, clientAddr string) {
 	if errors.Is(err, errContentLengthInvalid) {
 		slog.Error("invalid Content-Length in upstream response",
 			"error", err, "error_type", errInvalidContentLength.errorType,
@@ -668,7 +672,9 @@ func idleCopy(dst net.Conn, src io.Reader, srcConn net.Conn, timeout time.Durati
 	if timeout <= 0 {
 		return io.Copy(dst, src)
 	}
-	buf := make([]byte, 32*1024)
+	bufp := copyBufPool.Get().(*[]byte)
+	defer copyBufPool.Put(bufp)
+	buf := *bufp
 	var total int64
 	for {
 		_ = srcConn.SetReadDeadline(time.Now().Add(timeout))
@@ -690,11 +696,19 @@ func idleCopy(dst net.Conn, src io.Reader, srcConn net.Conn, timeout time.Durati
 // forwardHalf copies data from src to dst, calling CloseWrite on dst when
 // done. It logs the start, completion, and any errors. Callers use
 // wg.Go to launch forwardHalf so the WaitGroup is managed automatically.
-func forwardHalf(dst net.Conn, src io.Reader, fromAddr, toAddr net.Addr) {
+// When idleTimeout > 0, idleCopy is used with srcConn to enforce an idle
+// deadline; otherwise plain io.Copy is used and srcConn may be nil.
+func forwardHalf(dst net.Conn, src io.Reader, srcConn net.Conn, fromAddr, toAddr net.Addr, idleTimeout time.Duration) {
 	defer closeWrite(dst)
 	slog.Debug("forward start", "from", fromAddr, "to", toAddr)
 	defer slog.Debug("forward done", "from", fromAddr, "to", toAddr)
-	if _, err := io.Copy(dst, src); err != nil {
+	var err error
+	if idleTimeout > 0 {
+		_, err = idleCopy(dst, src, srcConn, idleTimeout)
+	} else {
+		_, err = io.Copy(dst, src)
+	}
+	if err != nil {
 		slog.Error("forward error", "error", err, "from", fromAddr, "to", toAddr)
 	}
 }
@@ -868,7 +882,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	}
 
 	var wg sync.WaitGroup
-	wg.Go(func() { forwardHalf(proxyConn, reqReader, conn.RemoteAddr(), proxyConn.RemoteAddr()) })
+	wg.Go(func() { forwardHalf(proxyConn, reqReader, nil, conn.RemoteAddr(), proxyConn.RemoteAddr(), 0) })
 	// Upstream→client: parse response headers to inject Via, then relay body.
 	wg.Go(func() {
 		defer closeWrite(conn)
@@ -878,7 +892,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 		upstreamReader := bufio.NewReader(proxyConn)
 		resp, err := readUpstreamResponse(upstreamReader, req, cfg.Pseudonym)
 		if err != nil {
-			handleUpstreamResponseError(conn, proxyConn, upstreamReader, err, clientAddr)
+			handleUpstreamResponseError(conn, proxyConn, err, clientAddr)
 			return
 		}
 		defer func() { _ = resp.Body.Close() }()
@@ -899,7 +913,7 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 	upstreamReader := bufio.NewReader(proxyConn)
 	resp, err := readUpstreamResponse(upstreamReader, req, pseudonym) //nolint:bodyclose // S3: resp.Body is the raw tunnel stream; closing it would shut down the TCP connection we forward below.
 	if err != nil {
-		handleUpstreamResponseError(conn, proxyConn, upstreamReader, err, clientAddr)
+		handleUpstreamResponseError(conn, proxyConn, err, clientAddr)
 		return
 	}
 
@@ -927,22 +941,8 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 
 	slog.Debug("CONNECT tunnel established", "client_addr", clientAddr, "upstream_addr", proxyConn.RemoteAddr())
 	var wg sync.WaitGroup
-	wg.Go(func() {
-		defer closeWrite(proxyConn)
-		slog.Debug("forward start", "from", conn.RemoteAddr(), "to", proxyConn.RemoteAddr())
-		defer slog.Debug("forward done", "from", conn.RemoteAddr(), "to", proxyConn.RemoteAddr())
-		if _, err := idleCopy(proxyConn, reqReader, conn, idleTimeout); err != nil {
-			slog.Error("forward error", "error", err, "from", conn.RemoteAddr(), "to", proxyConn.RemoteAddr())
-		}
-	})
-	wg.Go(func() {
-		defer closeWrite(conn)
-		slog.Debug("forward start", "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
-		defer slog.Debug("forward done", "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
-		if _, err := idleCopy(conn, upstreamReader, proxyConn, idleTimeout); err != nil {
-			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
-		}
-	})
+	wg.Go(func() { forwardHalf(proxyConn, reqReader, conn, conn.RemoteAddr(), proxyConn.RemoteAddr(), idleTimeout) })
+	wg.Go(func() { forwardHalf(conn, upstreamReader, proxyConn, proxyConn.RemoteAddr(), conn.RemoteAddr(), idleTimeout) })
 	wg.Wait()
 }
 
