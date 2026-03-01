@@ -277,7 +277,7 @@ Releases are cut from `master` using semantic version tags. The two-stage CI
 pipeline (`build-release.yml` → `release.yml`) handles building, packaging, and
 publishing automatically.
 
-### Prerequisites
+### Release prerequisites
 
 - Push access to the repository (for tagging)
 - [git-cliff](https://git-cliff.org/) (for changelog preview)
