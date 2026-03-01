@@ -110,6 +110,17 @@ func TestD4_EmptyPortListAllowsAll(t *testing.T) {
 	}
 }
 
+// TestConnectPortWildcard verifies that using "*" in the allowed ports list
+// permits CONNECT to any port, including non-standard ones like 8080.
+func TestConnectPortWildcard(t *testing.T) {
+	raw := "CONNECT example.com:8080 HTTP/1.1\r\nHost: example.com:8080\r\n\r\n"
+	resp, _ := proxyRawRoundTrip(t, raw, func(p *ProxyUnderTest) {
+		p.SetConnectPorts([]string{"*"})
+	})
+	defer func() { _ = resp.Body.Close() }()
+	assertStatusCode(t, resp, http.StatusOK)
+}
+
 // ---------------------------------------------------------------------------
 // D6 — Payload gating: client payload must not reach upstream before 2xx
 // ---------------------------------------------------------------------------

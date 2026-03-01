@@ -501,7 +501,7 @@ func splitCSV(s string) []string {
 // connectPortAllowed reports whether port is in the allowed set.
 // An empty allowedPorts slice means all ports are permitted.
 func connectPortAllowed(port string, allowedPorts []string) bool {
-	return len(allowedPorts) == 0 || slices.Contains(allowedPorts, port)
+	return len(allowedPorts) == 0 || slices.Contains(allowedPorts, "*") || slices.Contains(allowedPorts, port)
 }
 
 // tokenErrorToProxyError maps a GetToken error to the most specific proxyError
@@ -767,7 +767,7 @@ func main() {
 	drainTimeout := flag.Duration("drain-timeout", 30*time.Second, "timeout for draining in-flight connections on shutdown")
 	keepAlive := flag.Duration("keepalive", 30*time.Second, "TCP keepalive period for idle connection detection (0 to disable)")
 	maxConns := flag.Int("max-conns", 512, "maximum number of concurrent connections (0 for unlimited)")
-	connectPortsFlag := flag.String("connect-ports", "", "comma-separated list of ports allowed for CONNECT tunneling (empty = all ports allowed)")
+	connectPortsFlag := flag.String("connect-ports", "443", "comma-separated list of ports allowed for CONNECT tunneling (default: 443; use * for all)")
 
 	forwardedFlag := flag.Bool("forwarded", false, "inject RFC 7239 Forwarded header with obfuscated client identifier")
 	xForwardedForFlag := flag.Bool("x-forwarded-for", false, "inject X-Forwarded-For, X-Forwarded-Proto, and X-Forwarded-Host headers")
