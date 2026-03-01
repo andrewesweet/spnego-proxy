@@ -46,7 +46,7 @@ jobs:
         run: otool -L spnego-proxy-darwin-${{ matrix.arch }} | grep -i GSS
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
           subject-path: spnego-proxy-darwin-${{ matrix.arch }}
 
@@ -60,7 +60,7 @@ jobs:
           upload-release-assets: false
 
       - name: Attest SBOM
-        uses: actions/attest-sbom@07e74fc4e78d1aad915e867f9a094073a9f71527 # v4.0.0
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
           subject-path: spnego-proxy-darwin-${{ matrix.arch }}
           sbom-path: spnego-proxy-darwin-${{ matrix.arch }}.sbom.spdx.json
@@ -107,7 +107,7 @@ jobs:
         run: file spnego-proxy-linux-amd64
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
           subject-path: spnego-proxy-linux-amd64
 
@@ -121,7 +121,7 @@ jobs:
           upload-release-assets: false
 
       - name: Attest SBOM
-        uses: actions/attest-sbom@07e74fc4e78d1aad915e867f9a094073a9f71527 # v4.0.0
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
           subject-path: spnego-proxy-linux-amd64
           sbom-path: spnego-proxy-linux-amd64.sbom.spdx.json
