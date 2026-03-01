@@ -87,13 +87,12 @@ type ProxyConfig struct {
 }
 
 // randomHex returns n random bytes encoded as 2*n lowercase hex characters.
-// On the extremely unlikely failure of crypto/rand, it falls back to the
-// low bits of the nanosecond timestamp.
+// If the OS entropy source is unavailable, the process exits immediately.
 func randomHex(n int) string {
 	b := make([]byte, n)
 	if _, err := crand.Read(b); err != nil {
-		slog.Error("crypto/rand.Read failed, falling back to timestamp", "error", err)
-		return fmt.Sprintf("%08x", time.Now().UnixNano()&0xffffffff)
+		slog.Error("entropy source failure: crypto/rand is unavailable", "error", err)
+		os.Exit(1)
 	}
 	return hex.EncodeToString(b)
 }
