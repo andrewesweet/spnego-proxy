@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
-## [Unreleased]
+## [1.0.0] - 2026-03-01
 
 
 ### Added
@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add idle timeout for CONNECT tunnels
 - Add optional IP allowlist for client access control
 - Add optional TLS support for upstream proxy connection
+- Add -version flag with build-time version embedding
 
 ### Fixed
 - Add dial and read timeouts to prevent goroutine/FD leaks
@@ -30,6 +31,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.0.1] - 2021-01-28
 
-[unreleased]: https://github.com/andrewesweet/spnego-proxy/compare/v0.0.2...HEAD
+[1.0.0]: https://github.com/andrewesweet/spnego-proxy/compare/v0.0.2...v1.0.0
 [0.0.1]: https://github.com/andrewesweet/spnego-proxy/releases/tag/v0.0.1
 
