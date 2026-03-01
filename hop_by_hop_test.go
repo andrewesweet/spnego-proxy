@@ -992,6 +992,56 @@ func TestHandleClientAppendsToExistingResponseVia(t *testing.T) {
 	waitForDone(t, done)
 }
 
+// ---------------------------------------------------------------------------
+// VR-004 — Unparseable upstream response returns 502 instead of raw relay
+// ---------------------------------------------------------------------------
+
+func TestUnparseableUpstreamReturns502(t *testing.T) {
+	// Start a custom upstream that sends garbage instead of HTTP.
+	garbageUpstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = garbageUpstream.Close() }()
+
+	go func() {
+		conn, err := garbageUpstream.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		reader := bufio.NewReader(conn)
+		_, _ = http.ReadRequest(reader)
+		_, _ = conn.Write([]byte("THIS IS NOT HTTP\r\n"))
+	}()
+
+	proxy := NewProxyUnderTest(t, garbageUpstream.Addr().String())
+	t.Cleanup(proxy.Close)
+
+	raw := "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n"
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("expected 502 response, got read error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	assertStatusCode(t, resp, http.StatusBadGateway)
+
+	wantPS := "spnego-proxy; error=http_protocol_error"
+	if got := resp.Header.Get("Proxy-Status"); got != wantPS {
+		t.Errorf("Proxy-Status: want %q, got %q", wantPS, got)
+	}
+}
+
 // TestHandleClientAddsViaToConnectResponse verifies that handleClient adds
 // a Via header to CONNECT 200 responses and that the tunnel data still flows
 // correctly after the Via-injected response is written (RFC 9110 §7.6.3).

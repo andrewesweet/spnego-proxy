@@ -432,6 +432,12 @@ var (
 		message:    "CONNECT to the requested port is not allowed.",
 		action:     "The proxy restricts CONNECT tunneling to specific ports. Contact the proxy administrator.",
 	}
+	errUnparseableResponse = &proxyError{
+		statusCode: http.StatusBadGateway,
+		errorType:  errorTypeHTTPProtocolError,
+		message:    "The upstream proxy sent a response that could not be parsed as valid HTTP.",
+		action:     "This may indicate a misconfigured upstream proxy. Contact the upstream proxy administrator.",
+	}
 )
 
 // writeHTTPError sends a structured HTTP error response to the client with an
@@ -525,7 +531,7 @@ func tokenErrorToProxyError(err error) *proxyError {
 // handleUpstreamResponseError handles errors from readUpstreamResponse.
 // For invalid Content-Length it sends a 502 error to the client; for all
 // other errors it falls back to raw-relaying the upstream bytes.
-func handleUpstreamResponseError(conn, proxyConn net.Conn, upstreamReader *bufio.Reader, err error, clientAddr string) {
+func handleUpstreamResponseError(conn, proxyConn net.Conn, _ *bufio.Reader, err error, clientAddr string) {
 	if errors.Is(err, errContentLengthInvalid) {
 		slog.Error("invalid Content-Length in upstream response",
 			"error", err, "error_type", errInvalidContentLength.errorType,
@@ -534,11 +540,11 @@ func handleUpstreamResponseError(conn, proxyConn net.Conn, upstreamReader *bufio
 		writeHTTPError(conn, errInvalidContentLength)
 		return
 	}
-	slog.Warn("failed to parse upstream response, falling back to raw relay",
-		"error", err, "client_addr", clientAddr)
-	if _, err := io.Copy(conn, upstreamReader); err != nil {
-		slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
-	}
+	slog.Warn("unparseable upstream response",
+		"error", err, "error_type", errUnparseableResponse.errorType,
+		"client_addr", clientAddr,
+		"upstream_addr", proxyConn.RemoteAddr())
+	writeHTTPError(conn, errUnparseableResponse)
 }
 
 // closeWrite calls CloseWrite on conn if the underlying type supports it.
