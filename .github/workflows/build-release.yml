@@ -35,7 +35,10 @@ jobs:
           GOOS: darwin
           CGO_ENABLED: "1"
           CC: ${{ matrix.arch == 'amd64' && 'clang -arch x86_64' || 'clang -arch arm64' }}
-        run: go build -v -trimpath -o spnego-proxy-darwin-${{ matrix.arch }} .
+        run: >-
+          go build -v -trimpath
+          -ldflags "-s -w -X main.version=${{ github.ref_name }} -X main.commit=${{ github.sha }}"
+          -o spnego-proxy-darwin-${{ matrix.arch }} .
 
       - name: Verify binary architecture
         run: |
@@ -101,7 +104,10 @@ jobs:
           GOARCH: amd64
           GOOS: linux
           CGO_ENABLED: "0"
-        run: go build -v -trimpath -o spnego-proxy-linux-amd64 .
+        run: >-
+          go build -v -trimpath
+          -ldflags "-s -w -X main.version=${{ github.ref_name }} -X main.commit=${{ github.sha }}"
+          -o spnego-proxy-linux-amd64 .
 
       - name: Verify binary
         run: file spnego-proxy-linux-amd64
