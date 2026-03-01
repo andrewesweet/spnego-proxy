@@ -18,6 +18,8 @@ Optional (for running the full lint suite locally):
 - [actionlint](https://github.com/rhysd/actionlint)
 - [clang-tidy](https://clang.llvm.org/extra/clang-tidy/) (macOS only)
 - [cppcheck](http://cppcheck.net/) (macOS only)
+- [git-cliff](https://git-cliff.org/) (for changelog generation and version
+  bumping)
 
 ## Building
 
@@ -180,7 +182,94 @@ Pull requests run the following checks automatically:
 | Workflow linting | actionlint | `.github/workflows/` |
 | Security analysis | CodeQL | Go, C, Actions |
 | Build + unit tests | go build, go test | macOS (CGO) + Linux |
+| PR title format | action-semantic-pull-request | PR titles |
 | GSS-API integration tests | go test (INTEGRATION=1) | macOS arm64 only |
+
+## Versioning
+
+This project follows
+[Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html). The public
+API for SemVer purposes is the CLI contract surface: command-line flags (names,
+types, and defaults), exit codes, stdout/stderr behavior, HTTP response headers
+and error format, and CONNECT tunneling behavior.
+
+| Change | Version bump |
+| --- | --- |
+| New flag with backward-compatible default | Minor |
+| Bug fix or security fix | Patch |
+| Performance improvement | Patch |
+| Remove or rename a flag | **Major** |
+| Change a flag's default value | **Major** |
+| Change exit code semantics | **Major** |
+| Change log output or error response format | **Major** |
+
+To preview the next version based on unreleased commits:
+
+```bash
+git cliff --bumped-version
+```
+
+## Commit messages
+
+This project follows
+[Conventional Commits v1.0.0](https://www.conventionalcommits.org/en/v1.0.0/).
+Commit types drive both the changelog and the SemVer version bump.
+
+### Format
+
+```text
+<type>[optional scope][!]: <description>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+### Allowed types
+
+| Type | When to use | SemVer effect |
+| --- | --- | --- |
+| feat | New feature or capability | Minor |
+| fix | Bug fix | Patch |
+| docs | Documentation only | None |
+| refactor | Code restructuring without behavior change | None |
+| test | Adding or modifying tests | None |
+| perf | Performance improvement | Patch |
+| ci | CI/CD configuration | None |
+| build | Build system or dependency changes | None |
+| chore | Maintenance tasks | None |
+
+### Scopes
+
+Optional scopes: `security`, `deps`
+
+### Breaking changes
+
+Append `!` after the type/scope to signal a major version bump:
+
+```text
+feat!: rename -addr flag to -listen
+
+BREAKING CHANGE: Users must update scripts to use -listen instead of -addr.
+```
+
+## Changelog
+
+This project maintains a [CHANGELOG.md](CHANGELOG.md) following
+[Keep a Changelog v1.1.0](https://keepachangelog.com/en/1.1.0/).
+
+The changelog is generated from conventional commit messages using
+[git-cliff](https://git-cliff.org/). To preview unreleased changes:
+
+```bash
+git cliff --unreleased
+```
+
+To prepare a release changelog:
+
+```bash
+git cliff --tag vX.Y.Z -o CHANGELOG.md
+```
 
 ## Security
 

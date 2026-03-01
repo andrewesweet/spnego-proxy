@@ -6,3 +6,4 @@ config:
 ignores:
   - "docs/threat-model/P[0-9]-*.md"
   - "docs/threat-model/SPNEGO-PROXY-*.md"
+  - "CHANGELOG.md"
