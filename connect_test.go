@@ -538,6 +538,7 @@ func TestConnectTunnelIdleTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read CONNECT response: %v", err)
 	}
+	defer func() { _ = resp.Body.Close() }()
 	assertStatusCode(t, resp, http.StatusOK)
 
 	// Tunnel should close within the idle timeout + slack.
@@ -610,6 +611,7 @@ func TestConnectTunnelIdleTimeoutResetOnData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read CONNECT response: %v", err)
 	}
+	defer func() { _ = resp.Body.Close() }()
 	assertStatusCode(t, resp, http.StatusOK)
 
 	// Send data every 100ms for 500ms total — all within the 200ms idle timeout

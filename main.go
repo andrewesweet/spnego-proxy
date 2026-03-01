@@ -993,7 +993,7 @@ func main() {
 		slog.Error("failed to create token provider", "error", err)
 		os.Exit(1)
 	}
-	provider = NewCircuitBreakerTokenProvider(provider, uint32(*cbThreshold), *cbTimeout)
+	provider = NewCircuitBreakerTokenProvider(provider, uint32(*cbThreshold), *cbTimeout) //nolint:gosec // CLI flag value; overflow not a concern
 
 	l, err := net.Listen("tcp", *addr)
 	if err != nil {
