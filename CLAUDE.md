@@ -116,3 +116,16 @@ Go 1.25. Use modern Go idioms (wg.Go, SplitSeq, t.Context).
 ## Linting
 
     golangci-lint run
+
+## Release Process
+
+See `CONTRIBUTING.md` § Releasing for the full human-oriented guide.
+
+Key details for AI context:
+
+- Release binaries embed version and commit via ldflags (`-X main.version`, `-X main.commit`)
+- The `-version` flag prints version info; dev builds report `(devel)`
+- Archives are named `spnego-proxy_<tag>_<os>_<arch>.tar.gz`
+- No GoReleaser — macOS builds require `CGO_ENABLED=1` for native GSS framework
+- Quick release: `git cliff --tag vX.Y.Z -o CHANGELOG.md && git tag vX.Y.Z && git push origin vX.Y.Z`
+- Verify: `gh attestation verify <archive> -R andrewesweet/spnego-proxy`

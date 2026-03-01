@@ -271,6 +271,88 @@ To prepare a release changelog:
 git cliff --tag vX.Y.Z -o CHANGELOG.md
 ```
 
+## Releasing
+
+Releases are cut from `master` using semantic version tags. The two-stage CI
+pipeline (`build-release.yml` → `release.yml`) handles building, packaging, and
+publishing automatically.
+
+### Release prerequisites
+
+- Push access to the repository (for tagging)
+- [git-cliff](https://git-cliff.org/) (for changelog preview)
+
+### Steps
+
+1. Ensure all changes are merged to `master`.
+2. Preview the next version and unreleased changelog:
+
+   ```bash
+   git cliff --bumped-version
+   git cliff --unreleased
+   ```
+
+3. Generate the changelog and commit:
+
+   ```bash
+   git cliff --tag vX.Y.Z -o CHANGELOG.md
+   git add CHANGELOG.md
+   git commit -m "docs: update changelog for vX.Y.Z"
+   ```
+
+4. Tag and push:
+
+   ```bash
+   git tag vX.Y.Z
+   git push origin master --tags
+   ```
+
+5. The release workflow automatically:
+   - Builds binaries for darwin/amd64, darwin/arm64, and linux/amd64
+   - Embeds version and commit hash via ldflags (`-version` flag)
+   - Packages each as `spnego-proxy_vX.Y.Z_<os>_<arch>.tar.gz` (binary +
+     LICENSE + README)
+   - Generates SBOM (SPDX JSON) per binary
+   - Creates build provenance and SBOM attestations
+   - Generates SHA-256 checksums
+   - Creates a draft GitHub release, then publishes it
+
+6. Review the published release on GitHub.
+
+### Release artifacts
+
+Each release includes:
+
+| Artifact | Description |
+| --- | --- |
+| `spnego-proxy_vX.Y.Z_<os>_<arch>.tar.gz` | Binary archive with LICENSE and README |
+| `spnego-proxy-<os>-<arch>.sbom.spdx.json` | Software Bill of Materials |
+| `checksums-sha256.txt` | SHA-256 checksums for all artifacts |
+
+### Verifying a release
+
+```bash
+# Verify build provenance attestation
+gh attestation verify spnego-proxy_vX.Y.Z_linux_amd64.tar.gz \
+  -R andrewesweet/spnego-proxy
+
+# Check embedded version
+tar xzf spnego-proxy_vX.Y.Z_linux_amd64.tar.gz
+./spnego-proxy -version
+```
+
+### Pre-release tags
+
+Tags with a pre-release suffix (e.g., `v1.0.0-rc.1`) are automatically marked
+as pre-releases on GitHub. Use these for validation before cutting a stable
+release.
+
+### Immutable releases
+
+Once a release is published, assets and tags should not be modified or deleted.
+Enable GitHub's "Release immutability" setting under Settings → Releases for
+enforcement.
+
 ## Security
 
 A STRIDE threat model of the codebase is maintained in

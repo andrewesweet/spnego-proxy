@@ -43,9 +43,9 @@ jobs:
         working-directory: artifacts
         run: |
           shasum -a 256 \
-            spnego-proxy-darwin-amd64 \
-            spnego-proxy-darwin-arm64 \
-            spnego-proxy-linux-amd64 \
+            spnego-proxy_${{ github.ref_name }}_darwin_amd64.tar.gz \
+            spnego-proxy_${{ github.ref_name }}_darwin_arm64.tar.gz \
+            spnego-proxy_${{ github.ref_name }}_linux_amd64.tar.gz \
             spnego-proxy-darwin-amd64.sbom.spdx.json \
             spnego-proxy-darwin-arm64.sbom.spdx.json \
             spnego-proxy-linux-amd64.sbom.spdx.json \
@@ -72,9 +72,9 @@ jobs:
           body: ${{ steps.changelog.outputs.content }}
           make_latest: ${{ steps.semver.outputs.prerelease != 'true' }}
           files: |
-            artifacts/spnego-proxy-darwin-amd64
-            artifacts/spnego-proxy-darwin-arm64
-            artifacts/spnego-proxy-linux-amd64
+            artifacts/spnego-proxy_${{ github.ref_name }}_darwin_amd64.tar.gz
+            artifacts/spnego-proxy_${{ github.ref_name }}_darwin_arm64.tar.gz
+            artifacts/spnego-proxy_${{ github.ref_name }}_linux_amd64.tar.gz
             artifacts/spnego-proxy-darwin-amd64.sbom.spdx.json
             artifacts/spnego-proxy-darwin-arm64.sbom.spdx.json
             artifacts/spnego-proxy-linux-amd64.sbom.spdx.json
