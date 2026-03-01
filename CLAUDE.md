@@ -123,9 +123,13 @@ See `CONTRIBUTING.md` § Releasing for the full human-oriented guide.
 
 Key details for AI context:
 
-- Release binaries embed version and commit via ldflags (`-X main.version`, `-X main.commit`)
-- The `-version` flag prints version info; dev builds report `(devel)`
+- Releases are **automatic**: merging to master triggers auto-tagging via git-cliff
+- Only `feat`, `fix`, `fix(security)`, `perf`, and breaking changes trigger a version bump
+- `docs`, `refactor`, `test`, `ci`, `build`, `chore` commits do NOT trigger a release
+- The auto-tag workflow generates CHANGELOG.md, commits it, tags, and pushes
+- The tag triggers the release pipeline (build → package → publish)
+- Release binaries embed version and commit via ldflags (`-version` flag)
 - Archives are named `spnego-proxy_<tag>_<os>_<arch>.tar.gz`
 - No GoReleaser — macOS builds require `CGO_ENABLED=1` for native GSS framework
-- Quick release: `git cliff --tag vX.Y.Z -o CHANGELOG.md && git tag vX.Y.Z && git push origin vX.Y.Z`
+- Manual release: `git tag vX.Y.Z && git push origin vX.Y.Z` (requires admin)
 - Verify: `gh attestation verify <archive> -R andrewesweet/spnego-proxy`

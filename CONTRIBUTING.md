@@ -277,6 +277,35 @@ Releases are cut from `master` using semantic version tags. The two-stage CI
 pipeline (`build-release.yml` → `release.yml`) handles building, packaging, and
 publishing automatically.
 
+### Automatic releases
+
+The **Auto Tag** workflow (`auto-tag.yml`) automates the tag-and-release cycle.
+When a pull request is merged to `master`:
+
+1. The "Build and Test" workflow runs.
+2. On success, Auto Tag verifies all required CI checks passed for the commit.
+3. It runs `git cliff --bumped-version` to compute the next SemVer version.
+4. If a version bump is needed, it generates the changelog, commits it, creates
+   the tag, and pushes — triggering the release pipeline.
+
+**Commit types that trigger a release:**
+
+- `feat` → minor bump
+- `fix`, `fix(security)`, `perf` → patch bump
+- Breaking changes (`!` suffix or `BREAKING CHANGE` footer) → major bump
+
+**Commit types that do NOT trigger a release:**
+
+- `docs`, `refactor`, `test`, `ci`, `build`, `chore`
+
+This means documentation-only or refactoring PRs merge cleanly without producing
+an unwanted release.
+
+### Manual releases (fallback)
+
+For controlled release timing or when the auto-tag workflow is not available, you
+can tag manually.
+
 ### Release prerequisites
 
 - Push access to the repository (for tagging)
