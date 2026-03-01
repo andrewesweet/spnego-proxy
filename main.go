@@ -38,6 +38,12 @@ const connectPortWildcard = "*"
 // allocation on every tunnel connection.
 var copyBufPool = sync.Pool{New: func() any { b := make([]byte, 32*1024); return &b }}
 
+// version and commit are set at build time via ldflags.
+var (
+	version = ""
+	commit  = ""
+)
+
 func init() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
 		Level: logLevel,
@@ -952,6 +958,20 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 	wg.Wait()
 }
 
+func versionString() string {
+	if version == "" {
+		return "spnego-proxy version (devel)"
+	}
+	if commit == "" {
+		return fmt.Sprintf("spnego-proxy version %s", version)
+	}
+	short := commit
+	if len(short) > 7 {
+		short = short[:7]
+	}
+	return fmt.Sprintf("spnego-proxy version %s (commit %s)", version, short)
+}
+
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "bind address")
 	proxy := flag.String("proxy", "", "proxy address")
@@ -988,7 +1008,13 @@ func main() {
 	user := flag.String("user", "", "kerberos user name")
 	realm := flag.String("realm", "", "kerberos realm")
 	passwordFile := flag.String("password-file", "", "password file path")
+	showVersion := flag.Bool("version", false, "print version information and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(versionString())
+		return
+	}
 
 	if *debug {
 		logLevel.Set(slog.LevelDebug)
