@@ -100,6 +100,14 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 	}
 	cli := client.NewWithPassword(user, realm, string(passwd), cfg, opts...)
 
+	// Zero the password bytes immediately after the Kerberos client has
+	// copied them. string(passwd) creates a copy for the client; this
+	// zeroing reduces the window during which plaintext credentials exist
+	// in process memory (CWE-316).
+	for i := range passwd {
+		passwd[i] = 0
+	}
+
 	return &Gokrb5TokenProvider{
 		krbClient:    cli,
 		spnegoClient: spnego.SPNEGOClient(cli, spnVal),
