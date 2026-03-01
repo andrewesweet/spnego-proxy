@@ -84,6 +84,7 @@ type ProxyConfig struct {
 	KeepAlive    time.Duration
 	IdleTimeout  time.Duration
 	ConnectPorts []string
+	AllowedIPs   []*net.IPNet
 	Forwarding   ForwardingConfig
 }
 
@@ -449,6 +450,12 @@ var (
 		message:    "The upstream proxy sent a response that could not be parsed as valid HTTP.",
 		action:     "This may indicate a misconfigured upstream proxy. Contact the upstream proxy administrator.",
 	}
+	errClientDenied = &proxyError{
+		statusCode: http.StatusForbidden,
+		errorType:  errorTypeHTTPRequestDenied,
+		message:    "Client IP is not in the allowlist.",
+		action:     "Contact the proxy administrator to add your IP to the -allowed-ips list.",
+	}
 )
 
 // writeHTTPError sends a structured HTTP error response to the client with an
@@ -513,6 +520,53 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// parseAllowList parses a comma-separated string of IPs and CIDR ranges
+// into a slice of *net.IPNet entries for use with ipAllowed.
+func parseAllowList(s string) ([]*net.IPNet, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var nets []*net.IPNet
+	for entry := range strings.SplitSeq(s, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if strings.Contains(entry, "/") {
+			_, ipNet, err := net.ParseCIDR(entry)
+			if err != nil {
+				return nil, fmt.Errorf("invalid CIDR %q: %w", entry, err)
+			}
+			nets = append(nets, ipNet)
+		} else {
+			ip := net.ParseIP(entry)
+			if ip == nil {
+				return nil, fmt.Errorf("invalid IP address: %q", entry)
+			}
+			bits := 32
+			if ip.To4() == nil {
+				bits = 128
+			}
+			nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+		}
+	}
+	return nets, nil
+}
+
+// ipAllowed returns true if the given IP is in the allow list.
+// A nil or empty allow list permits all IPs.
+func ipAllowed(ip net.IP, allowList []*net.IPNet) bool {
+	if len(allowList) == 0 {
+		return true
+	}
+	for _, n := range allowList {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // connectPortAllowed reports whether port is in the allowed set.
@@ -617,6 +671,23 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 		return
 	}
 	clientAddr := conn.RemoteAddr().String()
+
+	// Check IP allowlist before processing anything.
+	if len(cfg.AllowedIPs) > 0 {
+		clientHost, _, _ := net.SplitHostPort(clientAddr)
+		if !ipAllowed(net.ParseIP(clientHost), cfg.AllowedIPs) {
+			slog.Warn("client IP not in allowlist", "client_addr", clientAddr)
+			writeHTTPError(conn, errClientDenied)
+			// Drain any unread client data so the kernel can perform a
+			// graceful FIN-based close rather than sending a TCP RST.
+			// A RST would discard the server's send buffer, causing the
+			// client to receive a truncated error response.
+			_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+			_, _ = io.Copy(io.Discard, conn)
+			return
+		}
+	}
+
 	slog.Debug("new client", "client_addr", clientAddr)
 	defer slog.Debug("stop processing request", "client_addr", clientAddr)
 
@@ -828,6 +899,8 @@ func main() {
 		"idle timeout for CONNECT tunnels; connections with no data flow are closed after this duration (0 to disable)")
 	maxConns := flag.Int("max-conns", 512, "maximum number of concurrent connections (0 for unlimited)")
 	connectPortsFlag := flag.String("connect-ports", "443", "comma-separated list of ports allowed for CONNECT tunneling (default: 443; use * for all)")
+	allowedIPs := flag.String("allowed-ips", "",
+		"comma-separated list of allowed client IPs or CIDR ranges (empty = allow all; recommended when binding to non-loopback)")
 	cbThreshold := flag.Uint("cb-threshold", 3,
 		"consecutive failures before circuit breaker opens")
 	cbTimeout := flag.Duration("cb-timeout", 30*time.Second,
@@ -879,6 +952,12 @@ func main() {
 
 	connectPorts := splitCSV(*connectPortsFlag)
 
+	allowList, err := parseAllowList(*allowedIPs)
+	if err != nil {
+		slog.Error("invalid -allowed-ips", "error", err)
+		os.Exit(1)
+	}
+
 	cfg := ProxyConfig{
 		Upstream:     *proxy,
 		Provider:     provider,
@@ -888,6 +967,7 @@ func main() {
 		KeepAlive:    *keepAlive,
 		IdleTimeout:  *idleTimeout,
 		ConnectPorts: connectPorts,
+		AllowedIPs:   allowList,
 		Forwarding: ForwardingConfig{
 			ForwardedEnabled:     *forwardedFlag,
 			XForwardedForEnabled: *xForwardedForFlag,

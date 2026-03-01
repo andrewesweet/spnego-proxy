@@ -208,6 +208,14 @@ func (p *ProxyUnderTest) SetIdleTimeout(d time.Duration) {
 	p.cfg.IdleTimeout = d
 }
 
+// SetAllowedIPs sets the IP allowlist for client access control.
+// Thread-safe; may be called at any time after construction.
+func (p *ProxyUnderTest) SetAllowedIPs(ips []*net.IPNet) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cfg.AllowedIPs = ips
+}
+
 // NewProxyUnderTest creates and starts a proxy listening on a dynamic port.
 // upstream is the address of the mock upstream to forward to.
 func NewProxyUnderTest(t *testing.T, upstream string) *ProxyUnderTest {
