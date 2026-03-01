@@ -62,9 +62,38 @@ func normalizeSPN(spn string, targetSep, alternateSep byte) string {
 
 // UpstreamTLSConfig holds optional TLS settings for the upstream proxy connection.
 type UpstreamTLSConfig struct {
-	Enabled        bool
-	CAFile         string
-	InsecureVerify bool
+	Enabled            bool
+	CAFile             string
+	InsecureSkipVerify bool
+	// TLSConfig is the pre-built *tls.Config constructed once at startup.
+	// dialUpstream clones it and sets ServerName per connection.
+	// Call buildTLSConfig to populate it from the other fields.
+	TLSConfig *tls.Config
+	// Dialer is the pre-allocated net.Dialer constructed once at startup.
+	Dialer *net.Dialer
+}
+
+// buildTLSConfig constructs a *tls.Config from the fields of UpstreamTLSConfig
+// and stores it in TLSConfig. It is called once at startup (and in tests) so
+// that dialUpstream can clone the result without re-reading the CA file per connection.
+func (c *UpstreamTLSConfig) buildTLSConfig() error {
+	tc := &tls.Config{MinVersion: tls.VersionTLS12}
+	if c.CAFile != "" {
+		caCert, err := os.ReadFile(c.CAFile)
+		if err != nil {
+			return fmt.Errorf("failed to read upstream CA file: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caCert) {
+			return fmt.Errorf("failed to parse upstream CA certificate from %s", c.CAFile)
+		}
+		tc.RootCAs = pool
+	}
+	if c.InsecureSkipVerify {
+		tc.InsecureSkipVerify = true //nolint:gosec // user explicitly opted in via -upstream-tls-insecure
+	}
+	c.TLSConfig = tc
+	return nil
 }
 
 // ForwardingConfig controls which forwarding headers the proxy injects into
@@ -671,36 +700,23 @@ func forwardHalf(dst net.Conn, src io.Reader, fromAddr, toAddr net.Addr) {
 }
 
 // dialUpstream connects to the upstream proxy, optionally using TLS.
-func dialUpstream(addr string, timeout time.Duration, tlsCfg UpstreamTLSConfig) (net.Conn, error) {
-	dialer := &net.Dialer{Timeout: timeout}
+// tlsCfg.Dialer must be non-nil; it is pre-allocated at startup by main().
+func dialUpstream(addr string, tlsCfg UpstreamTLSConfig) (net.Conn, error) {
+	dialer := tlsCfg.Dialer
+	if dialer == nil {
+		dialer = &net.Dialer{}
+	}
 	if !tlsCfg.Enabled {
 		return dialer.Dial("tcp", addr)
 	}
 
-	tc := &tls.Config{MinVersion: tls.VersionTLS12}
-
-	if tlsCfg.CAFile != "" {
-		caCert, err := os.ReadFile(tlsCfg.CAFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read CA file: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(caCert) {
-			return nil, fmt.Errorf("failed to parse CA certificate from %s", tlsCfg.CAFile)
-		}
-		tc.RootCAs = pool
+	var tc *tls.Config
+	if tlsCfg.TLSConfig != nil {
+		tc = tlsCfg.TLSConfig.Clone()
+	} else {
+		tc = &tls.Config{MinVersion: tls.VersionTLS12} //nolint:gosec // fallback for tests without pre-built config
 	}
-
-	if tlsCfg.InsecureVerify {
-		tc.InsecureSkipVerify = true //nolint:gosec // user explicitly opted in via -upstream-tls-insecure
-		slog.Warn("upstream TLS certificate verification is disabled")
-	}
-
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		host = addr
-	}
-	tc.ServerName = host
+	tc.ServerName = extractHost(addr)
 
 	return tls.DialWithDialer(dialer, "tcp", addr, tc)
 }
@@ -817,7 +833,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	injectVia(req.Header, req.Proto, cfg.Pseudonym)
 
 	// Now that the request is validated and prepared, dial upstream.
-	proxyConn, err := dialUpstream(cfg.Upstream, cfg.DialTimeout, cfg.UpstreamTLS)
+	proxyConn, err := dialUpstream(cfg.Upstream, cfg.UpstreamTLS)
 	if err != nil {
 		var ne net.Error
 		if errors.As(err, &ne) && ne.Timeout() {
@@ -1010,6 +1026,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Build the upstream TLS config once at startup (avoids re-reading CA file per connection).
+	upstreamTLSCfg := UpstreamTLSConfig{
+		Enabled:            *upstreamTLS,
+		CAFile:             *upstreamCA,
+		InsecureSkipVerify: *upstreamTLSInsecure,
+		Dialer:             &net.Dialer{Timeout: *dialTimeout},
+	}
+	if err := upstreamTLSCfg.buildTLSConfig(); err != nil {
+		slog.Error("failed to build upstream TLS config", "error", err)
+		os.Exit(1)
+	}
+	if *upstreamTLSInsecure {
+		slog.Warn("upstream TLS certificate verification is disabled")
+	}
+
 	cfg := ProxyConfig{
 		Upstream:     *proxy,
 		Provider:     provider,
@@ -1024,11 +1055,7 @@ func main() {
 			ForwardedEnabled:     *forwardedFlag,
 			XForwardedForEnabled: *xForwardedForFlag,
 		},
-		UpstreamTLS: UpstreamTLSConfig{
-			Enabled:        *upstreamTLS,
-			CAFile:         *upstreamCA,
-			InsecureVerify: *upstreamTLSInsecure,
-		},
+		UpstreamTLS: upstreamTLSCfg,
 	}
 
 	if *maxConns > 0 {

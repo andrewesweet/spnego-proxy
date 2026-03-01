@@ -318,8 +318,10 @@ func TestL2_RFC9110_GatewayTimeoutOnDialTimeout(t *testing.T) {
 	t.Cleanup(func() { _ = client.Close() })
 
 	provider := &stubTokenProvider{token: "tok"}
+	const testDialTimeout = 50 * time.Millisecond
 	cfg := defaultTestConfig(unreachable, provider)
-	cfg.DialTimeout = 50 * time.Millisecond
+	cfg.DialTimeout = testDialTimeout
+	cfg.UpstreamTLS.Dialer = &net.Dialer{Timeout: testDialTimeout}
 
 	done := make(chan struct{})
 	go func() {
@@ -460,6 +462,7 @@ func TestJ1_RFC9112_HTTP11AdvertisedInProxyGeneratedResponses(t *testing.T) {
 			provider := &stubTokenProvider{token: "tok"}
 			cfg := defaultTestConfig(upstreamAddr, provider)
 			cfg.DialTimeout = tc.dialTimeout
+			cfg.UpstreamTLS.Dialer = &net.Dialer{Timeout: tc.dialTimeout}
 
 			done := make(chan struct{})
 			go func() {

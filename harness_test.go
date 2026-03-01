@@ -218,9 +218,18 @@ func (p *ProxyUnderTest) SetAllowedIPs(ips []*net.IPNet) {
 
 // SetUpstreamTLS sets the upstream TLS configuration.
 // Thread-safe; may be called at any time after construction.
+// The existing pre-allocated Dialer is preserved unless the caller
+// provides one explicitly. buildTLSConfig is called to populate
+// the cached *tls.Config from CAFile and InsecureSkipVerify.
 func (p *ProxyUnderTest) SetUpstreamTLS(cfg UpstreamTLSConfig) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if cfg.Dialer == nil {
+		cfg.Dialer = p.cfg.UpstreamTLS.Dialer
+	}
+	if err := cfg.buildTLSConfig(); err != nil {
+		panic("SetUpstreamTLS: " + err.Error())
+	}
 	p.cfg.UpstreamTLS = cfg
 }
 
@@ -232,6 +241,7 @@ func NewProxyUnderTest(t *testing.T, upstream string) *ProxyUnderTest {
 	if err != nil {
 		t.Fatalf("ProxyUnderTest: listen: %v", err)
 	}
+	const dialTimeout = 5 * time.Second
 	provider := &stubTokenProvider{token: "test-token"}
 	p := &ProxyUnderTest{
 		listener: l,
@@ -240,9 +250,12 @@ func NewProxyUnderTest(t *testing.T, upstream string) *ProxyUnderTest {
 			Upstream:    upstream,
 			Provider:    provider,
 			Pseudonym:   testPseudonym,
-			DialTimeout: 5 * time.Second,
+			DialTimeout: dialTimeout,
 			ReadTimeout: 5 * time.Second,
 			KeepAlive:   0,
+			UpstreamTLS: UpstreamTLSConfig{
+				Dialer: &net.Dialer{Timeout: dialTimeout},
+			},
 		},
 		closed: make(chan struct{}),
 	}
@@ -409,12 +422,16 @@ func waitForDone(t *testing.T, done <-chan struct{}) {
 // upstream address and provider are required; all other fields use sensible
 // defaults (testPseudonym, 5 s timeouts, no keep-alive).
 func defaultTestConfig(upstream string, provider TokenProvider) ProxyConfig {
+	const dialTimeout = 5 * time.Second
 	return ProxyConfig{
 		Upstream:    upstream,
 		Provider:    provider,
 		Pseudonym:   testPseudonym,
-		DialTimeout: 5 * time.Second,
+		DialTimeout: dialTimeout,
 		ReadTimeout: 5 * time.Second,
+		UpstreamTLS: UpstreamTLSConfig{
+			Dialer: &net.Dialer{Timeout: dialTimeout},
+		},
 	}
 }
 
