@@ -6,6 +6,8 @@ import (
 	"bufio"
 	"context"
 	crand "crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -27,6 +29,14 @@ import (
 )
 
 var logLevel = new(slog.LevelVar) // default Info
+
+// connectPortWildcard is the sentinel value meaning "allow all ports" in the
+// -connect-ports flag and connectPortAllowed logic.
+const connectPortWildcard = "*"
+
+// copyBufPool pools 32 KiB buffers used by idleCopy to avoid a heap
+// allocation on every tunnel connection.
+var copyBufPool = sync.Pool{New: func() any { b := make([]byte, 32*1024); return &b }}
 
 func init() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
@@ -58,6 +68,42 @@ func normalizeSPN(spn string, targetSep, alternateSep byte) string {
 	return spn // no recognized separator; return as-is
 }
 
+// UpstreamTLSConfig holds optional TLS settings for the upstream proxy connection.
+type UpstreamTLSConfig struct {
+	Enabled            bool
+	CAFile             string
+	InsecureSkipVerify bool
+	// TLSConfig is the pre-built *tls.Config constructed once at startup.
+	// dialUpstream clones it and sets ServerName per connection.
+	// Call buildTLSConfig to populate it from the other fields.
+	TLSConfig *tls.Config
+	// Dialer is the pre-allocated net.Dialer constructed once at startup.
+	Dialer *net.Dialer
+}
+
+// buildTLSConfig constructs a *tls.Config from the fields of UpstreamTLSConfig
+// and stores it in TLSConfig. It is called once at startup (and in tests) so
+// that dialUpstream can clone the result without re-reading the CA file per connection.
+func (c *UpstreamTLSConfig) buildTLSConfig() error {
+	tc := &tls.Config{MinVersion: tls.VersionTLS12}
+	if c.CAFile != "" {
+		caCert, err := os.ReadFile(c.CAFile)
+		if err != nil {
+			return fmt.Errorf("failed to read upstream CA file: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caCert) {
+			return fmt.Errorf("failed to parse upstream CA certificate from %s", c.CAFile)
+		}
+		tc.RootCAs = pool
+	}
+	if c.InsecureSkipVerify {
+		tc.InsecureSkipVerify = true //nolint:gosec // user explicitly opted in via -upstream-tls-insecure
+	}
+	c.TLSConfig = tc
+	return nil
+}
+
 // ForwardingConfig controls which forwarding headers the proxy injects into
 // outbound requests.
 //
@@ -82,18 +128,20 @@ type ProxyConfig struct {
 	DialTimeout  time.Duration
 	ReadTimeout  time.Duration
 	KeepAlive    time.Duration
+	IdleTimeout  time.Duration
 	ConnectPorts []string
+	AllowedIPs   []*net.IPNet
 	Forwarding   ForwardingConfig
+	UpstreamTLS  UpstreamTLSConfig
 }
 
 // randomHex returns n random bytes encoded as 2*n lowercase hex characters.
-// On the extremely unlikely failure of crypto/rand, it falls back to the
-// low bits of the nanosecond timestamp.
+// If the OS entropy source is unavailable, the process exits immediately.
 func randomHex(n int) string {
 	b := make([]byte, n)
 	if _, err := crand.Read(b); err != nil {
-		slog.Error("crypto/rand.Read failed, falling back to timestamp", "error", err)
-		return fmt.Sprintf("%08x", time.Now().UnixNano()&0xffffffff)
+		slog.Error("entropy source failure: crypto/rand is unavailable", "error", err)
+		os.Exit(1)
 	}
 	return hex.EncodeToString(b)
 }
@@ -167,6 +215,16 @@ func injectVia(header http.Header, proto, pseudonym string) {
 	appendHeaderValue(header, "Via", proto+" "+pseudonym)
 }
 
+// logTECLConflict logs the Transfer-Encoding / Content-Length conflict
+// resolution warning per RFC 9110 §6.2. direction is "request" or "response".
+func logTECLConflict(direction string, te []string, cl string) {
+	slog.Warn("TE/CL conflict resolved",
+		"direction", direction,
+		"action", "removed Content-Length per RFC 9110 §6.2",
+		"transfer_encoding", te,
+		"content_length", cl)
+}
+
 // sanitizeHopByHop removes hop-by-hop headers from the request before
 // forwarding to the upstream proxy per RFC 9110 §7.6.1. It also handles
 // the Transfer-Encoding / Content-Length conflict (RFC 9112 §6.1) and
@@ -209,7 +267,8 @@ func sanitizeHopByHop(req *http.Request) {
 	// are present, remove Content-Length to prevent request smuggling.
 	// ReadRequest moves Transfer-Encoding into req.TransferEncoding, so
 	// we check that field rather than the header map.
-	if len(req.TransferEncoding) > 0 && header.Get("Content-Length") != "" {
+	if cl := header.Get("Content-Length"); len(req.TransferEncoding) > 0 && cl != "" {
+		logTECLConflict("request", req.TransferEncoding, cl)
 		header.Del("Content-Length")
 	}
 }
@@ -295,7 +354,8 @@ func readUpstreamResponse(upstreamReader *bufio.Reader, req *http.Request, pseud
 
 	// RFC 9112 §6.1: if both Transfer-Encoding and Content-Length
 	// are present in the response, remove Content-Length.
-	if len(resp.TransferEncoding) > 0 && resp.Header.Get("Content-Length") != "" {
+	if cl := resp.Header.Get("Content-Length"); len(resp.TransferEncoding) > 0 && cl != "" {
+		logTECLConflict("response", resp.TransferEncoding, cl)
 		resp.Header.Del("Content-Length")
 		// Reset to -1 so resp.Write uses chunked framing instead
 		// of a fixed-length body derived from the removed header.
@@ -433,6 +493,18 @@ var (
 		message:    "CONNECT to the requested port is not allowed.",
 		action:     "The proxy restricts CONNECT tunneling to specific ports. Contact the proxy administrator.",
 	}
+	errUnparseableResponse = &proxyError{
+		statusCode: http.StatusBadGateway,
+		errorType:  errorTypeHTTPProtocolError,
+		message:    "The upstream proxy sent a response that could not be parsed as valid HTTP.",
+		action:     "This may indicate a misconfigured upstream proxy. Contact the upstream proxy administrator.",
+	}
+	errClientDenied = &proxyError{
+		statusCode: http.StatusForbidden,
+		errorType:  errorTypeHTTPRequestDenied,
+		message:    "Client IP is not in the allowlist.",
+		action:     "Contact the proxy administrator to add your IP to the -allowed-ips list.",
+	}
 )
 
 // writeHTTPError sends a structured HTTP error response to the client with an
@@ -499,10 +571,53 @@ func splitCSV(s string) []string {
 	return out
 }
 
+// parseAllowList parses a comma-separated string of IPs and CIDR ranges
+// into a slice of *net.IPNet entries for use with ipAllowed.
+func parseAllowList(s string) ([]*net.IPNet, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var nets []*net.IPNet
+	for _, entry := range splitCSV(s) {
+		if strings.Contains(entry, "/") {
+			_, ipNet, err := net.ParseCIDR(entry)
+			if err != nil {
+				return nil, fmt.Errorf("invalid CIDR %q: %w", entry, err)
+			}
+			nets = append(nets, ipNet)
+		} else {
+			ip := net.ParseIP(entry)
+			if ip == nil {
+				return nil, fmt.Errorf("invalid IP address: %q", entry)
+			}
+			bits := 32
+			if ip.To4() == nil {
+				bits = 128
+			}
+			nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+		}
+	}
+	return nets, nil
+}
+
+// ipAllowed returns true if the given IP is in the allow list.
+// A nil or empty allow list permits all IPs.
+func ipAllowed(ip net.IP, allowList []*net.IPNet) bool {
+	if len(allowList) == 0 {
+		return true
+	}
+	for _, n := range allowList {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // connectPortAllowed reports whether port is in the allowed set.
 // An empty allowedPorts slice means all ports are permitted.
 func connectPortAllowed(port string, allowedPorts []string) bool {
-	return len(allowedPorts) == 0 || slices.Contains(allowedPorts, port)
+	return len(allowedPorts) == 0 || slices.ContainsFunc(allowedPorts, func(p string) bool { return p == connectPortWildcard || p == port })
 }
 
 // tokenErrorToProxyError maps a GetToken error to the most specific proxyError
@@ -526,7 +641,7 @@ func tokenErrorToProxyError(err error) *proxyError {
 // handleUpstreamResponseError handles errors from readUpstreamResponse.
 // For invalid Content-Length it sends a 502 error to the client; for all
 // other errors it falls back to raw-relaying the upstream bytes.
-func handleUpstreamResponseError(conn, proxyConn net.Conn, upstreamReader *bufio.Reader, err error, clientAddr string) {
+func handleUpstreamResponseError(conn, proxyConn net.Conn, err error, clientAddr string) {
 	if errors.Is(err, errContentLengthInvalid) {
 		slog.Error("invalid Content-Length in upstream response",
 			"error", err, "error_type", errInvalidContentLength.errorType,
@@ -535,11 +650,11 @@ func handleUpstreamResponseError(conn, proxyConn net.Conn, upstreamReader *bufio
 		writeHTTPError(conn, errInvalidContentLength)
 		return
 	}
-	slog.Warn("failed to parse upstream response, falling back to raw relay",
-		"error", err, "client_addr", clientAddr)
-	if _, err := io.Copy(conn, upstreamReader); err != nil {
-		slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
-	}
+	slog.Warn("unparseable upstream response",
+		"error", err, "error_type", errUnparseableResponse.errorType,
+		"client_addr", clientAddr,
+		"upstream_addr", proxyConn.RemoteAddr())
+	writeHTTPError(conn, errUnparseableResponse)
 }
 
 // closeWrite calls CloseWrite on conn if the underlying type supports it.
@@ -551,16 +666,75 @@ func closeWrite(conn net.Conn) {
 	}
 }
 
+// idleCopy copies from src to dst, resetting the read deadline on srcConn
+// after each successful read. If no data arrives within timeout, the read
+// fails with a deadline error and the copy returns. A zero timeout disables
+// the idle check and falls back to plain io.Copy.
+func idleCopy(dst net.Conn, src io.Reader, srcConn net.Conn, timeout time.Duration) (int64, error) {
+	if timeout <= 0 {
+		return io.Copy(dst, src)
+	}
+	bufp := copyBufPool.Get().(*[]byte)
+	defer copyBufPool.Put(bufp)
+	buf := *bufp
+	var total int64
+	for {
+		_ = srcConn.SetReadDeadline(time.Now().Add(timeout))
+		n, readErr := src.Read(buf)
+		if n > 0 {
+			nw, writeErr := dst.Write(buf[:n])
+			total += int64(nw)
+			if writeErr != nil {
+				return total, writeErr
+			}
+		}
+		if readErr != nil {
+			_ = srcConn.SetReadDeadline(time.Time{}) // clear deadline
+			return total, readErr
+		}
+	}
+}
+
 // forwardHalf copies data from src to dst, calling CloseWrite on dst when
 // done. It logs the start, completion, and any errors. Callers use
 // wg.Go to launch forwardHalf so the WaitGroup is managed automatically.
-func forwardHalf(dst net.Conn, src io.Reader, fromAddr, toAddr net.Addr) {
+// When idleTimeout > 0, idleCopy is used with srcConn to enforce an idle
+// deadline; otherwise plain io.Copy is used and srcConn may be nil.
+func forwardHalf(dst net.Conn, src io.Reader, srcConn net.Conn, fromAddr, toAddr net.Addr, idleTimeout time.Duration) {
 	defer closeWrite(dst)
 	slog.Debug("forward start", "from", fromAddr, "to", toAddr)
 	defer slog.Debug("forward done", "from", fromAddr, "to", toAddr)
-	if _, err := io.Copy(dst, src); err != nil {
+	var err error
+	if idleTimeout > 0 {
+		_, err = idleCopy(dst, src, srcConn, idleTimeout)
+	} else {
+		_, err = io.Copy(dst, src)
+	}
+	if err != nil {
 		slog.Error("forward error", "error", err, "from", fromAddr, "to", toAddr)
 	}
+}
+
+// dialUpstream connects to the upstream proxy, optionally using TLS.
+// tlsCfg.Dialer must be non-nil; it is pre-allocated at startup by main().
+func dialUpstream(addr string, tlsCfg UpstreamTLSConfig) (net.Conn, error) {
+	dialer := tlsCfg.Dialer
+	if dialer == nil {
+		dialer = &net.Dialer{}
+	}
+	if !tlsCfg.Enabled {
+		return dialer.Dial("tcp", addr)
+	}
+
+	var tc *tls.Config
+	if tlsCfg.TLSConfig != nil {
+		tc = tlsCfg.TLSConfig.Clone()
+	} else {
+		tc = &tls.Config{MinVersion: tls.VersionTLS12} //nolint:gosec // fallback for tests without pre-built config
+	}
+	tc.ServerName = extractHost(addr)
+
+	return tls.DialWithDialer(dialer, "tcp", addr, tc)
 }
 
 // handleClient handles a single client connection. cfg groups all
@@ -574,6 +748,23 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 		return
 	}
 	clientAddr := conn.RemoteAddr().String()
+
+	// Check IP allowlist before processing anything.
+	if len(cfg.AllowedIPs) > 0 {
+		clientHost := extractHost(clientAddr)
+		if !ipAllowed(net.ParseIP(clientHost), cfg.AllowedIPs) {
+			slog.Warn("client IP not in allowlist", "client_addr", clientAddr)
+			writeHTTPError(conn, errClientDenied)
+			// Drain any unread client data so the kernel can perform a
+			// graceful FIN-based close rather than sending a TCP RST.
+			// A RST would discard the server's send buffer, causing the
+			// client to receive a truncated error response.
+			_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+			_, _ = io.Copy(io.Discard, conn)
+			return
+		}
+	}
+
 	slog.Debug("new client", "client_addr", clientAddr)
 	defer slog.Debug("stop processing request", "client_addr", clientAddr)
 
@@ -658,7 +849,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	injectVia(req.Header, req.Proto, cfg.Pseudonym)
 
 	// Now that the request is validated and prepared, dial upstream.
-	proxyConn, err := net.DialTimeout("tcp", cfg.Upstream, cfg.DialTimeout)
+	proxyConn, err := dialUpstream(cfg.Upstream, cfg.UpstreamTLS)
 	if err != nil {
 		var ne net.Error
 		if errors.As(err, &ne) && ne.Timeout() {
@@ -688,12 +879,12 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 		// BEFORE starting to forward client payload. This ensures client
 		// data (e.g. TLS ClientHello) is not sent to the upstream until
 		// after the upstream has confirmed tunnel establishment with 2xx.
-		handleConnectTunnel(conn, proxyConn, reqReader, req, cfg.Pseudonym, clientAddr)
+		handleConnectTunnel(conn, proxyConn, reqReader, req, cfg.Pseudonym, clientAddr, cfg.IdleTimeout)
 		return
 	}
 
 	var wg sync.WaitGroup
-	wg.Go(func() { forwardHalf(proxyConn, reqReader, conn.RemoteAddr(), proxyConn.RemoteAddr()) })
+	wg.Go(func() { forwardHalf(proxyConn, reqReader, nil, conn.RemoteAddr(), proxyConn.RemoteAddr(), 0) })
 	// Upstream→client: parse response headers to inject Via, then relay body.
 	wg.Go(func() {
 		defer closeWrite(conn)
@@ -703,7 +894,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 		upstreamReader := bufio.NewReader(proxyConn)
 		resp, err := readUpstreamResponse(upstreamReader, req, cfg.Pseudonym)
 		if err != nil {
-			handleUpstreamResponseError(conn, proxyConn, upstreamReader, err, clientAddr)
+			handleUpstreamResponseError(conn, proxyConn, err, clientAddr)
 			return
 		}
 		defer func() { _ = resp.Body.Close() }()
@@ -720,11 +911,11 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 // It reads the upstream response before forwarding any client payload (D6),
 // relays the response to the client (D7), and then starts bidirectional
 // forwarding only after a 2xx is confirmed.
-func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req *http.Request, pseudonym, clientAddr string) {
+func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req *http.Request, pseudonym, clientAddr string, idleTimeout time.Duration) {
 	upstreamReader := bufio.NewReader(proxyConn)
 	resp, err := readUpstreamResponse(upstreamReader, req, pseudonym) //nolint:bodyclose // S3: resp.Body is the raw tunnel stream; closing it would shut down the TCP connection we forward below.
 	if err != nil {
-		handleUpstreamResponseError(conn, proxyConn, upstreamReader, err, clientAddr)
+		handleUpstreamResponseError(conn, proxyConn, err, clientAddr)
 		return
 	}
 
@@ -752,8 +943,12 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 
 	slog.Debug("CONNECT tunnel established", "client_addr", clientAddr, "upstream_addr", proxyConn.RemoteAddr())
 	var wg sync.WaitGroup
-	wg.Go(func() { forwardHalf(proxyConn, reqReader, conn.RemoteAddr(), proxyConn.RemoteAddr()) })
-	wg.Go(func() { forwardHalf(conn, upstreamReader, proxyConn.RemoteAddr(), conn.RemoteAddr()) })
+	wg.Go(func() {
+		forwardHalf(proxyConn, reqReader, conn, conn.RemoteAddr(), proxyConn.RemoteAddr(), idleTimeout)
+	})
+	wg.Go(func() {
+		forwardHalf(conn, upstreamReader, proxyConn, proxyConn.RemoteAddr(), conn.RemoteAddr(), idleTimeout)
+	})
 	wg.Wait()
 }
 
@@ -767,11 +962,26 @@ func main() {
 	readTimeout := flag.Duration("read-timeout", 30*time.Second, "timeout for reading client HTTP request")
 	drainTimeout := flag.Duration("drain-timeout", 30*time.Second, "timeout for draining in-flight connections on shutdown")
 	keepAlive := flag.Duration("keepalive", 30*time.Second, "TCP keepalive period for idle connection detection (0 to disable)")
+	idleTimeout := flag.Duration("idle-timeout", 5*time.Minute,
+		"idle timeout for CONNECT tunnels; connections with no data flow are closed after this duration (0 to disable)")
 	maxConns := flag.Int("max-conns", 512, "maximum number of concurrent connections (0 for unlimited)")
-	connectPortsFlag := flag.String("connect-ports", "", "comma-separated list of ports allowed for CONNECT tunneling (empty = all ports allowed)")
+	connectPortsFlag := flag.String("connect-ports", "443", "comma-separated list of ports allowed for CONNECT tunneling (default: 443; use "+connectPortWildcard+" for all)")
+	allowedIPs := flag.String("allowed-ips", "",
+		"comma-separated list of allowed client IPs or CIDR ranges (empty = allow all; recommended when binding to non-loopback)")
+	cbThreshold := flag.Uint("cb-threshold", uint(cbConsecutiveFailures),
+		"consecutive failures before circuit breaker opens")
+	cbTimeoutFlag := flag.Duration("cb-timeout", cbTimeout,
+		"circuit breaker cooldown duration")
 
 	forwardedFlag := flag.Bool("forwarded", false, "inject RFC 7239 Forwarded header with obfuscated client identifier")
 	xForwardedForFlag := flag.Bool("x-forwarded-for", false, "inject X-Forwarded-For, X-Forwarded-Proto, and X-Forwarded-Host headers")
+
+	upstreamTLS := flag.Bool("upstream-tls", false,
+		"use TLS for upstream proxy connection")
+	upstreamCA := flag.String("upstream-ca", "",
+		"path to CA certificate for upstream TLS verification")
+	upstreamTLSInsecure := flag.Bool("upstream-tls-insecure", false,
+		"skip TLS certificate verification for upstream (not recommended)")
 
 	// Flags for gokrb5 password-based auth (optional on macOS, required on other platforms)
 	cfgFile := flag.String("config", "", "kerberos config file")
@@ -805,7 +1015,7 @@ func main() {
 		slog.Error("failed to create token provider", "error", err)
 		os.Exit(1)
 	}
-	provider = NewCircuitBreakerTokenProvider(provider)
+	provider = NewCircuitBreakerTokenProvider(provider, uint32(*cbThreshold), *cbTimeoutFlag) //nolint:gosec // CLI flag value; overflow not a concern
 
 	l, err := net.Listen("tcp", *addr)
 	if err != nil {
@@ -816,6 +1026,27 @@ func main() {
 
 	connectPorts := splitCSV(*connectPortsFlag)
 
+	allowList, err := parseAllowList(*allowedIPs)
+	if err != nil {
+		slog.Error("invalid -allowed-ips", "error", err)
+		os.Exit(1)
+	}
+
+	// Build the upstream TLS config once at startup (avoids re-reading CA file per connection).
+	upstreamTLSCfg := UpstreamTLSConfig{
+		Enabled:            *upstreamTLS,
+		CAFile:             *upstreamCA,
+		InsecureSkipVerify: *upstreamTLSInsecure,
+		Dialer:             &net.Dialer{Timeout: *dialTimeout},
+	}
+	if err := upstreamTLSCfg.buildTLSConfig(); err != nil {
+		slog.Error("failed to build upstream TLS config", "error", err)
+		os.Exit(1)
+	}
+	if *upstreamTLSInsecure {
+		slog.Warn("upstream TLS certificate verification is disabled")
+	}
+
 	cfg := ProxyConfig{
 		Upstream:     *proxy,
 		Provider:     provider,
@@ -823,11 +1054,14 @@ func main() {
 		DialTimeout:  *dialTimeout,
 		ReadTimeout:  *readTimeout,
 		KeepAlive:    *keepAlive,
+		IdleTimeout:  *idleTimeout,
 		ConnectPorts: connectPorts,
+		AllowedIPs:   allowList,
 		Forwarding: ForwardingConfig{
 			ForwardedEnabled:     *forwardedFlag,
 			XForwardedForEnabled: *xForwardedForFlag,
 		},
+		UpstreamTLS: upstreamTLSCfg,
 	}
 
 	if *maxConns > 0 {

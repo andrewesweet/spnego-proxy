@@ -24,7 +24,7 @@ func tripBreaker(t *testing.T, cb *CircuitBreakerTokenProvider) {
 
 func TestCircuitBreakerPassesThrough(t *testing.T) {
 	inner := &stubTokenProvider{token: "tok123"}
-	cb := NewCircuitBreakerTokenProvider(inner)
+	cb := NewCircuitBreakerTokenProvider(inner, cbConsecutiveFailures, cbTimeout)
 
 	token, err := cb.GetToken()
 	if err != nil {
@@ -40,7 +40,7 @@ func TestCircuitBreakerPassesThrough(t *testing.T) {
 
 func TestCircuitBreakerOpensAfterConsecutiveFailures(t *testing.T) {
 	inner := &stubTokenProvider{err: errors.New("kdc error")}
-	cb := NewCircuitBreakerTokenProvider(inner)
+	cb := NewCircuitBreakerTokenProvider(inner, cbConsecutiveFailures, cbTimeout)
 
 	tripBreaker(t, cb)
 	if inner.calls.Load() != int64(cbConsecutiveFailures) {
@@ -63,7 +63,7 @@ func TestCircuitBreakerOpensAfterConsecutiveFailures(t *testing.T) {
 
 func TestCircuitBreakerDoesNotTripOnIntermittentFailures(t *testing.T) {
 	inner := &stubTokenProvider{token: "tok"}
-	cb := NewCircuitBreakerTokenProvider(inner)
+	cb := NewCircuitBreakerTokenProvider(inner, cbConsecutiveFailures, cbTimeout)
 
 	// Fail twice (below threshold), then succeed
 	inner.err = errors.New("transient")
@@ -95,7 +95,7 @@ func TestCircuitBreakerDoesNotTripOnIntermittentFailures(t *testing.T) {
 
 func TestCircuitBreakerClosesDelegatesToInner(t *testing.T) {
 	inner := &stubTokenProvider{token: "tok"}
-	cb := NewCircuitBreakerTokenProvider(inner)
+	cb := NewCircuitBreakerTokenProvider(inner, cbConsecutiveFailures, cbTimeout)
 
 	if err := cb.Close(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -107,7 +107,7 @@ func TestCircuitBreakerClosesDelegatesToInner(t *testing.T) {
 
 func TestCircuitBreakerOpenRejectsWithoutCallingInner(t *testing.T) {
 	inner := &stubTokenProvider{err: errors.New("fail")}
-	cb := NewCircuitBreakerTokenProvider(inner)
+	cb := NewCircuitBreakerTokenProvider(inner, cbConsecutiveFailures, cbTimeout)
 
 	tripBreaker(t, cb)
 
@@ -141,7 +141,7 @@ func TestCircuitBreakerHalfOpenRejectsConcurrentRequests(t *testing.T) {
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
 			return counts.ConsecutiveFailures >= cbConsecutiveFailures
 		},
-	})
+	}, cbConsecutiveFailures)
 
 	tripBreaker(t, cb)
 

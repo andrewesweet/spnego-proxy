@@ -13,6 +13,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +24,70 @@ import (
 	"testing"
 	"time"
 )
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
+// newMockConnectUpstream starts a TCP listener on a random port, spawns an
+// accept goroutine that performs the CONNECT handshake (reads the request,
+// validates it is a CONNECT, writes HTTP 200), and then calls afterConnect
+// with the raw net.Conn so the caller can implement custom post-handshake
+// behaviour (idle, echo, payload inspection, etc.).
+//
+// The accept goroutine is bound to t.Context() so it unblocks and exits
+// cleanly if the test panics or its deadline expires. The listener is
+// registered for cleanup via t.Cleanup.
+func newMockConnectUpstream(t *testing.T, afterConnect func(ctx context.Context, conn net.Conn)) net.Listener {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("newMockConnectUpstream: listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	ctx := t.Context()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		// Unblock the blocking conn operations when the test context is done.
+		go func() {
+			<-ctx.Done()
+			_ = conn.SetDeadline(time.Now())
+		}()
+
+		reader := bufio.NewReader(conn)
+		req, err := http.ReadRequest(reader)
+		if err != nil {
+			return
+		}
+		if req.Method != http.MethodConnect {
+			return
+		}
+		_ = req.Body.Close()
+
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			ProtoMajor: 1, ProtoMinor: 1,
+			Header: make(http.Header),
+		}
+		if err := resp.Write(conn); err != nil {
+			return
+		}
+
+		if afterConnect != nil {
+			afterConnect(ctx, conn)
+		}
+	}()
+
+	return ln
+}
 
 // ---------------------------------------------------------------------------
 // D4 — Port restriction
@@ -110,6 +175,17 @@ func TestD4_EmptyPortListAllowsAll(t *testing.T) {
 	}
 }
 
+// TestConnectPortWildcard verifies that using "*" in the allowed ports list
+// permits CONNECT to any port, including non-standard ones like 8080.
+func TestConnectPortWildcard(t *testing.T) {
+	raw := "CONNECT example.com:8080 HTTP/1.1\r\nHost: example.com:8080\r\n\r\n"
+	resp, _ := proxyRawRoundTrip(t, raw, func(p *ProxyUnderTest) {
+		p.SetConnectPorts([]string{"*"})
+	})
+	defer func() { _ = resp.Body.Close() }()
+	assertStatusCode(t, resp, http.StatusOK)
+}
+
 // ---------------------------------------------------------------------------
 // D6 — Payload gating: client payload must not reach upstream before 2xx
 // ---------------------------------------------------------------------------
@@ -131,8 +207,12 @@ func TestD6_ClientPayloadNotSentBeforeUpstream2xx(t *testing.T) {
 
 	upstreamReady := make(chan net.Conn, 1)
 
+	ctx := t.Context()
+
 	// Start a manual upstream server so we can interleave reading and writing
-	// with precise timing control.
+	// with precise timing control.  This test cannot use newMockConnectUpstream
+	// because it must inspect the upstream read buffer *before* writing the 200
+	// response — the timing of the 200 is deliberately part of the test.
 	upstreamLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("upstream listen: %v", err)
@@ -144,20 +224,30 @@ func TestD6_ClientPayloadNotSentBeforeUpstream2xx(t *testing.T) {
 		if err != nil {
 			return
 		}
+		defer func() { _ = conn.Close() }()
+
+		// Unblock blocking I/O when the test context is cancelled.
+		go func() {
+			<-ctx.Done()
+			_ = conn.SetDeadline(time.Now())
+		}()
 
 		reader := bufio.NewReader(conn)
 
 		// Read the forwarded CONNECT request.
 		req, err := http.ReadRequest(reader)
 		if err != nil {
-			_ = conn.Close()
 			return
 		}
 		_ = req.Body.Close()
 
 		// Delay before responding — this is the window during which a
 		// broken implementation would forward the client's TLS handshake.
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-time.After(100 * time.Millisecond):
+		case <-ctx.Done():
+			return
+		}
 
 		// Check whether the upstream bufio.Reader already has bytes beyond
 		// the CONNECT request (i.e. the client payload arrived early).
@@ -469,6 +559,112 @@ func TestD3_RFC9112_NoTransferEncodingInCONNECTResponse(t *testing.T) {
 
 	// D3: Transfer-Encoding MUST NOT appear in the CONNECT 2xx response.
 	assertHeaderAbsent(t, resp.Header, "Transfer-Encoding")
+}
+
+// ---------------------------------------------------------------------------
+// VR-006 — Idle timeout for CONNECT tunnels (issue #145)
+// ---------------------------------------------------------------------------
+
+// TestConnectTunnelIdleTimeout verifies that a CONNECT tunnel is closed by the
+// proxy when no data flows in either direction within the idle timeout window.
+func TestConnectTunnelIdleTimeout(t *testing.T) {
+	// Mock upstream that accepts CONNECT and then idles.
+	connectUpstream := newMockConnectUpstream(t, func(_ context.Context, conn net.Conn) {
+		// Idle — block until either data arrives or the test context cancels.
+		// The deadline-setter goroutine in newMockConnectUpstream ensures we
+		// unblock on context cancellation, so a plain Read is sufficient.
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf)
+	})
+
+	proxy := NewProxyUnderTest(t, connectUpstream.Addr().String())
+	proxy.SetIdleTimeout(100 * time.Millisecond)
+	t.Cleanup(proxy.Close)
+
+	raw := "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	assertStatusCode(t, resp, http.StatusOK)
+
+	// Tunnel should close within the idle timeout + slack.
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1)
+	_, err = conn.Read(buf)
+	if err == nil {
+		t.Fatal("expected connection to be closed due to idle timeout")
+	}
+}
+
+// TestConnectTunnelIdleTimeoutResetOnData verifies that active tunnels that
+// continuously exchange data are NOT interrupted by the idle timeout, because
+// each successful read resets the deadline.
+func TestConnectTunnelIdleTimeoutResetOnData(t *testing.T) {
+	// Mock upstream that echoes data back.
+	connectUpstream := newMockConnectUpstream(t, func(_ context.Context, conn net.Conn) {
+		// Echo data back until the connection is closed (including when the
+		// test context cancels and newMockConnectUpstream sets the deadline).
+		buf := make([]byte, 1024)
+		for {
+			n, err := conn.Read(buf)
+			if err != nil {
+				return
+			}
+			if _, err := conn.Write(buf[:n]); err != nil {
+				return
+			}
+		}
+	})
+
+	proxy := NewProxyUnderTest(t, connectUpstream.Addr().String())
+	proxy.SetIdleTimeout(200 * time.Millisecond)
+	t.Cleanup(proxy.Close)
+
+	raw := "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	assertStatusCode(t, resp, http.StatusOK)
+
+	// Send data every 100ms for 500ms total — all within the 200ms idle timeout
+	// because each send resets the deadline.
+	for range 5 {
+		time.Sleep(100 * time.Millisecond)
+		msg := []byte("ping")
+		if _, err := conn.Write(msg); err != nil {
+			t.Fatalf("write through tunnel: %v", err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		buf := make([]byte, len(msg))
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			t.Fatalf("read echo response: %v", err)
+		}
+		if string(buf) != "ping" {
+			t.Fatalf("echo mismatch: got %q", buf)
+		}
+	}
 }
 
 // isEOForClosed returns true if the error indicates a closed or EOF connection.

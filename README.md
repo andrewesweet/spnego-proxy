@@ -166,6 +166,63 @@ The project uses Go build tags to separate platform-specific authentication:
 - `auth_gokrb5.go` — Pure-Go gokrb5 password-based auth (all platforms)
 - `auth_notdarwin.go` — Non-macOS: returns error when native GSS is unavailable
 
+## Security considerations
+
+### Deployment model
+
+This proxy is designed to run as a per-user localhost tool, similar to
+[cntlm](https://cntlm.sourceforge.net/) and
+[px-proxy](https://github.com/genotrance/px). It accepts connections
+from any process that can reach its listener (default `127.0.0.1:8080`).
+When binding to a non-loopback address, use `-allowed-ips` to restrict
+access.
+
+### CONNECT tunneling
+
+CONNECT tunnels are restricted to port 443 by default. Use
+`-connect-ports` with a comma-separated list to allow additional ports,
+or `-connect-ports '*'` to allow all ports.
+
+### Idle tunnel timeout
+
+CONNECT tunnels are closed after 5 minutes of inactivity by default.
+Use `-idle-timeout` to adjust or `-idle-timeout 0` to disable.
+
+### Upstream TLS
+
+By default, proxy-to-upstream connections use plain TCP (matching cntlm
+and px-proxy behavior). Use `-upstream-tls` to encrypt the upstream
+link. A custom CA can be provided with `-upstream-ca`.
+
+### Kerberos configuration
+
+- Ensure `krb5.conf` is read-only and owned by root or the service
+  account.
+- Be aware that `KRB5_CONFIG` and `KRB5CCNAME` environment variables
+  affect authentication behavior.
+- Run the proxy in an environment where unauthorized modification of
+  these files and variables is not possible.
+
+### Password handling
+
+When using password-based authentication (`-user` flag), the password
+bytes are zeroed in memory immediately after being passed to the
+Kerberos client. The Kerberos library retains its own copy for TGT
+re-authentication; use a keytab in environments where this is a concern.
+
+### CGo boundary (macOS)
+
+The macOS GSS-API integration uses C code that has been reviewed for
+buffer safety. All buffers are bounds-checked (`snprintf`, explicit
+length limits) and resource cleanup is handled in all code paths.
+
+### Logging
+
+The proxy logs structured JSON via `slog`. Security-relevant events
+(authentication failures, CONNECT attempts, circuit breaker state
+changes, TE/CL conflicts) are logged but not classified separately from
+operational events.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

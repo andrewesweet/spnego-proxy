@@ -335,6 +335,25 @@ func TestGetTokenReturnsErrorWithInvalidCredentials(t *testing.T) {
 	}
 }
 
+func TestGetPasswordBytesCanBeZeroed(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "pw")
+	if err := os.WriteFile(tmpFile, []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pw, err := getPassword(tmpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(pw) != "secret" {
+		t.Fatalf("want %q, got %q", "secret", pw)
+	}
+	// Zero it — must not panic.
+	clear(pw)
+	if string(pw) != "\x00\x00\x00\x00\x00\x00" {
+		t.Error("password bytes were not zeroed")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Close tests (pre-existing)
 // ---------------------------------------------------------------------------

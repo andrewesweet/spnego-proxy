@@ -646,6 +646,21 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 	}
 }
 
+func TestRandomHexLength(t *testing.T) {
+	result := randomHex(4)
+	if len(result) != 8 {
+		t.Errorf("randomHex(4): want 8 hex chars, got %d (%q)", len(result), result)
+	}
+}
+
+func TestRandomHexUniqueness(t *testing.T) {
+	a := randomHex(4)
+	b := randomHex(4)
+	if a == b {
+		t.Errorf("randomHex produced identical values: %q", a)
+	}
+}
+
 func TestEnableKeepAlive(t *testing.T) {
 	// enableKeepAlive should configure keepalive on real TCP connections
 	// without error.
