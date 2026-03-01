@@ -65,6 +65,8 @@ func TestUpstreamTLSConnection(t *testing.T) {
 	}
 	defer func() { _ = tlsListener.Close() }()
 
+	ctx := t.Context()
+
 	// Accept one connection and respond with 200 OK.
 	go func() {
 		conn, err := tlsListener.Accept()
@@ -72,6 +74,13 @@ func TestUpstreamTLSConnection(t *testing.T) {
 			return
 		}
 		defer func() { _ = conn.Close() }()
+
+		// Unblock blocking I/O when the test context is cancelled.
+		go func() {
+			<-ctx.Done()
+			_ = conn.SetDeadline(time.Now())
+		}()
+
 		reader := bufio.NewReader(conn)
 		req, err := http.ReadRequest(reader)
 		if err != nil {
