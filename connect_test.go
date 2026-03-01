@@ -569,7 +569,7 @@ func TestD3_RFC9112_NoTransferEncodingInCONNECTResponse(t *testing.T) {
 // proxy when no data flows in either direction within the idle timeout window.
 func TestConnectTunnelIdleTimeout(t *testing.T) {
 	// Mock upstream that accepts CONNECT and then idles.
-	connectUpstream := newMockConnectUpstream(t, func(ctx context.Context, conn net.Conn) {
+	connectUpstream := newMockConnectUpstream(t, func(_ context.Context, conn net.Conn) {
 		// Idle — block until either data arrives or the test context cancels.
 		// The deadline-setter goroutine in newMockConnectUpstream ensures we
 		// unblock on context cancellation, so a plain Read is sufficient.

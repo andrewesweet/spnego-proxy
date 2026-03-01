@@ -943,8 +943,12 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 
 	slog.Debug("CONNECT tunnel established", "client_addr", clientAddr, "upstream_addr", proxyConn.RemoteAddr())
 	var wg sync.WaitGroup
-	wg.Go(func() { forwardHalf(proxyConn, reqReader, conn, conn.RemoteAddr(), proxyConn.RemoteAddr(), idleTimeout) })
-	wg.Go(func() { forwardHalf(conn, upstreamReader, proxyConn, proxyConn.RemoteAddr(), conn.RemoteAddr(), idleTimeout) })
+	wg.Go(func() {
+		forwardHalf(proxyConn, reqReader, conn, conn.RemoteAddr(), proxyConn.RemoteAddr(), idleTimeout)
+	})
+	wg.Go(func() {
+		forwardHalf(conn, upstreamReader, proxyConn, proxyConn.RemoteAddr(), conn.RemoteAddr(), idleTimeout)
+	})
 	wg.Wait()
 }
 
