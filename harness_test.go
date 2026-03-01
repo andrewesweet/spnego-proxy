@@ -216,6 +216,14 @@ func (p *ProxyUnderTest) SetAllowedIPs(ips []*net.IPNet) {
 	p.cfg.AllowedIPs = ips
 }
 
+// SetUpstreamTLS sets the upstream TLS configuration.
+// Thread-safe; may be called at any time after construction.
+func (p *ProxyUnderTest) SetUpstreamTLS(cfg UpstreamTLSConfig) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cfg.UpstreamTLS = cfg
+}
+
 // NewProxyUnderTest creates and starts a proxy listening on a dynamic port.
 // upstream is the address of the mock upstream to forward to.
 func NewProxyUnderTest(t *testing.T, upstream string) *ProxyUnderTest {

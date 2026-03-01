@@ -6,6 +6,8 @@ import (
 	"bufio"
 	"context"
 	crand "crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -58,6 +60,13 @@ func normalizeSPN(spn string, targetSep, alternateSep byte) string {
 	return spn // no recognized separator; return as-is
 }
 
+// UpstreamTLSConfig holds optional TLS settings for the upstream proxy connection.
+type UpstreamTLSConfig struct {
+	Enabled        bool
+	CAFile         string
+	InsecureVerify bool
+}
+
 // ForwardingConfig controls which forwarding headers the proxy injects into
 // outbound requests.
 //
@@ -86,6 +95,7 @@ type ProxyConfig struct {
 	ConnectPorts []string
 	AllowedIPs   []*net.IPNet
 	Forwarding   ForwardingConfig
+	UpstreamTLS  UpstreamTLSConfig
 }
 
 // randomHex returns n random bytes encoded as 2*n lowercase hex characters.
@@ -660,6 +670,41 @@ func forwardHalf(dst net.Conn, src io.Reader, fromAddr, toAddr net.Addr) {
 	}
 }
 
+// dialUpstream connects to the upstream proxy, optionally using TLS.
+func dialUpstream(addr string, timeout time.Duration, tlsCfg UpstreamTLSConfig) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: timeout}
+	if !tlsCfg.Enabled {
+		return dialer.Dial("tcp", addr)
+	}
+
+	tc := &tls.Config{MinVersion: tls.VersionTLS12}
+
+	if tlsCfg.CAFile != "" {
+		caCert, err := os.ReadFile(tlsCfg.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CA file: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse CA certificate from %s", tlsCfg.CAFile)
+		}
+		tc.RootCAs = pool
+	}
+
+	if tlsCfg.InsecureVerify {
+		tc.InsecureSkipVerify = true //nolint:gosec // user explicitly opted in via -upstream-tls-insecure
+		slog.Warn("upstream TLS certificate verification is disabled")
+	}
+
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	tc.ServerName = host
+
+	return tls.DialWithDialer(dialer, "tcp", addr, tc)
+}
+
 // handleClient handles a single client connection. cfg groups all
 // non-connection parameters including upstream address, token provider,
 // timeouts, CONNECT port restrictions (D4, RFC 9110 §9.3.6), and
@@ -772,7 +817,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	injectVia(req.Header, req.Proto, cfg.Pseudonym)
 
 	// Now that the request is validated and prepared, dial upstream.
-	proxyConn, err := net.DialTimeout("tcp", cfg.Upstream, cfg.DialTimeout)
+	proxyConn, err := dialUpstream(cfg.Upstream, cfg.DialTimeout, cfg.UpstreamTLS)
 	if err != nil {
 		var ne net.Error
 		if errors.As(err, &ne) && ne.Timeout() {
@@ -909,6 +954,13 @@ func main() {
 	forwardedFlag := flag.Bool("forwarded", false, "inject RFC 7239 Forwarded header with obfuscated client identifier")
 	xForwardedForFlag := flag.Bool("x-forwarded-for", false, "inject X-Forwarded-For, X-Forwarded-Proto, and X-Forwarded-Host headers")
 
+	upstreamTLS := flag.Bool("upstream-tls", false,
+		"use TLS for upstream proxy connection")
+	upstreamCA := flag.String("upstream-ca", "",
+		"path to CA certificate for upstream TLS verification")
+	upstreamTLSInsecure := flag.Bool("upstream-tls-insecure", false,
+		"skip TLS certificate verification for upstream (not recommended)")
+
 	// Flags for gokrb5 password-based auth (optional on macOS, required on other platforms)
 	cfgFile := flag.String("config", "", "kerberos config file")
 	user := flag.String("user", "", "kerberos user name")
@@ -971,6 +1023,11 @@ func main() {
 		Forwarding: ForwardingConfig{
 			ForwardedEnabled:     *forwardedFlag,
 			XForwardedForEnabled: *xForwardedForFlag,
+		},
+		UpstreamTLS: UpstreamTLSConfig{
+			Enabled:        *upstreamTLS,
+			CAFile:         *upstreamCA,
+			InsecureVerify: *upstreamTLSInsecure,
 		},
 	}
 
