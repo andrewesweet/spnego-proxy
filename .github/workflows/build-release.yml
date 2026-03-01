@@ -48,10 +48,17 @@ jobs:
       - name: Verify GSS framework linkage
         run: otool -L spnego-proxy-darwin-${{ matrix.arch }} | grep -i GSS
 
+      - name: Create tar.gz archive
+        run: |
+          mkdir -p staging
+          cp spnego-proxy-darwin-${{ matrix.arch }} staging/spnego-proxy
+          cp LICENSE README.md staging/
+          tar -czf spnego-proxy_${{ github.ref_name }}_darwin_${{ matrix.arch }}.tar.gz -C staging .
+
       - name: Attest build provenance
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
-          subject-path: spnego-proxy-darwin-${{ matrix.arch }}
+          subject-path: spnego-proxy_${{ github.ref_name }}_darwin_${{ matrix.arch }}.tar.gz
 
       - name: Generate SBOM
         uses: anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11 # v0.23.0
@@ -65,14 +72,14 @@ jobs:
       - name: Attest SBOM
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
-          subject-path: spnego-proxy-darwin-${{ matrix.arch }}
+          subject-path: spnego-proxy_${{ github.ref_name }}_darwin_${{ matrix.arch }}.tar.gz
           sbom-path: spnego-proxy-darwin-${{ matrix.arch }}.sbom.spdx.json
 
-      - name: Upload binary
+      - name: Upload archive
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: spnego-proxy-darwin-${{ matrix.arch }}
-          path: spnego-proxy-darwin-${{ matrix.arch }}
+          name: spnego-proxy_${{ github.ref_name }}_darwin_${{ matrix.arch }}.tar.gz
+          path: spnego-proxy_${{ github.ref_name }}_darwin_${{ matrix.arch }}.tar.gz
 
       - name: Upload SBOM
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
@@ -112,10 +119,17 @@ jobs:
       - name: Verify binary
         run: file spnego-proxy-linux-amd64
 
+      - name: Create tar.gz archive
+        run: |
+          mkdir -p staging
+          cp spnego-proxy-linux-amd64 staging/spnego-proxy
+          cp LICENSE README.md staging/
+          tar -czf spnego-proxy_${{ github.ref_name }}_linux_amd64.tar.gz -C staging .
+
       - name: Attest build provenance
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
-          subject-path: spnego-proxy-linux-amd64
+          subject-path: spnego-proxy_${{ github.ref_name }}_linux_amd64.tar.gz
 
       - name: Generate SBOM
         uses: anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11 # v0.23.0
@@ -129,14 +143,14 @@ jobs:
       - name: Attest SBOM
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
-          subject-path: spnego-proxy-linux-amd64
+          subject-path: spnego-proxy_${{ github.ref_name }}_linux_amd64.tar.gz
           sbom-path: spnego-proxy-linux-amd64.sbom.spdx.json
 
-      - name: Upload binary
+      - name: Upload archive
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: spnego-proxy-linux-amd64
-          path: spnego-proxy-linux-amd64
+          name: spnego-proxy_${{ github.ref_name }}_linux_amd64.tar.gz
+          path: spnego-proxy_${{ github.ref_name }}_linux_amd64.tar.gz
 
       - name: Upload SBOM
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
