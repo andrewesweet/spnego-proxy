@@ -119,25 +119,13 @@ Go 1.25. Use modern Go idioms (wg.Go, SplitSeq, t.Context).
 
 ## Release Process
 
-### Creating a Release
+See `CONTRIBUTING.md` § Releasing for the full human-oriented guide.
 
-1. Ensure all changes are merged to `master`
-2. Preview: `git cliff --bumped-version` and `git cliff --unreleased`
-3. Tag: `git tag vX.Y.Z && git push origin vX.Y.Z`
-4. The Release workflow automatically:
-   - Builds binaries for darwin/amd64, darwin/arm64, linux/amd64
-   - Packages each as `spnego-proxy_vX.Y.Z_<os>_<arch>.tar.gz` with LICENSE and README
-   - Generates SBOM (SPDX JSON) for each binary
-   - Creates build provenance and SBOM attestations
-   - Generates SHA-256 checksums
-   - Publishes a GitHub release with all assets
+Key details for AI context:
 
-### Verifying a Release
-
-    gh attestation verify spnego-proxy_v0.1.0_linux_amd64.tar.gz -R andrewesweet/spnego-proxy
-
-### GitHub Immutable Releases
-
-Once published, release assets and tags cannot be modified or deleted.
-
-**One-time admin setup:** Settings > Releases > Enable "Release immutability"
+- Release binaries embed version and commit via ldflags (`-X main.version`, `-X main.commit`)
+- The `-version` flag prints version info; dev builds report `(devel)`
+- Archives are named `spnego-proxy_<tag>_<os>_<arch>.tar.gz`
+- No GoReleaser — macOS builds require `CGO_ENABLED=1` for native GSS framework
+- Quick release: `git cliff --tag vX.Y.Z -o CHANGELOG.md && git tag vX.Y.Z && git push origin vX.Y.Z`
+- Verify: `gh attestation verify <archive> -R andrewesweet/spnego-proxy`
