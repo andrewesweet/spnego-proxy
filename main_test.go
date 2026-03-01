@@ -286,11 +286,9 @@ func TestShutdownDrainsInFlightConnections(t *testing.T) {
 				}
 				continue
 			}
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				handleClient(conn, cfg)
-			}()
+			})
 		}
 	}()
 
@@ -389,11 +387,9 @@ func TestShutdownDrainTimeout(t *testing.T) {
 				}
 				continue
 			}
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				handleClient(conn, cfg)
-			}()
+			})
 		}
 	}()
 

@@ -552,11 +552,9 @@ func closeWrite(conn net.Conn) {
 }
 
 // forwardHalf copies data from src to dst, calling CloseWrite on dst when
-// done. It logs the start, completion, and any errors. wg.Done is deferred
-// so callers can use a WaitGroup to synchronise the two halves of a
-// bidirectional forwarding pair.
-func forwardHalf(wg *sync.WaitGroup, dst net.Conn, src io.Reader, fromAddr, toAddr net.Addr) {
-	defer wg.Done()
+// done. It logs the start, completion, and any errors. Callers use
+// wg.Go to launch forwardHalf so the WaitGroup is managed automatically.
+func forwardHalf(dst net.Conn, src io.Reader, fromAddr, toAddr net.Addr) {
 	defer closeWrite(dst)
 	slog.Debug("forward start", "from", fromAddr, "to", toAddr)
 	defer slog.Debug("forward done", "from", fromAddr, "to", toAddr)
@@ -695,11 +693,9 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go forwardHalf(&wg, proxyConn, reqReader, conn.RemoteAddr(), proxyConn.RemoteAddr())
+	wg.Go(func() { forwardHalf(proxyConn, reqReader, conn.RemoteAddr(), proxyConn.RemoteAddr()) })
 	// Upstream→client: parse response headers to inject Via, then relay body.
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		defer closeWrite(conn)
 		slog.Debug("forward start", "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
 		defer slog.Debug("forward done", "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
@@ -716,7 +712,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
 			return
 		}
-	}()
+	})
 	wg.Wait()
 }
 
@@ -756,9 +752,8 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 
 	slog.Debug("CONNECT tunnel established", "client_addr", clientAddr, "upstream_addr", proxyConn.RemoteAddr())
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go forwardHalf(&wg, proxyConn, reqReader, conn.RemoteAddr(), proxyConn.RemoteAddr())
-	go forwardHalf(&wg, conn, upstreamReader, proxyConn.RemoteAddr(), conn.RemoteAddr())
+	wg.Go(func() { forwardHalf(proxyConn, reqReader, conn.RemoteAddr(), proxyConn.RemoteAddr()) })
+	wg.Go(func() { forwardHalf(conn, upstreamReader, proxyConn.RemoteAddr(), conn.RemoteAddr()) })
 	wg.Wait()
 }
 
@@ -860,11 +855,9 @@ func main() {
 				slog.Error("accept error", "error", err)
 				continue
 			}
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				handleClient(conn, cfg)
-			}()
+			})
 		}
 	}()
 

@@ -316,33 +316,30 @@ func TestI1I2_ConcurrentConnectionsClosed(t *testing.T) {
 	errs := make(chan error, numClients)
 
 	for i := range numClients {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-
+		wg.Go(func() {
 			conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
 			if err != nil {
-				errs <- fmt.Errorf("client %d: dial: %w", idx, err)
+				errs <- fmt.Errorf("client %d: dial: %w", i, err)
 				return
 			}
 			defer func() { _ = conn.Close() }()
 
-			raw := fmt.Sprintf("GET http://example.com/concurrent/%d HTTP/1.0\r\nHost: example.com\r\n\r\n", idx)
+			raw := fmt.Sprintf("GET http://example.com/concurrent/%d HTTP/1.0\r\nHost: example.com\r\n\r\n", i)
 			if _, writeErr := conn.Write([]byte(raw)); writeErr != nil {
-				errs <- fmt.Errorf("client %d: write: %w", idx, writeErr)
+				errs <- fmt.Errorf("client %d: write: %w", i, writeErr)
 				return
 			}
 
 			resp, readErr := http.ReadResponse(bufio.NewReader(conn), nil)
 			if readErr != nil {
-				errs <- fmt.Errorf("client %d: read response: %w", idx, readErr)
+				errs <- fmt.Errorf("client %d: read response: %w", i, readErr)
 				return
 			}
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
 
 			if resp.StatusCode != http.StatusOK {
-				errs <- fmt.Errorf("client %d: want 200 OK, got %d", idx, resp.StatusCode)
+				errs <- fmt.Errorf("client %d: want 200 OK, got %d", i, resp.StatusCode)
 				return
 			}
 
@@ -351,9 +348,9 @@ func TestI1I2_ConcurrentConnectionsClosed(t *testing.T) {
 			buf := make([]byte, 1)
 			n, connErr := conn.Read(buf)
 			if n > 0 || connErr == nil {
-				errs <- fmt.Errorf("client %d: expected closed connection, got %d bytes, err=%w", idx, n, connErr)
+				errs <- fmt.Errorf("client %d: expected closed connection, got %d bytes, err=%w", i, n, connErr)
 			}
-		}(i)
+		})
 	}
 
 	wg.Wait()

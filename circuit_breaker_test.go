@@ -165,12 +165,10 @@ func TestCircuitBreakerHalfOpenRejectsConcurrentRequests(t *testing.T) {
 	errs := make([]error, concurrency)
 	tokens := make([]string, concurrency)
 	var wg sync.WaitGroup
-	wg.Add(concurrency)
 	for i := range concurrency {
-		go func(idx int) {
-			defer wg.Done()
-			tokens[idx], errs[idx] = cb.GetToken()
-		}(i)
+		wg.Go(func() {
+			tokens[i], errs[i] = cb.GetToken()
+		})
 	}
 	wg.Wait()
 
