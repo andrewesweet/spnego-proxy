@@ -87,10 +87,18 @@ jobs:
 
       - name: Fetch tags
         run: |
+          echo "=== Git version ==="
+          git --version
+          echo "=== Remote config ==="
+          git remote -v
+          git config --get-regexp 'remote\.origin\.' || true
+          echo "=== Attempting tag fetch ==="
           git config --unset-all remote.origin.tagOpt || true
-          git fetch origin '+refs/tags/*:refs/tags/*'
-          echo "Tags found:"
+          git fetch --verbose origin '+refs/tags/*:refs/tags/*' 2>&1
+          echo "=== Tags after fetch ==="
           git tag -l 'v*'
+          echo "=== All refs ==="
+          git for-each-ref refs/tags/ --format='%(refname)' | head -10
 
       - name: Install git-cliff
         uses: taiki-e/install-action@68675c5a5f1a6950c3975d33f3ae0ef155e5bf3d # v2.68.15
