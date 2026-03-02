@@ -82,6 +82,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          fetch-tags: true
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Install git-cliff
@@ -92,7 +93,8 @@ jobs:
       - name: Compute next version
         id: version
         run: |
-          raw=$(git cliff --bumped-version 2>/dev/null || true)
+          git tag -l 'v*'
+          raw=$(git cliff --bumped-version || true)
           latest=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
 
           if [ -z "${raw}" ]; then
