@@ -85,6 +85,9 @@ jobs:
           fetch-tags: true
           token: ${{ steps.app-token.outputs.token }}
 
+      - name: Fetch tags
+        run: git fetch --tags origin
+
       - name: Install git-cliff
         uses: taiki-e/install-action@68675c5a5f1a6950c3975d33f3ae0ef155e5bf3d # v2.68.15
         with:
