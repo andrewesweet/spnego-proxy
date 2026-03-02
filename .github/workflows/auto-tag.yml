@@ -88,8 +88,8 @@ jobs:
       - name: Fetch tags
         run: |
           git config --unset-all remote.origin.tagOpt || true
-          git fetch --tags origin
-          echo "Tags found: $(git tag -l 'v*' | wc -l)"
+          git fetch origin '+refs/tags/*:refs/tags/*'
+          echo "Tags found:"
           git tag -l 'v*'
 
       - name: Install git-cliff
