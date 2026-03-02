@@ -86,19 +86,24 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Fetch tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          echo "=== Git version ==="
-          git --version
-          echo "=== Remote config ==="
-          git remote -v
-          git config --get-regexp 'remote\.origin\.' || true
-          echo "=== Attempting tag fetch ==="
-          git config --unset-all remote.origin.tagOpt || true
-          git fetch --verbose origin '+refs/tags/*:refs/tags/*' 2>&1
+          echo "=== ls-remote with configured credentials ==="
+          git ls-remote --tags origin 2>&1 | head -10
+
+          echo "=== ls-remote with GITHUB_TOKEN ==="
+          git ls-remote --tags "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" 2>&1 | head -10
+
+          echo "=== ls-remote with App token ==="
+          git ls-remote --tags "https://x-access-token:${APP_TOKEN}@github.com/${{ github.repository }}.git" 2>&1 | head -10
+
+          echo "=== Fetching with App token URL ==="
+          git fetch "https://x-access-token:${APP_TOKEN}@github.com/${{ github.repository }}.git" '+refs/tags/*:refs/tags/*' 2>&1
+
           echo "=== Tags after fetch ==="
           git tag -l 'v*'
-          echo "=== All refs ==="
-          git for-each-ref refs/tags/ --format='%(refname)' | head -10
 
       - name: Install git-cliff
         uses: taiki-e/install-action@68675c5a5f1a6950c3975d33f3ae0ef155e5bf3d # v2.68.15
