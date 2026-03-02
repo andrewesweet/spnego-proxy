@@ -22,27 +22,51 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
+          # Workflows that run on every push to master
           required_workflows=(
             "Build and Test"
             "golangci-lint"
             "govulncheck"
-            "CodeQL"
             "Lint Workflows"
             "Lint Markdown"
           )
 
-          for workflow in "${required_workflows[@]}"; do
+          # Path-filtered workflows that may not run for every commit.
+          # If they ran, they must have succeeded; if absent, that's OK.
+          optional_workflows=(
+            "CodeQL"
+          )
+
+          check_workflow() {
+            local workflow="$1" required="$2"
             echo "Checking: ${workflow}"
             conclusion=$(gh api \
               "repos/${{ github.repository }}/actions/runs?head_sha=${SHA}&status=completed" \
               --jq ".workflow_runs[] | select(.name == \"${workflow}\") | .conclusion" \
               | head -1)
 
+            if [ -z "${conclusion}" ]; then
+              if [ "${required}" = "true" ]; then
+                echo "::error::Required workflow '${workflow}' not found for SHA ${SHA}"
+                return 1
+              fi
+              echo "  -> not found (optional, skipping)"
+              return 0
+            fi
+
             if [ "${conclusion}" != "success" ]; then
-              echo "::error::Required workflow '${workflow}' did not succeed (got: ${conclusion:-not found})"
-              exit 1
+              echo "::error::Workflow '${workflow}' did not succeed (got: ${conclusion})"
+              return 1
             fi
             echo "  -> ${conclusion}"
+          }
+
+          for workflow in "${required_workflows[@]}"; do
+            check_workflow "${workflow}" true
+          done
+
+          for workflow in "${optional_workflows[@]}"; do
+            check_workflow "${workflow}" false
           done
 
           echo "All required CI checks passed."
