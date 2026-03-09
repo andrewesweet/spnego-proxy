@@ -87,3 +87,42 @@ jobs:
         uses: github/codeql-action/analyze@0d579ffd059c29b07949a3cce3983f0780820c98 # v4.32.6
         with:
           category: "/language:c-cpp"
+
+  analyze-c-cpp-stub:
+    name: Analyze (c-cpp)
+    needs: check-c-changes
+    if: >-
+      !cancelled() &&
+      github.event_name == 'pull_request' &&
+      needs.check-c-changes.outputs.changed != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - name: Create empty SARIF
+        run: |
+          cat > "$RUNNER_TEMP/empty.sarif" << 'SARIF'
+          {
+            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
+            "version": "2.1.0",
+            "runs": [
+              {
+                "tool": {
+                  "driver": {
+                    "name": "CodeQL",
+                    "version": "0.0.0",
+                    "rules": []
+                  }
+                },
+                "results": []
+              }
+            ]
+          }
+          SARIF
+
+      - name: Upload empty SARIF for c-cpp
+        uses: github/codeql-action/upload-sarif@0d579ffd059c29b07949a3cce3983f0780820c98 # v4.32.6
+        with:
+          sarif_file: ${{ runner.temp }}/empty.sarif
+          category: "/language:c-cpp"
