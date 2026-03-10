@@ -58,9 +58,9 @@ func TestNoProxyMatcher_Wildcard_StarDot(t *testing.T) {
 	}{
 		{"foo.corp.com", true},
 		{"bar.corp.com", true},
-		{"corp.com", true},          // base domain itself must also match
-		{"CORP.COM", true},          // case insensitive
-		{"foo.corp.com:443", true},  // with port
+		{"corp.com", true},         // base domain itself must also match
+		{"CORP.COM", true},         // case insensitive
+		{"foo.corp.com:443", true}, // with port
 		{"nested.foo.corp.com", true},
 		{"notcorp.com", false},
 		{"corp.com.evil.com", false},
@@ -87,7 +87,7 @@ func TestNoProxyMatcher_Wildcard_LeadingDot(t *testing.T) {
 	}{
 		{"foo.corp.com", true},
 		{"bar.corp.com", true},
-		{"corp.com", true},         // base domain itself must also match
+		{"corp.com", true}, // base domain itself must also match
 		{"nested.foo.corp.com", true},
 		{"corp.com:8080", true},
 		{"notcorp.com", false},
