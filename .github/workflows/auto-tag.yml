@@ -40,10 +40,27 @@ jobs:
           check_workflow() {
             local workflow="$1" required="$2"
             echo "Checking: ${workflow}"
-            conclusion=$(gh api \
-              "repos/${{ github.repository }}/actions/runs?head_sha=${SHA}&status=completed" \
-              --jq ".workflow_runs[] | select(.name == \"${workflow}\") | .conclusion" \
-              | head -1)
+
+            local conclusion="" attempt
+            for attempt in 1 2 3 4 5; do
+              conclusion=$(gh api \
+                "repos/${{ github.repository }}/actions/runs?head_sha=${SHA}&status=completed" \
+                --jq ".workflow_runs[] | select(.name == \"${workflow}\") | .conclusion" \
+                | head -1)
+
+              if [ -n "${conclusion}" ]; then
+                break
+              fi
+
+              if [ "${required}" != "true" ]; then
+                break
+              fi
+
+              if [ "${attempt}" -lt 5 ]; then
+                echo "  -> not found yet, retrying in 15s (attempt ${attempt}/5)..."
+                sleep 15
+              fi
+            done
 
             if [ -z "${conclusion}" ]; then
               if [ "${required}" = "true" ]; then
