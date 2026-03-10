@@ -14,6 +14,16 @@ for Linux/Windows or when explicitly requested on macOS.
 
 ## Installation
 
+### Homebrew (macOS)
+
+```bash
+brew tap andrewesweet/spnego-proxy
+brew install spnego-proxy
+```
+
+The formula builds with `CGO_ENABLED=1` to link against the native GSS.framework
+for SPNEGO authentication.
+
 ### From source (requires Go 1.25+)
 
 ```bash
