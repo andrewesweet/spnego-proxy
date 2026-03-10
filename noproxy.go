@@ -13,7 +13,6 @@ const (
 	ruleWildcard
 	ruleIP
 	ruleCIDR
-	ruleAll // bare "*" — matches every host
 )
 
 type noProxyRule struct {
@@ -43,9 +42,7 @@ func NewNoProxyMatcher(patterns string) *NoProxyMatcher {
 			continue
 		}
 		rule := noProxyRule{raw: pat}
-		if pat == "*" {
-			rule.kind = ruleAll
-		} else if _, network, err := net.ParseCIDR(pat); err == nil {
+		if _, network, err := net.ParseCIDR(pat); err == nil {
 			rule.kind = ruleCIDR
 			rule.network = network
 		} else if ip := net.ParseIP(pat); ip != nil {
@@ -80,8 +77,6 @@ func (m *NoProxyMatcher) Match(host string) (matched bool, pattern string) {
 
 	for _, rule := range m.rules {
 		switch rule.kind {
-		case ruleAll:
-			return true, rule.raw
 		case ruleHostname:
 			if host == rule.host {
 				return true, rule.raw
