@@ -1,0 +1,78 @@
+name: Update Homebrew Formula
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+concurrency:
+  group: homebrew-update
+  cancel-in-progress: false
+
+jobs:
+  update-formula:
+    if: "!github.event.release.prerelease"
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Compute source tarball SHA256
+        id: sha256
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          url="https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz"
+          sha256=$(curl -sfL "${url}" | sha256sum | cut -d ' ' -f 1)
+          if [ -z "${sha256}" ] || [ "${sha256}" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]; then
+            echo "::error::Failed to download tarball or got empty response"
+            exit 1
+          fi
+          {
+            echo "sha256=${sha256}"
+            echo "url=${url}"
+            echo "version=${TAG#v}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up SSH for deploy key
+        env:
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_DEPLOY_KEY }}
+        run: |
+          if [ -z "${DEPLOY_KEY}" ]; then
+            echo "::error::HOMEBREW_DEPLOY_KEY secret is not configured"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          echo "${DEPLOY_KEY}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          git config --global core.sshCommand "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes"
+
+      - name: Clone tap repo
+        run: git clone git@github.com:andrewesweet/homebrew-spnego-proxy.git /tmp/tap
+
+      - name: Update formula
+        env:
+          VERSION: ${{ steps.sha256.outputs.version }}
+          URL: ${{ steps.sha256.outputs.url }}
+          SHA256: ${{ steps.sha256.outputs.sha256 }}
+        run: |
+          cd /tmp/tap
+          sed -i "s|^\(  url \).*|  url \"${URL}\"|" Formula/spnego-proxy.rb
+          sed -i "s|^\(  sha256 \).*|  sha256 \"${SHA256}\"|" Formula/spnego-proxy.rb
+
+      - name: Commit and push
+        env:
+          VERSION: ${{ steps.sha256.outputs.version }}
+        run: |
+          cd /tmp/tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/spnego-proxy.rb
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "feat: update spnego-proxy to ${VERSION}"
+          git push origin main
+
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
