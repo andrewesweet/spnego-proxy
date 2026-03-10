@@ -137,7 +137,6 @@ type ProxyConfig struct {
 	IdleTimeout  time.Duration
 	ConnectPorts []string
 	AllowedIPs   []*net.IPNet
-	NoProxy      *NoProxyMatcher
 	Forwarding   ForwardingConfig
 	UpstreamTLS  UpstreamTLSConfig
 }
@@ -744,116 +743,6 @@ func dialUpstream(addr string, tlsCfg UpstreamTLSConfig) (net.Conn, error) {
 	return tls.DialWithDialer(dialer, "tcp", addr, tc)
 }
 
-// handleDirectHTTP forwards an HTTP request directly to the target host,
-// bypassing the upstream proxy. Used for noproxy bypass of non-CONNECT
-// requests. The request is converted from absolute-URI (proxy form) to
-// origin form.
-func handleDirectHTTP(conn net.Conn, req *http.Request, reqReader *bufio.Reader, cfg ProxyConfig, clientAddr string) {
-	target := req.Host
-	if _, _, err := net.SplitHostPort(target); err != nil {
-		target = net.JoinHostPort(target, "80")
-	}
-
-	dialer := net.Dialer{Timeout: cfg.DialTimeout}
-	targetConn, err := dialer.Dial("tcp", target)
-	if err != nil {
-		var ne net.Error
-		if errors.As(err, &ne) && ne.Timeout() {
-			slog.Error("noproxy direct dial timeout", "error", err, "target", target, "client_addr", clientAddr)
-			writeHTTPError(conn, errConnectionTimeout)
-		} else {
-			slog.Error("noproxy direct dial failed", "error", err, "target", target, "client_addr", clientAddr)
-			writeHTTPError(conn, errConnectionRefused)
-		}
-		return
-	}
-	defer func() { _ = targetConn.Close() }()
-
-	if cfg.KeepAlive > 0 {
-		enableKeepAlive(conn, cfg.KeepAlive)
-		enableKeepAlive(targetConn, cfg.KeepAlive)
-	}
-
-	// Write request in origin form (not proxy form).
-	if err := req.Write(targetConn); err != nil {
-		slog.Error("noproxy write request failed", "error", err, "target", target, "client_addr", clientAddr)
-		writeHTTPError(conn, errConnectionTerminated)
-		return
-	}
-
-	var wg sync.WaitGroup
-	wg.Go(func() { forwardHalf(targetConn, reqReader, nil, conn.RemoteAddr(), targetConn.RemoteAddr(), 0) })
-	wg.Go(func() {
-		defer closeWrite(conn)
-		upstreamReader := bufio.NewReader(targetConn)
-		resp, err := http.ReadResponse(upstreamReader, req)
-		if err != nil {
-			slog.Error("noproxy read response failed", "error", err, "target", target, "client_addr", clientAddr)
-			return
-		}
-		defer func() { _ = resp.Body.Close() }()
-		injectVia(resp.Header, resp.Proto, cfg.Pseudonym)
-		if err := resp.Write(conn); err != nil {
-			slog.Error("noproxy forward response failed", "error", err, "target", target, "client_addr", clientAddr)
-		}
-	})
-	wg.Wait()
-}
-
-// handleDirectConnect establishes a direct TCP tunnel to the target host,
-// bypassing the upstream proxy. Used for noproxy bypass of CONNECT requests.
-func handleDirectConnect(conn net.Conn, req *http.Request, reqReader *bufio.Reader, cfg ProxyConfig, clientAddr string) {
-	target := req.Host
-	if _, _, err := net.SplitHostPort(target); err != nil {
-		target = net.JoinHostPort(target, "443")
-	}
-
-	dialer := net.Dialer{Timeout: cfg.DialTimeout}
-	targetConn, err := dialer.Dial("tcp", target)
-	if err != nil {
-		var ne net.Error
-		if errors.As(err, &ne) && ne.Timeout() {
-			slog.Error("noproxy direct CONNECT dial timeout", "error", err, "target", target, "client_addr", clientAddr)
-			writeHTTPError(conn, errConnectionTimeout)
-		} else {
-			slog.Error("noproxy direct CONNECT dial failed", "error", err, "target", target, "client_addr", clientAddr)
-			writeHTTPError(conn, errConnectionRefused)
-		}
-		return
-	}
-	defer func() { _ = targetConn.Close() }()
-
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Status:     "200 Connection Established",
-		Proto:      "HTTP/1.1",
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     make(http.Header),
-		Body:       http.NoBody,
-	}
-	injectVia(resp.Header, req.Proto, cfg.Pseudonym)
-	if err := resp.Write(conn); err != nil {
-		slog.Error("noproxy CONNECT response write failed", "error", err, "target", target, "client_addr", clientAddr)
-		return
-	}
-
-	if cfg.KeepAlive > 0 {
-		enableKeepAlive(conn, cfg.KeepAlive)
-		enableKeepAlive(targetConn, cfg.KeepAlive)
-	}
-
-	slog.Debug("noproxy CONNECT tunnel established", "target", target, "client_addr", clientAddr)
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		forwardHalf(targetConn, reqReader, conn, conn.RemoteAddr(), targetConn.RemoteAddr(), cfg.IdleTimeout)
-	})
-	wg.Go(func() {
-		forwardHalf(conn, bufio.NewReader(targetConn), targetConn, targetConn.RemoteAddr(), conn.RemoteAddr(), cfg.IdleTimeout)
-	})
-	wg.Wait()
-}
-
 // handleClient handles a single client connection. cfg groups all
 // non-connection parameters including upstream address, token provider,
 // timeouts, CONNECT port restrictions (D4, RFC 9110 §9.3.6), and
@@ -951,23 +840,6 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	// H1–H4: inject optional forwarding headers after hop-by-hop sanitization
 	// so that any client-sent hop-by-hop headers are stripped first.
 	injectForwardingHeaders(req, clientAddr, cfg.Forwarding)
-
-	// Noproxy bypass: connect directly to the target host when it matches
-	// a -noproxy / NO_PROXY pattern. Skips SPNEGO token acquisition and
-	// Proxy-Authorization injection.
-	if cfg.NoProxy != nil {
-		if matched, pattern := cfg.NoProxy.Match(req.Host); matched {
-			slog.Debug("noproxy bypass", "host", req.Host, "pattern", pattern, "method", req.Method, "client_addr", clientAddr)
-			// Via still injected per RFC 9110 §7.6.3.
-			injectVia(req.Header, req.Proto, cfg.Pseudonym)
-			if req.Method == http.MethodConnect {
-				handleDirectConnect(conn, req, reqReader, cfg, clientAddr)
-			} else {
-				handleDirectHTTP(conn, req, reqReader, cfg, clientAddr)
-			}
-			return
-		}
-	}
 
 	token, err := cfg.Provider.GetToken()
 	if err != nil {
@@ -1116,8 +988,6 @@ func main() {
 	connectPortsFlag := flag.String("connect-ports", "443", "comma-separated list of ports allowed for CONNECT tunneling (default: 443; use "+connectPortWildcard+" for all)")
 	allowedIPs := flag.String("allowed-ips", "",
 		"comma-separated list of allowed client IPs or CIDR ranges (empty = allow all; recommended when binding to non-loopback)")
-	noProxyFlag := flag.String("noproxy", "",
-		"comma-separated list of hosts/domains/IPs/CIDRs to bypass upstream proxy (supports *.domain, .domain, CIDR; also reads NO_PROXY/no_proxy env vars)")
 	cbThreshold := flag.Uint("cb-threshold", uint(cbConsecutiveFailures),
 		"consecutive failures before circuit breaker opens")
 	cbTimeoutFlag := flag.Duration("cb-timeout", cbTimeout,
@@ -1188,16 +1058,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	noProxyPatterns := resolveNoProxy(*noProxyFlag)
-	noProxy := NewNoProxyMatcher(noProxyPatterns)
-	if noProxyPatterns != "" {
-		source := "flag"
-		if *noProxyFlag == "" {
-			source = "env"
-		}
-		slog.Info("noproxy bypass configured", "patterns", noProxyPatterns, "source", source)
-	}
-
 	// Build the upstream TLS config once at startup (avoids re-reading CA file per connection).
 	upstreamTLSCfg := UpstreamTLSConfig{
 		Enabled:            *upstreamTLS,
@@ -1223,7 +1083,6 @@ func main() {
 		IdleTimeout:  *idleTimeout,
 		ConnectPorts: connectPorts,
 		AllowedIPs:   allowList,
-		NoProxy:      noProxy,
 		Forwarding: ForwardingConfig{
 			ForwardedEnabled:     *forwardedFlag,
 			XForwardedForEnabled: *xForwardedForFlag,

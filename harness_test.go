@@ -216,14 +216,6 @@ func (p *ProxyUnderTest) SetAllowedIPs(ips []*net.IPNet) {
 	p.cfg.AllowedIPs = ips
 }
 
-// SetNoProxy sets the noproxy matcher.
-// Thread-safe; may be called at any time after construction.
-func (p *ProxyUnderTest) SetNoProxy(m *NoProxyMatcher) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.cfg.NoProxy = m
-}
-
 // SetUpstreamTLS sets the upstream TLS configuration.
 // Thread-safe; may be called at any time after construction.
 // The existing pre-allocated Dialer is preserved unless the caller
