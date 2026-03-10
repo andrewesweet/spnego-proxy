@@ -1118,7 +1118,7 @@ func main() {
 	allowedIPs := flag.String("allowed-ips", "",
 		"comma-separated list of allowed client IPs or CIDR ranges (empty = allow all; recommended when binding to non-loopback)")
 	noProxyFlag := flag.String("noproxy", "",
-		"comma-separated list of hosts/domains/IPs/CIDRs to bypass upstream proxy (supports *.domain, .domain, CIDR; also reads NO_PROXY/no_proxy env vars)")
+		"comma-separated list of hosts/domains/IPs/CIDRs to bypass upstream proxy (supports *.domain, .domain, CIDR, * for all; also reads NO_PROXY/no_proxy env vars)")
 	cbThreshold := flag.Uint("cb-threshold", uint(cbConsecutiveFailures),
 		"consecutive failures before circuit breaker opens")
 	cbTimeoutFlag := flag.Duration("cb-timeout", cbTimeout,

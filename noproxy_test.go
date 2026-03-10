@@ -233,6 +233,30 @@ func TestNoProxyMatcher_ReturnedPatternMatchesOriginalInput(t *testing.T) {
 	}
 }
 
+func TestNoProxyMatcher_BareStarMatchesAll(t *testing.T) {
+	m := NewNoProxyMatcher("*")
+	tests := []struct {
+		host string
+	}{
+		{"example.com"},
+		{"10.0.0.1"},
+		{"localhost"},
+		{"foo.bar.baz:8080"},
+		{"[::1]:443"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.host, func(t *testing.T) {
+			matched, pat := m.Match(tc.host)
+			if !matched {
+				t.Errorf("bare * should match %q", tc.host)
+			}
+			if pat != "*" {
+				t.Errorf("pattern = %q, want %q", pat, "*")
+			}
+		})
+	}
+}
+
 // ----------------------------------------------------------------------------
 // resolveNoProxy tests
 // ----------------------------------------------------------------------------
