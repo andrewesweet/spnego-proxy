@@ -744,38 +744,27 @@ func dialUpstream(addr string, tlsCfg UpstreamTLSConfig) (net.Conn, error) {
 	return tls.DialWithDialer(dialer, "tcp", addr, tc)
 }
 
-// dialDirect dials a target host directly, defaulting to defaultPort when
-// the host has no explicit port. Used by both noproxy bypass paths.
-func dialDirect(host, defaultPort string, timeout time.Duration) (net.Conn, string, error) {
-	target := host
-	if _, _, err := net.SplitHostPort(target); err != nil {
-		target = net.JoinHostPort(target, defaultPort)
-	}
-	dialer := net.Dialer{Timeout: timeout}
-	conn, err := dialer.Dial("tcp", target)
-	return conn, target, err
-}
-
-// handleDialError logs and responds to a failed direct dial attempt.
-func handleDialError(conn net.Conn, err error, target, clientAddr, path string) {
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		slog.Error("noproxy direct dial timeout", "error", err, "target", target, "client_addr", clientAddr, "path", path)
-		writeHTTPError(conn, errConnectionTimeout)
-	} else {
-		slog.Error("noproxy direct dial failed", "error", err, "target", target, "client_addr", clientAddr, "path", path)
-		writeHTTPError(conn, errConnectionRefused)
-	}
-}
-
 // handleDirectHTTP forwards an HTTP request directly to the target host,
 // bypassing the upstream proxy. Used for noproxy bypass of non-CONNECT
 // requests. The request is converted from absolute-URI (proxy form) to
 // origin form.
 func handleDirectHTTP(conn net.Conn, req *http.Request, reqReader *bufio.Reader, cfg ProxyConfig, clientAddr string) {
-	targetConn, target, err := dialDirect(req.Host, "80", cfg.DialTimeout)
+	target := req.Host
+	if _, _, err := net.SplitHostPort(target); err != nil {
+		target = net.JoinHostPort(target, "80")
+	}
+
+	dialer := net.Dialer{Timeout: cfg.DialTimeout}
+	targetConn, err := dialer.Dial("tcp", target)
 	if err != nil {
-		handleDialError(conn, err, target, clientAddr, "HTTP")
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			slog.Error("noproxy direct dial timeout", "error", err, "target", target, "client_addr", clientAddr)
+			writeHTTPError(conn, errConnectionTimeout)
+		} else {
+			slog.Error("noproxy direct dial failed", "error", err, "target", target, "client_addr", clientAddr)
+			writeHTTPError(conn, errConnectionRefused)
+		}
 		return
 	}
 	defer func() { _ = targetConn.Close() }()
@@ -793,12 +782,9 @@ func handleDirectHTTP(conn net.Conn, req *http.Request, reqReader *bufio.Reader,
 	}
 
 	var wg sync.WaitGroup
-	wg.Go(func() {
-		forwardHalf(targetConn, reqReader, conn, conn.RemoteAddr(), targetConn.RemoteAddr(), cfg.IdleTimeout)
-	})
+	wg.Go(func() { forwardHalf(targetConn, reqReader, nil, conn.RemoteAddr(), targetConn.RemoteAddr(), 0) })
 	wg.Go(func() {
 		defer closeWrite(conn)
-		slog.Debug("noproxy HTTP response forwarding start", "target", target, "client_addr", clientAddr)
 		upstreamReader := bufio.NewReader(targetConn)
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
@@ -809,21 +795,30 @@ func handleDirectHTTP(conn net.Conn, req *http.Request, reqReader *bufio.Reader,
 		injectVia(resp.Header, resp.Proto, cfg.Pseudonym)
 		if err := resp.Write(conn); err != nil {
 			slog.Error("noproxy forward response failed", "error", err, "target", target, "client_addr", clientAddr)
-			return
 		}
-		slog.Debug("noproxy HTTP response forwarding done", "target", target, "client_addr", clientAddr)
 	})
 	wg.Wait()
 }
 
 // handleDirectConnect establishes a direct TCP tunnel to the target host,
 // bypassing the upstream proxy. Used for noproxy bypass of CONNECT requests.
-// Via is injected on the 200 response (not on req.Header, which is never
-// forwarded for CONNECT tunnels).
 func handleDirectConnect(conn net.Conn, req *http.Request, reqReader *bufio.Reader, cfg ProxyConfig, clientAddr string) {
-	targetConn, target, err := dialDirect(req.Host, "443", cfg.DialTimeout)
+	target := req.Host
+	if _, _, err := net.SplitHostPort(target); err != nil {
+		target = net.JoinHostPort(target, "443")
+	}
+
+	dialer := net.Dialer{Timeout: cfg.DialTimeout}
+	targetConn, err := dialer.Dial("tcp", target)
 	if err != nil {
-		handleDialError(conn, err, target, clientAddr, "CONNECT")
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			slog.Error("noproxy direct CONNECT dial timeout", "error", err, "target", target, "client_addr", clientAddr)
+			writeHTTPError(conn, errConnectionTimeout)
+		} else {
+			slog.Error("noproxy direct CONNECT dial failed", "error", err, "target", target, "client_addr", clientAddr)
+			writeHTTPError(conn, errConnectionRefused)
+		}
 		return
 	}
 	defer func() { _ = targetConn.Close() }()
@@ -960,15 +955,11 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	if cfg.NoProxy != nil {
 		if matched, pattern := cfg.NoProxy.Match(req.Host); matched {
 			slog.Debug("noproxy bypass", "host", req.Host, "pattern", pattern, "method", req.Method, "client_addr", clientAddr)
+			// Via still injected per RFC 9110 §7.6.3.
+			injectVia(req.Header, req.Proto, cfg.Pseudonym)
 			if req.Method == http.MethodConnect {
-				// Via is injected on the 200 response inside handleDirectConnect;
-				// req.Header is never forwarded for CONNECT tunnels.
 				handleDirectConnect(conn, req, reqReader, cfg, clientAddr)
 			} else {
-				// Via injected on req.Header per RFC 9110 §7.6.3 (sent to
-				// the target in origin form); response Via is added inside
-				// handleDirectHTTP.
-				injectVia(req.Header, req.Proto, cfg.Pseudonym)
 				handleDirectHTTP(conn, req, reqReader, cfg, clientAddr)
 			}
 			return

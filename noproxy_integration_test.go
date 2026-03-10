@@ -44,7 +44,7 @@ func startDirectTarget(t *testing.T) string {
 					return
 				}
 				resp := &http.Response{
-					StatusCode:    http.StatusOK,
+					StatusCode:    200,
 					Proto:         "HTTP/1.1",
 					ProtoMajor:    1,
 					ProtoMinor:    1,
@@ -80,7 +80,7 @@ func TestNoProxyHTTPBypassGoesToTarget(t *testing.T) {
 	// Match the exact loopback IP that the target is listening on.
 	proxy.SetNoProxy(NewNoProxyMatcher("127.0.0.1"))
 
-	client, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", proxy.Addr())
+	client, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestNoProxyHTTPRequestInOriginForm(t *testing.T) {
 		capturedURI <- req.RequestURI
 
 		resp := &http.Response{
-			StatusCode:    http.StatusOK,
+			StatusCode:    200,
 			Proto:         "HTTP/1.1",
 			ProtoMajor:    1,
 			ProtoMinor:    1,
@@ -184,7 +184,7 @@ func TestNoProxyHTTPRequestInOriginForm(t *testing.T) {
 	t.Cleanup(proxy.Close)
 	proxy.SetNoProxy(NewNoProxyMatcher("127.0.0.1"))
 
-	client, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", proxy.Addr())
+	client, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
@@ -208,8 +208,8 @@ func TestNoProxyHTTPRequestInOriginForm(t *testing.T) {
 	var uri string
 	select {
 	case uri = <-capturedURI:
-	case <-t.Context().Done():
-		t.Fatal("target did not receive request before test timeout")
+	case <-time.After(5 * time.Second):
+		t.Fatal("target did not receive request within 5s")
 	}
 
 	// The target must see origin form: /some/path?q=1, not the absolute URI.
@@ -266,7 +266,7 @@ func TestNoProxyCONNECTBypassEstablishesDirectTunnel(t *testing.T) {
 	proxy.SetConnectPorts([]string{connectPortWildcard})
 	proxy.SetNoProxy(NewNoProxyMatcher("127.0.0.1"))
 
-	client, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", proxy.Addr())
+	client, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}

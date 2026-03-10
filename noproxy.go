@@ -1,9 +1,7 @@
 package main
 
 import (
-	"cmp"
 	"net"
-	"net/netip"
 	"os"
 	"strings"
 )
@@ -19,12 +17,12 @@ const (
 )
 
 type noProxyRule struct {
-	raw    string // original pattern (for debug logging)
-	kind   noProxyRuleKind
-	host   string       // lowercase exact hostname (ruleHostname)
-	suffix string       // lowercase ".corp.com" (ruleWildcard)
-	ip     netip.Addr   // parsed IP (ruleIP)
-	prefix netip.Prefix // parsed CIDR (ruleCIDR)
+	raw     string     // original pattern (for debug logging)
+	kind    noProxyRuleKind
+	host    string     // lowercase exact hostname (ruleHostname)
+	suffix  string     // lowercase ".corp.com" (ruleWildcard)
+	ip      net.IP     // parsed IP (ruleIP)
+	network *net.IPNet // parsed CIDR (ruleCIDR)
 }
 
 // NoProxyMatcher pre-parses a comma-separated list of no-proxy bypass patterns
@@ -47,20 +45,17 @@ func NewNoProxyMatcher(patterns string) *NoProxyMatcher {
 		rule := noProxyRule{raw: pat}
 		if pat == "*" {
 			rule.kind = ruleAll
-		} else if prefix, err := netip.ParsePrefix(pat); err == nil {
+		} else if _, network, err := net.ParseCIDR(pat); err == nil {
 			rule.kind = ruleCIDR
-			rule.prefix = prefix
-		} else if ip, err := netip.ParseAddr(pat); err == nil {
+			rule.network = network
+		} else if ip := net.ParseIP(pat); ip != nil {
 			rule.kind = ruleIP
 			rule.ip = ip
-		} else if suffix, ok := strings.CutPrefix(pat, "*"); ok && strings.HasPrefix(suffix, ".") {
+		} else if strings.HasPrefix(pat, "*.") || strings.HasPrefix(pat, ".") {
 			rule.kind = ruleWildcard
 			// Normalize to a leading-dot suffix regardless of whether the
 			// caller wrote "*.corp.com" or ".corp.com".
-			rule.suffix = strings.ToLower(suffix)
-		} else if strings.HasPrefix(pat, ".") {
-			rule.kind = ruleWildcard
-			rule.suffix = strings.ToLower(pat)
+			rule.suffix = strings.ToLower(strings.TrimPrefix(pat, "*"))
 		} else {
 			rule.kind = ruleHostname
 			rule.host = strings.ToLower(pat)
@@ -81,7 +76,7 @@ func (m *NoProxyMatcher) Match(host string) (matched bool, pattern string) {
 	host = strings.ToLower(host)
 
 	// Try to parse as an IP once so we can use it for IP/CIDR rules.
-	hostIP, _ := netip.ParseAddr(host)
+	hostIP := net.ParseIP(host)
 
 	for _, rule := range m.rules {
 		switch rule.kind {
@@ -102,11 +97,11 @@ func (m *NoProxyMatcher) Match(host string) (matched bool, pattern string) {
 				return true, rule.raw
 			}
 		case ruleIP:
-			if hostIP.IsValid() && hostIP == rule.ip {
+			if hostIP != nil && hostIP.Equal(rule.ip) {
 				return true, rule.raw
 			}
 		case ruleCIDR:
-			if hostIP.IsValid() && rule.prefix.Contains(hostIP) {
+			if hostIP != nil && rule.network.Contains(hostIP) {
 				return true, rule.raw
 			}
 		}
@@ -118,5 +113,11 @@ func (m *NoProxyMatcher) Match(host string) (matched bool, pattern string) {
 // following precedence: explicit flag value > NO_PROXY env var > no_proxy
 // env var. An empty string is returned when none of the sources is set.
 func resolveNoProxy(flagValue string) string {
-	return cmp.Or(flagValue, os.Getenv("NO_PROXY"), os.Getenv("no_proxy"))
+	if flagValue != "" {
+		return flagValue
+	}
+	if v := os.Getenv("NO_PROXY"); v != "" {
+		return v
+	}
+	return os.Getenv("no_proxy")
 }
