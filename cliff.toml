@@ -66,5 +66,6 @@ topo_order = false
 sort_commits = "oldest"
 
 [bump]
+initial_tag = "v1.0.0"
 breaking_always_bump_major = true
 features_always_bump_minor = true
