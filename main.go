@@ -948,13 +948,10 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	// Remove hop-by-hop headers before forwarding (RFC 9110 §7.6.1).
 	sanitizeHopByHop(req)
 
-	// H1–H4: inject optional forwarding headers after hop-by-hop sanitization
-	// so that any client-sent hop-by-hop headers are stripped first.
-	injectForwardingHeaders(req, clientAddr, cfg.Forwarding)
-
 	// Noproxy bypass: connect directly to the target host when it matches
-	// a -noproxy / NO_PROXY pattern. Skips SPNEGO token acquisition and
-	// Proxy-Authorization injection.
+	// a -noproxy / NO_PROXY pattern. Skips SPNEGO token acquisition,
+	// Proxy-Authorization injection, and forwarding headers (those are
+	// proxy-to-proxy headers irrelevant for direct connections).
 	if cfg.NoProxy != nil {
 		if matched, pattern := cfg.NoProxy.Match(req.Host); matched {
 			slog.Debug("noproxy bypass", "host", req.Host, "pattern", pattern, "method", req.Method, "client_addr", clientAddr)
@@ -968,6 +965,10 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 			return
 		}
 	}
+
+	// H1–H4: inject optional forwarding headers after hop-by-hop sanitization
+	// so that any client-sent hop-by-hop headers are stripped first.
+	injectForwardingHeaders(req, clientAddr, cfg.Forwarding)
 
 	token, err := cfg.Provider.GetToken()
 	if err != nil {
@@ -1189,8 +1190,9 @@ func main() {
 	}
 
 	noProxyPatterns := resolveNoProxy(*noProxyFlag)
-	noProxy := NewNoProxyMatcher(noProxyPatterns)
+	var noProxy *NoProxyMatcher
 	if noProxyPatterns != "" {
+		noProxy = NewNoProxyMatcher(noProxyPatterns)
 		source := "flag"
 		if *noProxyFlag == "" {
 			source = "env"
