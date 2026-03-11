@@ -88,11 +88,14 @@ jobs:
           path: spnego-proxy-darwin-${{ matrix.arch }}.sbom.spdx.json
 
   build-linux:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-latest-arm64' || 'ubuntu-latest' }}
     permissions:
       contents: read
       id-token: write
       attestations: write
+    strategy:
+      matrix:
+        arch: ['amd64', 'arm64']
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -106,54 +109,54 @@ jobs:
           CGO_ENABLED: "0"
         run: go test -v -count=1 ./...
 
-      - name: Build (linux/amd64)
+      - name: Build (linux/${{ matrix.arch }})
         env:
-          GOARCH: amd64
+          GOARCH: ${{ matrix.arch }}
           GOOS: linux
           CGO_ENABLED: "0"
         run: >-
           go build -v -trimpath
           -ldflags "-s -w -X main.version=${{ github.ref_name }} -X main.commit=${{ github.sha }}"
-          -o spnego-proxy-linux-amd64 .
+          -o spnego-proxy-linux-${{ matrix.arch }} .
 
       - name: Verify binary
-        run: file spnego-proxy-linux-amd64
+        run: file spnego-proxy-linux-${{ matrix.arch }}
 
       - name: Create tar.gz archive
         run: |
           mkdir -p staging
-          cp spnego-proxy-linux-amd64 staging/spnego-proxy
+          cp spnego-proxy-linux-${{ matrix.arch }} staging/spnego-proxy
           cp LICENSE README.md staging/
-          tar -czf spnego-proxy_${{ github.ref_name }}_linux_amd64.tar.gz -C staging .
+          tar -czf spnego-proxy_${{ github.ref_name }}_linux_${{ matrix.arch }}.tar.gz -C staging .
 
       - name: Attest build provenance
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
-          subject-path: spnego-proxy_${{ github.ref_name }}_linux_amd64.tar.gz
+          subject-path: spnego-proxy_${{ github.ref_name }}_linux_${{ matrix.arch }}.tar.gz
 
       - name: Generate SBOM
         uses: anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11 # v0.23.0
         with:
           path: .
           format: spdx-json
-          output-file: spnego-proxy-linux-amd64.sbom.spdx.json
+          output-file: spnego-proxy-linux-${{ matrix.arch }}.sbom.spdx.json
           upload-artifact: false
           upload-release-assets: false
 
       - name: Attest SBOM
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
-          subject-path: spnego-proxy_${{ github.ref_name }}_linux_amd64.tar.gz
-          sbom-path: spnego-proxy-linux-amd64.sbom.spdx.json
+          subject-path: spnego-proxy_${{ github.ref_name }}_linux_${{ matrix.arch }}.tar.gz
+          sbom-path: spnego-proxy-linux-${{ matrix.arch }}.sbom.spdx.json
 
       - name: Upload archive
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: spnego-proxy_${{ github.ref_name }}_linux_amd64.tar.gz
-          path: spnego-proxy_${{ github.ref_name }}_linux_amd64.tar.gz
+          name: spnego-proxy_${{ github.ref_name }}_linux_${{ matrix.arch }}.tar.gz
+          path: spnego-proxy_${{ github.ref_name }}_linux_${{ matrix.arch }}.tar.gz
 
       - name: Upload SBOM
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: spnego-proxy-linux-amd64.sbom.spdx.json
-          path: spnego-proxy-linux-amd64.sbom.spdx.json
+          name: spnego-proxy-linux-${{ matrix.arch }}.sbom.spdx.json
+          path: spnego-proxy-linux-${{ matrix.arch }}.sbom.spdx.json

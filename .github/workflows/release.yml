@@ -15,8 +15,17 @@ jobs:
       id-token: write
       attestations: write
 
-  release:
+  docker:
     needs: build
+    uses: ./.github/workflows/docker-release.yml
+    permissions:
+      contents: read
+      packages: write
+
+  release:
+    needs:
+      - build
+      - docker
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -46,9 +55,11 @@ jobs:
             spnego-proxy_${{ github.ref_name }}_darwin_amd64.tar.gz \
             spnego-proxy_${{ github.ref_name }}_darwin_arm64.tar.gz \
             spnego-proxy_${{ github.ref_name }}_linux_amd64.tar.gz \
+            spnego-proxy_${{ github.ref_name }}_linux_arm64.tar.gz \
             spnego-proxy-darwin-amd64.sbom.spdx.json \
             spnego-proxy-darwin-arm64.sbom.spdx.json \
             spnego-proxy-linux-amd64.sbom.spdx.json \
+            spnego-proxy-linux-arm64.sbom.spdx.json \
             > checksums-sha256.txt
 
       - name: Detect pre-release from SemVer tag
@@ -75,9 +86,11 @@ jobs:
             artifacts/spnego-proxy_${{ github.ref_name }}_darwin_amd64.tar.gz
             artifacts/spnego-proxy_${{ github.ref_name }}_darwin_arm64.tar.gz
             artifacts/spnego-proxy_${{ github.ref_name }}_linux_amd64.tar.gz
+            artifacts/spnego-proxy_${{ github.ref_name }}_linux_arm64.tar.gz
             artifacts/spnego-proxy-darwin-amd64.sbom.spdx.json
             artifacts/spnego-proxy-darwin-arm64.sbom.spdx.json
             artifacts/spnego-proxy-linux-amd64.sbom.spdx.json
+            artifacts/spnego-proxy-linux-arm64.sbom.spdx.json
             artifacts/checksums-sha256.txt
 
       - name: Publish release (makes it immutable)

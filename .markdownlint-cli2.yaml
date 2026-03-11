@@ -4,6 +4,7 @@ config:
 # Generated threat model reports don't conform to our lint rules.
 # The README is hand-written and linted normally.
 ignores:
+  - "docs/plans/**"
   - "docs/threat-model/P[0-9]-*.md"
   - "docs/threat-model/SPNEGO-PROXY-*.md"
   - "CHANGELOG.md"

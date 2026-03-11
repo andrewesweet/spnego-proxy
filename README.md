@@ -24,6 +24,22 @@ brew install spnego-proxy
 The formula builds with `CGO_ENABLED=1` to link against the native GSS.framework
 for SPNEGO authentication.
 
+### Docker
+
+```bash
+docker run --rm ghcr.io/andrewesweet/spnego-proxy -version
+```
+
+For typical usage, pass proxy flags and expose the listening port:
+
+```bash
+docker run --rm -p 127.0.0.1:3128:3128 ghcr.io/andrewesweet/spnego-proxy \
+  -proxy proxy.corp.example.com:8080 \
+  -addr :3128
+```
+
+Multi-arch images are available for `linux/amd64` and `linux/arm64`.
+
 ### From source (requires Go 1.25+)
 
 ```bash
