@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [1.1.0] - 2026-03-11
+
+
+### Added
+- Add Dockerfile for minimal container image
+
 ## [1.0.0] - 2026-03-10
 
 
@@ -46,5 +52,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Default -connect-ports to 443 instead of allowing all ports
 - Return 502 instead of raw relay when upstream response is unparseable
 - Zero password bytes after Kerberos client initialization
+[1.1.0]: https://github.com/andrewesweet/spnego-proxy/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/andrewesweet/spnego-proxy/releases/tag/v1.0.0
 
