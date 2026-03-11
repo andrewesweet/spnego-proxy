@@ -412,6 +412,6 @@ Run: `markdownlint README.md` (if available) to verify README formatting.
 **Step 4: Final review**
 
 Verify the complete orchestration flow in `release.yml`:
-- `build` (build-release.yml) produces 5 artifacts: darwin amd64/arm64, linux amd64/arm64 tarballs + SBOMs
+- `build` (build-release.yml) produces 8 artifacts: 4 tarballs (darwin amd64/arm64, linux amd64/arm64) + 4 SBOMs
 - `docker` (docker-release.yml) needs `build`, downloads linux binaries, pushes multi-arch image
-- `release` (inline job) needs `build`, creates GitHub release with all tarballs + SBOMs + checksums
+- `release` (inline job) needs `build` + `docker`, creates GitHub release with all tarballs + SBOMs + checksums

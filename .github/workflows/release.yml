@@ -23,7 +23,9 @@ jobs:
       packages: write
 
   release:
-    needs: build
+    needs:
+      - build
+      - docker
     runs-on: ubuntu-latest
     permissions:
       contents: write
