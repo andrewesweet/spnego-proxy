@@ -15,6 +15,13 @@ jobs:
       id-token: write
       attestations: write
 
+  docker:
+    needs: build
+    uses: ./.github/workflows/docker-release.yml
+    permissions:
+      contents: read
+      packages: write
+
   release:
     needs: build
     runs-on: ubuntu-latest
