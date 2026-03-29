@@ -377,6 +377,15 @@ func TestD7_UpstreamNon2xxRelayedToClient(t *testing.T) {
 	// D7: client must receive the upstream's actual status, not a synthetic 200.
 	assertStatusCode(t, resp, http.StatusForbidden)
 
+	// Verify the upstream rejection body is forwarded intact.
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if got := string(body); got != "CONNECT denied by upstream" {
+		t.Fatalf("body = %q, want %q", got, "CONNECT denied by upstream")
+	}
+
 	waitForDone(t, done)
 }
 
