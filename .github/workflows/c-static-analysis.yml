@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Run clang-format
-        run: clang-format --dry-run --Werror gss_darwin.c gss_darwin.h
+        run: clang-format --dry-run --Werror gss_darwin.c gss_darwin.h filecache_darwin.c filecache_darwin.h
 
   clang-tidy:
     name: clang-tidy
@@ -75,4 +75,5 @@ jobs:
             --check-level=exhaustive \
             --suppress=missingIncludeSystem \
             --suppress=unusedFunction \
-            gss_darwin.c
+            gss_darwin.c \
+            filecache_darwin.c

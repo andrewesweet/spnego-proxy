@@ -132,8 +132,8 @@ func (m *FileCacheManager) EnsureCache() error {
 			"path", m.cachePath, "mode", fmt.Sprintf("%04o", perm))
 		if err := os.Chmod(m.cachePath, 0o600); err != nil {
 			return &CredentialError{authError{
-			msg: fmt.Sprintf("failed to restrict cache file permissions: %v", err),
-		}}
+				msg: fmt.Sprintf("failed to restrict cache file permissions: %v", err),
+			}}
 		}
 	}
 

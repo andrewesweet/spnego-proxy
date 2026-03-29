@@ -204,8 +204,6 @@ filecache_result copy_creds_to_file_cache(const char *dest_path) {
   return result;
 }
 
-#pragma clang diagnostic pop
-
 int set_default_ccache_name(const char *name) {
   OM_uint32 minor;
   // Pass NULL for old_name to avoid thread-safety issues with the static
@@ -296,3 +294,5 @@ int destroy_file_cache(const char *path) {
   }
   return 0;
 }
+
+#pragma clang diagnostic pop
