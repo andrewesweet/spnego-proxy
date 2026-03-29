@@ -20,9 +20,8 @@ static void append_status_messages(OM_uint32 status_value, int status_type,
   int iterations = 0;
 
   do {
-    OM_uint32 ret =
-        gss_display_status(&min_stat, status_value, status_type, GSS_C_NO_OID,
-                           &msg_ctx, &msg_buf);
+    OM_uint32 ret = gss_display_status(&min_stat, status_value, status_type,
+                                       GSS_C_NO_OID, &msg_ctx, &msg_buf);
     if (GSS_ERROR(ret)) {
       break;
     }
