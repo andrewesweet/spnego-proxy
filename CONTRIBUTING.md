@@ -84,7 +84,7 @@ The `-file-cache` feature works around an Apple GSS.framework limitation where
 `gss_init_sec_context` cannot use API: caches directly. It must be tested on a
 macOS device with the Apple Kerberos SSO Extension and an upstream SPNEGO proxy.
 
-#### Prerequisites
+#### Requirements
 
 - macOS device enrolled with Apple Kerberos SSO Extension
 - Valid Kerberos credentials via SSO Extension (`klist` shows tickets)
