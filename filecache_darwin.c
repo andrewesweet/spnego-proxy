@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 // gss_krb5_copy_ccache is deprecated in favor of gss_export_cred, but
@@ -62,8 +63,9 @@ static int open_file_ccache(const char *path, krb5_context *ctx_out,
 typedef struct {
   krb5_context krb5_ctx;
   krb5_ccache dest_cc;
-  uint32_t lifetime;  // remaining lifetime of the copied credential
-  int copied;         // 1 if at least one copy succeeded
+  uint32_t lifetime;      // remaining lifetime of the copied credential
+  int copied;             // 1 if at least one copy succeeded
+  int saw_null_cred;      // 1 if a NULL gss_cred_id_t was received
   int error_code;
   char error_msg[512];
 } iter_ctx;
@@ -127,6 +129,15 @@ static void cred_iter_callback(void *userctx, gss_OID mech,
   (void)mech;
   iter_ctx *ctx = (iter_ctx *)userctx;
 
+  // Apple's GSS.framework may pass NULL credential handles for SSO
+  // Extension-managed credentials. The framework can enumerate the
+  // credential but cannot provide a handle to an unbundled process.
+  // Record this so the caller can try the krb5 direct-copy fallback.
+  if (cred == GSS_C_NO_CREDENTIAL) {
+    ctx->saw_null_cred = 1;
+    return;
+  }
+
   OM_uint32 major, minor;
   OM_uint32 lifetime = 0;
 
@@ -169,6 +180,94 @@ static void cred_iter_callback(void *userctx, gss_OID mech,
   ctx->error_msg[0] = '\0';
 }
 
+// try_krb5_direct_copy copies credentials from the system's default krb5
+// credential cache to the destination FILE: cache using krb5 APIs directly.
+// This is the fallback path for Apple SSO Extension environments where
+// gss_iter_creds_f yields NULL credential handles — the GSS-API can
+// enumerate credentials but not provide handles to unbundled processes,
+// while the krb5 layer can still read the underlying cache.
+//
+// On success, returns 0 and writes the shortest remaining credential
+// lifetime (in seconds) to *lifetime_out. On failure, returns -1 and
+// writes a diagnostic to errbuf.
+static int try_krb5_direct_copy(krb5_context krb5_ctx, krb5_ccache dest_cc,
+                                uint32_t *lifetime_out, char *errbuf,
+                                size_t errlen) {
+  krb5_ccache src_cc = NULL;
+  krb5_error_code ret;
+
+  // Open the system's default credential cache (typically the API: cache
+  // managed by the SSO Extension).
+  ret = krb5_cc_default(krb5_ctx, &src_cc);
+  if (ret != 0) {
+    snprintf(errbuf, errlen, "krb5_cc_default failed: %d", (int)ret);
+    return -1;
+  }
+
+  // Get the cache principal for initialization.
+  krb5_principal princ = NULL;
+  ret = krb5_cc_get_principal(krb5_ctx, src_cc, &princ);
+  if (ret != 0) {
+    snprintf(errbuf, errlen, "krb5_cc_get_principal failed: %d", (int)ret);
+    krb5_cc_close(krb5_ctx, src_cc);
+    return -1;
+  }
+
+  // Initialize the destination FILE: cache with the same principal.
+  ret = krb5_cc_initialize(krb5_ctx, dest_cc, princ);
+  krb5_free_principal(krb5_ctx, princ);
+  if (ret != 0) {
+    snprintf(errbuf, errlen, "krb5_cc_initialize failed: %d", (int)ret);
+    krb5_cc_close(krb5_ctx, src_cc);
+    return -1;
+  }
+
+  // Copy all credentials from source to destination.
+  krb5_cc_cursor cursor;
+  ret = krb5_cc_start_seq_get(krb5_ctx, src_cc, &cursor);
+  if (ret != 0) {
+    snprintf(errbuf, errlen, "krb5_cc_start_seq_get failed: %d", (int)ret);
+    krb5_cc_close(krb5_ctx, src_cc);
+    return -1;
+  }
+
+  krb5_creds cred;
+  int copied = 0;
+  krb5_timestamp now = time(NULL);
+  krb5_timestamp min_endtime = 0;
+
+  while (krb5_cc_next_cred(krb5_ctx, src_cc, &cursor, &cred) == 0) {
+    ret = krb5_cc_store_cred(krb5_ctx, dest_cc, &cred);
+    if (ret == 0) {
+      copied++;
+      // Track the minimum endtime across all credentials for lifetime.
+      if (cred.times.endtime > now) {
+        krb5_timestamp remaining = cred.times.endtime - now;
+        if (min_endtime == 0 || remaining < min_endtime) {
+          min_endtime = remaining;
+        }
+      }
+    }
+    krb5_free_cred_contents(krb5_ctx, &cred);
+  }
+  krb5_cc_end_seq_get(krb5_ctx, src_cc, &cursor);
+  krb5_cc_close(krb5_ctx, src_cc);
+
+  if (copied == 0) {
+    snprintf(errbuf, errlen,
+             "no credentials copied from default cache (empty or expired)");
+    return -1;
+  }
+
+  if (min_endtime > 0) {
+    *lifetime_out = (uint32_t)min_endtime;
+  } else {
+    *lifetime_out = 3600;  // Fallback: 1 hour if no endtime computed.
+  }
+
+  return 0;
+}
+
 filecache_result copy_creds_to_file_cache(const char *dest_path) {
   filecache_result result;
   memset(&result, 0, sizeof(result));
@@ -193,6 +292,24 @@ filecache_result copy_creds_to_file_cache(const char *dest_path) {
   OM_uint32 minor;
   gss_iter_creds_f(&minor, 0, (gss_OID)&krb5_mech_oid_desc, &ctx,
                    cred_iter_callback);
+
+  // If the GSS iterator found credentials but passed NULL handles (Apple
+  // SSO Extension), fall back to copying directly via krb5 APIs.
+  if (!ctx.copied && ctx.saw_null_cred) {
+    uint32_t lifetime = 0;
+    char errbuf[512];
+    if (try_krb5_direct_copy(krb5_ctx, dest_cc, &lifetime, errbuf,
+                             sizeof(errbuf)) == 0) {
+      ctx.copied = 1;
+      ctx.lifetime = lifetime;
+      ctx.error_msg[0] = '\0';
+    } else {
+      // Record the krb5 fallback error; the original GSS error (if any)
+      // is less informative since it just says "no credentials found".
+      snprintf(ctx.error_msg, sizeof(ctx.error_msg),
+               "krb5 direct copy fallback: %s", errbuf);
+    }
+  }
 
   // Close the krb5 cache handle (does not destroy the file).
   krb5_cc_close(krb5_ctx, dest_cc);
