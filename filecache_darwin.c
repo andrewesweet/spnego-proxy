@@ -63,9 +63,9 @@ static int open_file_ccache(const char *path, krb5_context *ctx_out,
 typedef struct {
   krb5_context krb5_ctx;
   krb5_ccache dest_cc;
-  uint32_t lifetime;      // remaining lifetime of the copied credential
-  int copied;             // 1 if at least one copy succeeded
-  int saw_null_cred;      // 1 if a NULL gss_cred_id_t was received
+  uint32_t lifetime;  // remaining lifetime of the copied credential
+  int copied;         // 1 if at least one copy succeeded
+  int saw_null_cred;  // 1 if a NULL gss_cred_id_t was received
   int error_code;
   char error_msg[512];
 } iter_ctx;
@@ -184,16 +184,23 @@ static void cred_iter_callback(void *userctx, gss_OID mech,
 // (krbtgt/REALM@REALM or krbtgt/OTHER_REALM@REALM). Only TGTs are needed
 // in the FILE: cache; service tickets are not copied to limit credential
 // exposure.
+//
+// Uses krb5_unparse_name for portability — the Heimdal-specific
+// krb5_principal_get_comp_string is not in Apple's public Kerberos headers.
 static int is_tgt(krb5_context krb5_ctx, krb5_principal server) {
   if (server == NULL) {
     return 0;
   }
-  size_t ncomp = krb5_principal_get_num_comp(krb5_ctx, server);
-  if (ncomp < 1) {
+  char *name = NULL;
+  krb5_error_code ret = krb5_unparse_name(krb5_ctx, server, &name);
+  if (ret != 0 || name == NULL) {
     return 0;
   }
-  const char *comp0 = krb5_principal_get_comp_string(krb5_ctx, server, 0);
-  return comp0 != NULL && strcmp(comp0, "krbtgt") == 0;
+  // TGT principals look like "krbtgt/REALM@REALM" or
+  // "krbtgt/OTHER@REALM". Check for the "krbtgt/" prefix.
+  int result = (strncmp(name, "krbtgt/", 7) == 0);
+  free(name);
+  return result;
 }
 
 // try_krb5_direct_copy copies TGT credentials from the system's default krb5
@@ -288,8 +295,8 @@ static int try_krb5_direct_copy(krb5_context krb5_ctx, krb5_ccache dest_cc,
 
   if (copied == 0) {
     if (store_errors > 0) {
-      snprintf(errbuf, errlen,
-               "failed to store %d TGT(s) in destination cache", store_errors);
+      snprintf(errbuf, errlen, "failed to store %d TGT(s) in destination cache",
+               store_errors);
     } else {
       snprintf(errbuf, errlen,
                "no valid TGTs in default cache (empty or all expired)");
