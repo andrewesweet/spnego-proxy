@@ -1,0 +1,4 @@
+go test fuzz v1
+string("@")
+byte('\u0080')
+byte('@')
