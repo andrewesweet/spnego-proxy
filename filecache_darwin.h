@@ -11,8 +11,8 @@
 typedef struct {
   int error_code;       // 0 on success
   char error_msg[512];  // error description
-  uint32_t lifetime;    // remaining credential lifetime in seconds (from
-                        // gss_inquire_cred)
+  uint32_t lifetime;    // remaining credential lifetime in seconds
+  uint8_t copy_method;  // 0 = GSS iterator, 1 = krb5 direct copy fallback
 } filecache_result;
 
 // copy_creds_to_file_cache enumerates Kerberos credentials via

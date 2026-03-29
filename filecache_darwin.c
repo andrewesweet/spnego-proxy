@@ -180,16 +180,36 @@ static void cred_iter_callback(void *userctx, gss_OID mech,
   ctx->error_msg[0] = '\0';
 }
 
-// try_krb5_direct_copy copies credentials from the system's default krb5
+// is_tgt returns 1 if the credential's server principal is a TGT
+// (krbtgt/REALM@REALM or krbtgt/OTHER_REALM@REALM). Only TGTs are needed
+// in the FILE: cache; service tickets are not copied to limit credential
+// exposure.
+static int is_tgt(krb5_context krb5_ctx, krb5_principal server) {
+  if (server == NULL) {
+    return 0;
+  }
+  size_t ncomp = krb5_principal_get_num_comp(krb5_ctx, server);
+  if (ncomp < 1) {
+    return 0;
+  }
+  const char *comp0 = krb5_principal_get_comp_string(krb5_ctx, server, 0);
+  return comp0 != NULL && strcmp(comp0, "krbtgt") == 0;
+}
+
+// try_krb5_direct_copy copies TGT credentials from the system's default krb5
 // credential cache to the destination FILE: cache using krb5 APIs directly.
 // This is the fallback path for Apple SSO Extension environments where
 // gss_iter_creds_f yields NULL credential handles — the GSS-API can
 // enumerate credentials but not provide handles to unbundled processes,
 // while the krb5 layer can still read the underlying cache.
 //
-// On success, returns 0 and writes the shortest remaining credential
-// lifetime (in seconds) to *lifetime_out. On failure, returns -1 and
-// writes a diagnostic to errbuf.
+// Only TGT credentials (krbtgt/*) are copied to minimize credential
+// exposure. Service tickets are not needed — gss_init_sec_context will
+// obtain them from the KDC using the TGT.
+//
+// On success, returns 0 and writes the shortest remaining TGT lifetime
+// (in seconds) to *lifetime_out. On failure, returns -1 and writes a
+// diagnostic to errbuf.
 static int try_krb5_direct_copy(krb5_context krb5_ctx, krb5_ccache dest_cc,
                                 uint32_t *lifetime_out, char *errbuf,
                                 size_t errlen) {
@@ -222,7 +242,7 @@ static int try_krb5_direct_copy(krb5_context krb5_ctx, krb5_ccache dest_cc,
     return -1;
   }
 
-  // Copy all credentials from source to destination.
+  // Copy TGT credentials from source to destination.
   krb5_cc_cursor cursor;
   ret = krb5_cc_start_seq_get(krb5_ctx, src_cc, &cursor);
   if (ret != 0) {
@@ -233,20 +253,33 @@ static int try_krb5_direct_copy(krb5_context krb5_ctx, krb5_ccache dest_cc,
 
   krb5_creds cred;
   int copied = 0;
-  krb5_timestamp now = time(NULL);
-  krb5_timestamp min_endtime = 0;
+  int store_errors = 0;
+  // krb5_timestamp is int32_t in Heimdal; safe until Y2038.
+  krb5_timestamp now = (krb5_timestamp)time(NULL);
+  krb5_timestamp min_remaining = 0;
 
   while (krb5_cc_next_cred(krb5_ctx, src_cc, &cursor, &cred) == 0) {
+    // Only copy TGTs to limit credential exposure.
+    if (!is_tgt(krb5_ctx, cred.server)) {
+      krb5_free_cred_contents(krb5_ctx, &cred);
+      continue;
+    }
+
+    // Skip expired credentials.
+    if (cred.times.endtime <= now) {
+      krb5_free_cred_contents(krb5_ctx, &cred);
+      continue;
+    }
+
     ret = krb5_cc_store_cred(krb5_ctx, dest_cc, &cred);
     if (ret == 0) {
       copied++;
-      // Track the minimum endtime across all credentials for lifetime.
-      if (cred.times.endtime > now) {
-        krb5_timestamp remaining = cred.times.endtime - now;
-        if (min_endtime == 0 || remaining < min_endtime) {
-          min_endtime = remaining;
-        }
+      krb5_timestamp remaining = cred.times.endtime - now;
+      if (min_remaining == 0 || remaining < min_remaining) {
+        min_remaining = remaining;
       }
+    } else {
+      store_errors++;
     }
     krb5_free_cred_contents(krb5_ctx, &cred);
   }
@@ -254,17 +287,17 @@ static int try_krb5_direct_copy(krb5_context krb5_ctx, krb5_ccache dest_cc,
   krb5_cc_close(krb5_ctx, src_cc);
 
   if (copied == 0) {
-    snprintf(errbuf, errlen,
-             "no credentials copied from default cache (empty or expired)");
+    if (store_errors > 0) {
+      snprintf(errbuf, errlen,
+               "failed to store %d TGT(s) in destination cache", store_errors);
+    } else {
+      snprintf(errbuf, errlen,
+               "no valid TGTs in default cache (empty or all expired)");
+    }
     return -1;
   }
 
-  if (min_endtime > 0) {
-    *lifetime_out = (uint32_t)min_endtime;
-  } else {
-    *lifetime_out = 3600;  // Fallback: 1 hour if no endtime computed.
-  }
-
+  *lifetime_out = (uint32_t)min_remaining;
   return 0;
 }
 
@@ -293,9 +326,12 @@ filecache_result copy_creds_to_file_cache(const char *dest_path) {
   gss_iter_creds_f(&minor, 0, (gss_OID)&krb5_mech_oid_desc, &ctx,
                    cred_iter_callback);
 
-  // If the GSS iterator found credentials but passed NULL handles (Apple
-  // SSO Extension), fall back to copying directly via krb5 APIs.
-  if (!ctx.copied && ctx.saw_null_cred) {
+  // If the GSS iterator did not copy a credential, fall back to copying
+  // directly from the system default krb5 cache. This handles:
+  //   - Apple SSO Extension: gss_iter_creds_f yields NULL handles
+  //   - Future Apple changes: non-NULL but unusable handles
+  //   - Any other GSS enumeration failure
+  if (!ctx.copied) {
     uint32_t lifetime = 0;
     char errbuf[512];
     if (try_krb5_direct_copy(krb5_ctx, dest_cc, &lifetime, errbuf,
@@ -303,11 +339,20 @@ filecache_result copy_creds_to_file_cache(const char *dest_path) {
       ctx.copied = 1;
       ctx.lifetime = lifetime;
       ctx.error_msg[0] = '\0';
+      result.copy_method = 1;  // krb5 direct copy
     } else {
-      // Record the krb5 fallback error; the original GSS error (if any)
-      // is less informative since it just says "no credentials found".
-      snprintf(ctx.error_msg, sizeof(ctx.error_msg),
-               "krb5 direct copy fallback: %s", errbuf);
+      // Include both GSS and krb5 context in the error message.
+      if (ctx.saw_null_cred) {
+        snprintf(ctx.error_msg, sizeof(ctx.error_msg),
+                 "GSS iterator returned NULL credential handles; "
+                 "krb5 fallback: %s",
+                 errbuf);
+      } else {
+        snprintf(ctx.error_msg, sizeof(ctx.error_msg),
+                 "GSS iterator found no credentials; "
+                 "krb5 fallback: %s",
+                 errbuf);
+      }
     }
   }
 

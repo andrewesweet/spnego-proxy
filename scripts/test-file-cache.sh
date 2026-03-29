@@ -119,6 +119,30 @@ else
     fail "GET returned $HTTP_CODE, want 200"
 fi
 
+# --- Test 4b: cache file contains valid credentials ---
+section "4b. Cache file validation"
+
+if [ -n "${CACHE_FILE:-}" ] && [ -f "$CACHE_FILE" ]; then
+    if klist -c "$CACHE_FILE" >/dev/null 2>&1; then
+        pass "cache file contains valid credentials"
+    else
+        fail "cache file exists but klist cannot read it"
+    fi
+else
+    skip "cache file not available for validation"
+fi
+
+# --- Test 4c: copy method detection ---
+section "4c. Copy method"
+
+if grep -q '"method":"krb5_direct"' "$LOG"; then
+    pass "used krb5 direct copy fallback (SSO Extension environment)"
+elif grep -q '"method":"gss"' "$LOG"; then
+    pass "used GSS credential copy"
+else
+    fail "no copy method logged"
+fi
+
 # --- Test 5: CONNECT tunnel (HTTPS) ---
 section "5. CONNECT tunnel (HTTPS)"
 

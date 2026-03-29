@@ -179,8 +179,13 @@ func (m *FileCacheManager) EnsureCache() error {
 	m.copied = true
 	m.forceRefresh = false
 
+	method := "gss"
+	if result.copy_method == 1 {
+		method = "krb5_direct"
+	}
 	slog.Info("credentials copied to file cache",
 		"cache_path", m.cachePath,
+		"method", method,
 		"lifetime_seconds", result.lifetime,
 		"expiry", m.expiry.Format(time.RFC3339))
 
@@ -256,13 +261,15 @@ func (m *FileCacheManager) Close() error {
 		}
 	}
 
-	// Destroy the cache: zero contents (Go), then unlink + free krb5
-	// resources (C).
-	if m.copied {
-		if err := zeroFileContents(m.cachePath); err != nil {
-			slog.Warn("failed to zero cache file", "path", m.cachePath, "error", err)
-		}
+	// Zero the cache file unconditionally if it exists on disk. A partial
+	// write (e.g., krb5_cc_initialize succeeded but copy failed) may have
+	// left credential data even when m.copied is false.
+	if err := zeroFileContents(m.cachePath); err != nil && !os.IsNotExist(err) {
+		slog.Warn("failed to zero cache file", "path", m.cachePath, "error", err)
+	}
 
+	// Destroy the cache: unlink + free krb5 resources (C).
+	if m.copied {
 		cpath := C.CString(m.cachePath)
 		if C.destroy_file_cache(cpath) != 0 {
 			slog.Warn("failed to destroy file cache", "path", m.cachePath)
