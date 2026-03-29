@@ -192,11 +192,12 @@ gss_token_result acquire_spnego_token_no_preflight(const char *spn) {
   //   2. The output token is non-empty
   //   3. The first byte is 0x60 (ASN.1 Application Constructed tag for SPNEGO)
   int has_usable_token = 0;
-  if (!GSS_ERROR(major) && output_token.length > 0) {
-    has_usable_token = 1;
-  } else if (major == GSS_S_BAD_MECH && output_token.length > 0 &&
-             ((unsigned char *)output_token.value)[0] == 0x60) {
-    has_usable_token = 1;
+  if (output_token.length > 0) {
+    if (!GSS_ERROR(major) ||
+        (major == GSS_S_BAD_MECH &&
+         ((unsigned char *)output_token.value)[0] == 0x60)) {
+      has_usable_token = 1;
+    }
   }
 
   if (!has_usable_token) {

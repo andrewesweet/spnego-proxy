@@ -175,12 +175,16 @@ func (m *FileCacheManager) ZeroFileContents() error {
 // zeroFileContents overwrites the file at path with zero bytes.
 // It opens with O_NOFOLLOW to prevent symlink attacks and verifies
 // the target is a regular file before writing.
-func zeroFileContents(path string) error {
+func zeroFileContents(path string) (retErr error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); cerr != nil && retErr == nil {
+			retErr = cerr
+		}
+	}()
 
 	info, err := f.Stat()
 	if err != nil {
