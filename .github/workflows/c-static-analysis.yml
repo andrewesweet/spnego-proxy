@@ -69,10 +69,13 @@ jobs:
 
       - name: Run cppcheck
         run: |
+          SDK="$(xcrun --show-sdk-path)"
           cppcheck \
             --enable=all \
             --error-exitcode=1 \
             --check-level=exhaustive \
             --suppress=missingIncludeSystem \
             --suppress=unusedFunction \
-            gss_darwin.c
+            -I "${SDK}/System/Library/Frameworks/GSS.framework/Headers" \
+            -I "${SDK}/System/Library/Frameworks/Kerberos.framework/Headers" \
+            gss_darwin.c filecache_darwin.c

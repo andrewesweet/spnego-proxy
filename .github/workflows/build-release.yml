@@ -27,7 +27,7 @@ jobs:
         if: matrix.arch == 'arm64'
         env:
           CGO_ENABLED: "1"
-        run: go test -v -count=1 ./...
+        run: go test -v -race -count=1 ./...
 
       - name: Build (darwin/${{ matrix.arch }})
         env:
@@ -107,8 +107,8 @@ jobs:
       - name: Run unit tests
         if: matrix.arch == 'amd64'
         env:
-          CGO_ENABLED: "0"
-        run: go test -v -count=1 ./...
+          CGO_ENABLED: "1"
+        run: go test -v -race -count=1 ./...
 
       - name: Build (linux/${{ matrix.arch }})
         env:

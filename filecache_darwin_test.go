@@ -414,3 +414,51 @@ func TestNewNativeTokenProviderFileCacheFlagPassthrough(t *testing.T) {
 		t.Error("expected non-nil fileCache")
 	}
 }
+
+func FuzzZeroFileContents(f *testing.F) {
+	// Seed with various file sizes, including boundary around the 4096 chunk.
+	f.Add(0)
+	f.Add(1)
+	f.Add(100)
+	f.Add(4095)
+	f.Add(4096)
+	f.Add(4097)
+	f.Add(8192)
+	f.Add(10000)
+
+	f.Fuzz(func(t *testing.T, size int) {
+		if size < 0 || size > 1<<20 { // cap at 1MB
+			t.Skip("size out of range")
+		}
+
+		dir := t.TempDir()
+		path := filepath.Join(dir, "fuzz-cache")
+
+		// Write non-zero data of the given size.
+		data := make([]byte, size)
+		for i := range data {
+			data[i] = 0xAA
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := zeroFileContents(path); err != nil {
+			t.Fatalf("zeroFileContents(%d bytes): %v", size, err)
+		}
+
+		// Verify all zeros.
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(contents) != size {
+			t.Fatalf("file size = %d, want %d", len(contents), size)
+		}
+		for i, b := range contents {
+			if b != 0 {
+				t.Fatalf("byte %d = 0x%02x, want 0x00", i, b)
+			}
+		}
+	})
+}

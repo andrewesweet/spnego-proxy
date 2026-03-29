@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"unicode/utf8"
+)
 
 func TestNormalizeSPN(t *testing.T) {
 	tests := []struct {
@@ -37,4 +40,57 @@ func TestNormalizeSPN(t *testing.T) {
 			}
 		})
 	}
+}
+
+func FuzzNormalizeSPN(f *testing.F) {
+	// Seed corpus from the table-driven test.
+	f.Add("HTTP@host.example.com", byte('@'), byte('/'))
+	f.Add("HTTP/host.example.com", byte('@'), byte('/'))
+	f.Add("host.example.com", byte('@'), byte('/'))
+	f.Add("HTTP/host@REALM", byte('/'), byte('@'))
+	f.Add("CIFS/fileserver.example.com", byte('@'), byte('/'))
+	f.Add("", byte('@'), byte('/'))
+
+	f.Fuzz(func(t *testing.T, spn string, targetSep, alternateSep byte) {
+		if !utf8.ValidString(spn) {
+			t.Skip("invalid UTF-8")
+		}
+		result := normalizeSPN(spn, targetSep, alternateSep)
+
+		// Invariant 1: result length should be the same as input length.
+		if len(result) != len(spn) {
+			t.Errorf("normalizeSPN(%q, %q, %q) changed length: %d → %d",
+				spn, string(targetSep), string(alternateSep), len(spn), len(result))
+		}
+
+		// Invariant 2: result must be valid UTF-8 if input was.
+		if !utf8.ValidString(result) {
+			t.Errorf("normalizeSPN(%q, %q, %q) produced invalid UTF-8: %q",
+				spn, string(targetSep), string(alternateSep), result)
+		}
+
+		// Invariant 3: must not panic (implicit).
+	})
+}
+
+func FuzzExtractHost(f *testing.F) {
+	f.Add("proxy.example.com:8080")
+	f.Add("proxy.example.com")
+	f.Add("[::1]:443")
+	f.Add("[::1]")
+	f.Add("127.0.0.1:80")
+	f.Add("")
+	f.Add(":443")
+	f.Add("host:")
+
+	f.Fuzz(func(t *testing.T, addr string) {
+		result := extractHost(addr)
+
+		// Invariant 1: result must not be longer than input.
+		if len(result) > len(addr) {
+			t.Errorf("extractHost(%q) = %q (longer than input)", addr, result)
+		}
+
+		// Invariant 2: must not panic (implicit).
+	})
 }
