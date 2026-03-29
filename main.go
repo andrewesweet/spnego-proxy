@@ -1149,6 +1149,11 @@ func main() {
 	realm := flag.String("realm", "", "kerberos realm")
 	passwordFile := flag.String("password-file", "", "password file path")
 	showVersion := flag.Bool("version", false, "print version information and exit")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "%s\n\n", versionString())
+		fmt.Fprintf(os.Stderr, "Usage of %s:\n", "spnego-proxy")
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 
 	if *showVersion {
