@@ -6,17 +6,17 @@
 
 #include <GSS/GSS.h>
 #include <GSS/gssapi_krb5.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 // gss_krb5_copy_ccache is deprecated in favor of gss_export_cred, but
 // gss_export_cred serializes to a buffer rather than writing directly to a
 // krb5_ccache. Since we need a FILE: ccache on disk (for gss_init_sec_context
 // via gss_krb5_ccache_name), gss_krb5_copy_ccache is the correct API.
+// Similarly, krb5_cc_close and krb5_cc_destroy are deprecated but have no
+// GSS-API replacements for FILE: cache management.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
@@ -185,7 +185,7 @@ filecache_result copy_creds_to_file_cache(const char *dest_path) {
                    cred_iter_callback);
 
   // Close the krb5 cache handle (does not destroy the file).
-  krb5_cc_close(krb5_ctx, dest_cc);  // deprecated but no GSS equivalent
+  krb5_cc_close(krb5_ctx, dest_cc);
   krb5_free_context(krb5_ctx);
 
   if (!ctx.copied) {
@@ -212,53 +212,10 @@ int set_default_ccache_name(const char *name) {
   return GSS_ERROR(major) ? -1 : 0;
 }
 
-int zero_file_contents(const char *path) {
-  int fd = open(path, O_WRONLY | O_NOFOLLOW);
-  if (fd < 0) {
-    return -1;
-  }
-
-  struct stat st;
-  if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
-    close(fd);
-    return -1;
-  }
-
-  // Ensure we write from the beginning.
-  if (lseek(fd, 0, SEEK_SET) != 0) {
-    close(fd);
-    return -1;
-  }
-
-  // Overwrite with zeros in chunks.
-  char zeros[4096];
-  memset(zeros, 0, sizeof(zeros));
-
-  off_t remaining = st.st_size;
-  while (remaining > 0) {
-    size_t chunk =
-        (size_t)remaining < sizeof(zeros) ? (size_t)remaining : sizeof(zeros);
-    ssize_t written = write(fd, zeros, chunk);
-    if (written <= 0) {
-      close(fd);
-      return -1;
-    }
-    remaining -= written;
-  }
-
-  // Flush to disk before returning. On APFS with COW this is best-effort —
-  // original blocks may persist in deallocated space.
-  fsync(fd);
-  close(fd);
-  return 0;
-}
-
 int destroy_file_cache(const char *path) {
-  // Zero the file contents first (defense-in-depth: krb5_cc_destroy may
-  // only unlink without zeroing on some Heimdal implementations).
-  zero_file_contents(path);
-
-  // Use krb5_cc_destroy to unlink the file and free resources.
+  // Use krb5_cc_destroy to unlink the file and free krb5 resources.
+  // The caller is responsible for zeroing the file contents before calling
+  // this function (defense-in-depth).
   krb5_context krb5_ctx = NULL;
   krb5_error_code ret = krb5_init_context(&krb5_ctx);
   if (ret != 0) {

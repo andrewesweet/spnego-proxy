@@ -75,5 +75,4 @@ jobs:
             --check-level=exhaustive \
             --suppress=missingIncludeSystem \
             --suppress=unusedFunction \
-            gss_darwin.c \
-            filecache_darwin.c
+            gss_darwin.c

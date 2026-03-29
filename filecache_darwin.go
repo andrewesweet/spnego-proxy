@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 	"unsafe"
 )
@@ -164,15 +165,46 @@ func (m *FileCacheManager) EnsureCache() error {
 	return nil
 }
 
-// ZeroFileContents overwrites the cache file with zeros. Exported for testing.
+// ZeroFileContents overwrites the cache file contents with zeros.
+// This is defense-in-depth before file deletion, since krb5_cc_destroy
+// may only unlink without zeroing on some implementations.
 func (m *FileCacheManager) ZeroFileContents() error {
-	cpath := C.CString(m.cachePath)
-	defer C.free(unsafe.Pointer(cpath))
+	return zeroFileContents(m.cachePath)
+}
 
-	if C.zero_file_contents(cpath) != 0 {
-		return fmt.Errorf("failed to zero cache file: %s", m.cachePath)
+// zeroFileContents overwrites the file at path with zero bytes.
+// It opens with O_NOFOLLOW to prevent symlink attacks and verifies
+// the target is a regular file before writing.
+func zeroFileContents(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
 	}
-	return nil
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file: %s", path)
+	}
+
+	zeros := make([]byte, 4096)
+	remaining := info.Size()
+	for remaining > 0 {
+		chunk := int64(len(zeros))
+		if chunk > remaining {
+			chunk = remaining
+		}
+		n, err := f.Write(zeros[:chunk])
+		if err != nil {
+			return err
+		}
+		remaining -= int64(n)
+	}
+
+	return f.Sync()
 }
 
 // Close securely destroys the FILE: credential cache and removes the
@@ -195,8 +227,13 @@ func (m *FileCacheManager) Close() error {
 		}
 	}
 
-	// Destroy the cache: zero contents, unlink, free krb5 resources.
+	// Destroy the cache: zero contents (Go), then unlink + free krb5
+	// resources (C).
 	if m.copied {
+		if err := zeroFileContents(m.cachePath); err != nil {
+			slog.Warn("failed to zero cache file", "path", m.cachePath, "error", err)
+		}
+
 		cpath := C.CString(m.cachePath)
 		if C.destroy_file_cache(cpath) != 0 {
 			slog.Warn("failed to destroy file cache", "path", m.cachePath)
