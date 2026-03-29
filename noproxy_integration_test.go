@@ -296,6 +296,11 @@ func TestNoProxyCONNECTBypassEstablishesDirectTunnel(t *testing.T) {
 		t.Errorf("Via header %q does not contain pseudonym %q", via, testPseudonym)
 	}
 
+	// Content-Length and Connection: close MUST NOT appear — they cause
+	// Bun/undici clients to close the connection before the TLS handshake.
+	assertHeaderAbsent(t, resp.Header, "Content-Length")
+	assertHeaderAbsent(t, resp.Header, "Connection")
+
 	// Verify the tunnel actually works: send data and read the echo back.
 	const payload = "hello-direct-tunnel"
 	if _, err := io.WriteString(client, payload); err != nil {
