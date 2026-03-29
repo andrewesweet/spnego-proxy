@@ -3,7 +3,7 @@
 package main
 
 /*
-#cgo darwin CFLAGS: -DGSS_USE_APPLE_FRAMEWORK
+#cgo darwin CFLAGS: -DGSS_USE_APPLE_FRAMEWORK -Wno-deprecated-declarations
 #cgo darwin LDFLAGS: -framework GSS
 #include "filecache_darwin.h"
 #include <stdlib.h>
@@ -131,14 +131,17 @@ func (m *FileCacheManager) EnsureCache() error {
 		slog.Warn("cache file has unexpected permissions, tightening",
 			"path", m.cachePath, "mode", fmt.Sprintf("%04o", perm))
 		if err := os.Chmod(m.cachePath, 0o600); err != nil {
-			return fmt.Errorf("failed to restrict cache file permissions: %w", err)
+			return &CredentialError{authError{
+			msg: fmt.Sprintf("failed to restrict cache file permissions: %v", err),
+		}}
 		}
 	}
 
 	// Track expiry. lifetime is in seconds.
+	now := time.Now()
 	lifetime := time.Duration(result.lifetime) * time.Second
-	m.expiry = time.Now().Add(lifetime)
-	m.lastCopy = time.Now()
+	m.expiry = now.Add(lifetime)
+	m.lastCopy = now
 	m.copied = true
 
 	slog.Info("credentials copied to file cache",
@@ -195,7 +198,9 @@ func (m *FileCacheManager) Close() error {
 	// Destroy the cache: zero contents, unlink, free krb5 resources.
 	if m.copied {
 		cpath := C.CString(m.cachePath)
-		C.destroy_file_cache(cpath)
+		if C.destroy_file_cache(cpath) != 0 {
+			slog.Warn("failed to destroy file cache", "path", m.cachePath)
+		}
 		C.free(unsafe.Pointer(cpath))
 	}
 

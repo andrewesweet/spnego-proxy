@@ -31,6 +31,10 @@ static void append_status_messages(OM_uint32 status_value, int status_type,
   } while (msg_ctx != 0 && *offset < buflen - 1);
 }
 
+// SPNEGO mechanism OID: 1.3.6.1.5.5.2
+static const gss_OID_desc spnego_oid_desc = {
+    6, (void *)"\x2b\x06\x01\x05\x05\x02"};
+
 static void format_gss_error(OM_uint32 major, OM_uint32 minor, char *buf,
                              size_t buflen) {
   size_t offset = 0;
@@ -51,10 +55,7 @@ gss_token_result acquire_spnego_token(const char *spn) {
   gss_cred_id_t cred = GSS_C_NO_CREDENTIAL;
   gss_ctx_id_t context = GSS_C_NO_CONTEXT;
   gss_buffer_desc output_token = GSS_C_EMPTY_BUFFER;
-
-  // SPNEGO mechanism OID: 1.3.6.1.5.5.2
-  gss_OID_desc spnego_oid_desc = {6, (void *)"\x2b\x06\x01\x05\x05\x02"};
-  gss_OID spnego_oid = &spnego_oid_desc;
+  gss_OID spnego_oid = (gss_OID)&spnego_oid_desc;
 
   // Import server name
   name_buf.value = (void *)spn;
@@ -71,7 +72,7 @@ gss_token_result acquire_spnego_token(const char *spn) {
   // initialization. Without this, a missing credential cache (e.g. expired
   // macOS API: cache) produces the misleading "unsupported mechanism" error
   // from gss_init_sec_context. Acquiring explicitly gives a clear diagnostic.
-  gss_OID_set_desc spnego_oid_set_desc = {1, &spnego_oid_desc};
+  gss_OID_set_desc spnego_oid_set_desc = {1, (gss_OID)&spnego_oid_desc};
   major = gss_acquire_cred(&minor, GSS_C_NO_NAME, 0, &spnego_oid_set_desc,
                            GSS_C_INITIATE, &cred, NULL, NULL);
   if (GSS_ERROR(major)) {
@@ -150,10 +151,7 @@ gss_token_result acquire_spnego_token_no_preflight(const char *spn) {
   gss_name_t server_name = GSS_C_NO_NAME;
   gss_ctx_id_t context = GSS_C_NO_CONTEXT;
   gss_buffer_desc output_token = GSS_C_EMPTY_BUFFER;
-
-  // SPNEGO mechanism OID: 1.3.6.1.5.5.2
-  gss_OID_desc spnego_oid_desc = {6, (void *)"\x2b\x06\x01\x05\x05\x02"};
-  gss_OID spnego_oid = &spnego_oid_desc;
+  gss_OID spnego_oid = (gss_OID)&spnego_oid_desc;
 
   // Import server name
   name_buf.value = (void *)spn;

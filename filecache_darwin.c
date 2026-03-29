@@ -30,7 +30,6 @@ static const gss_OID_desc krb5_mech_oid_desc = {
 typedef struct {
   krb5_context krb5_ctx;
   krb5_ccache dest_cc;
-  const char *dest_path;
   uint32_t best_lifetime;  // longest lifetime seen so far
   int copied;              // 1 if at least one copy succeeded
   int error_code;
@@ -105,9 +104,10 @@ static void cred_iter_callback(void *userctx, gss_OID mech,
     return;  // Skip expired or unqueryable credentials.
   }
 
-  // Only copy if this credential has a longer lifetime than what we already
-  // have. This picks the "best" credential when multiple caches exist.
-  if (ctx->copied && lifetime <= ctx->best_lifetime) {
+  // Take the first valid credential. Attempting to overwrite a prior good
+  // copy with a longer-lived credential risks corrupting the cache if the
+  // second copy fails mid-write. In practice, most systems have a single TGT.
+  if (ctx->copied) {
     return;
   }
 
@@ -118,20 +118,16 @@ static void cred_iter_callback(void *userctx, gss_OID mech,
   if (GSS_ERROR(major)) {
     // Fallback: manually initialize the destination and retry.
     if (try_initialize_and_copy(ctx, cred) != 0) {
-      // Record the error only if we have no successful copy yet.
-      if (!ctx->copied) {
-        ctx->error_code = 1;
-        snprintf(ctx->error_msg, sizeof(ctx->error_msg),
-                 "gss_krb5_copy_ccache failed (major=0x%x minor=0x%x)",
-                 (unsigned)major, (unsigned)minor);
-      }
+      ctx->error_code = 1;
+      snprintf(ctx->error_msg, sizeof(ctx->error_msg),
+               "gss_krb5_copy_ccache failed (major=0x%x minor=0x%x)",
+               (unsigned)major, (unsigned)minor);
       return;
     }
   }
 
   // Cap GSS_C_INDEFINITE to avoid overflow in Go time calculations.
-  // GSS_C_INDEFINITE is 0xFFFFFFFF on most implementations.
-  if (lifetime == 0xFFFFFFFF) {
+  if (lifetime == GSS_C_INDEFINITE) {
     lifetime = 3600;  // Cap at 1 hour.
   }
 
@@ -180,7 +176,6 @@ filecache_result copy_creds_to_file_cache(const char *dest_path) {
   memset(&ctx, 0, sizeof(ctx));
   ctx.krb5_ctx = krb5_ctx;
   ctx.dest_cc = dest_cc;
-  ctx.dest_path = dest_path;
 
   // Enumerate all Kerberos credentials. The callback runs synchronously for
   // each credential. We pass the krb5 mechanism OID to filter to Kerberos 5
@@ -220,13 +215,19 @@ int set_default_ccache_name(const char *name) {
 }
 
 int zero_file_contents(const char *path) {
-  int fd = open(path, O_WRONLY);
+  int fd = open(path, O_WRONLY | O_NOFOLLOW);
   if (fd < 0) {
     return -1;
   }
 
   struct stat st;
-  if (fstat(fd, &st) != 0) {
+  if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+    close(fd);
+    return -1;
+  }
+
+  // Ensure we write from the beginning.
+  if (lseek(fd, 0, SEEK_SET) != 0) {
     close(fd);
     return -1;
   }
