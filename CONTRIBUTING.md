@@ -78,6 +78,30 @@ The tests are gated by `//go:build darwin` and the `INTEGRATION` environment
 variable — they skip automatically on Linux and when `INTEGRATION` is unset.
 They also skip if MIT krb5 is not installed.
 
+### File-cache acceptance tests (macOS only)
+
+The `-file-cache` feature works around an Apple GSS.framework limitation where
+`gss_init_sec_context` cannot use API: caches directly. It must be tested on a
+macOS device with the Apple Kerberos SSO Extension and an upstream SPNEGO proxy.
+
+#### Prerequisites
+
+- macOS device enrolled with Apple Kerberos SSO Extension
+- Valid Kerberos credentials via SSO Extension (`klist` shows tickets)
+- An upstream proxy that requires SPNEGO authentication
+
+#### Build and run
+
+```bash
+CGO_ENABLED=1 go build -o spnego-proxy .
+./scripts/test-file-cache.sh <upstream-proxy:port> [target-url]
+```
+
+The script runs 9 tests covering startup, credential copying, HTTP/HTTPS
+proxying, concurrency, shutdown cleanup, stale cache removal, and flag
+validation. Output is short pass/fail lines suitable for pasting back as
+feedback.
+
 ## Formatting
 
 All code must be formatted before committing. CI will reject unformatted code.
