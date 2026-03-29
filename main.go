@@ -1162,6 +1162,9 @@ func main() {
 	upstreamTLSInsecure := flag.Bool("upstream-tls-insecure", false,
 		"skip TLS certificate verification for upstream (not recommended)")
 
+	fileCacheFlag := flag.Bool("file-cache", false,
+		"copy credentials from macOS SSO Extension API: cache to FILE: cache for GSS-API compatibility (macOS only)")
+
 	// Flags for gokrb5 password-based auth (optional on macOS, required on other platforms)
 	cfgFile := flag.String("config", "", "kerberos config file")
 	user := flag.String("user", "", "kerberos user name")
@@ -1195,10 +1198,14 @@ func main() {
 
 	if *user != "" {
 		// Explicit user provided — use gokrb5 password-based auth on any platform
+		if *fileCacheFlag {
+			slog.Error("-file-cache cannot be used with password-based authentication (-user)")
+			os.Exit(1)
+		}
 		provider, err = NewGokrb5TokenProvider(*user, *realm, *cfgFile, *passwordFile, *proxy, *spn, *debug)
 	} else {
 		// Try platform-native GSS-API (macOS) or error on other platforms
-		provider, err = newNativeTokenProvider(*proxy, *spn)
+		provider, err = newNativeTokenProvider(*proxy, *spn, *fileCacheFlag)
 	}
 	if err != nil {
 		// codeql[go/clear-text-logging]

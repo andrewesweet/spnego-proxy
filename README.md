@@ -90,6 +90,7 @@ curl -x http://127.0.0.1:3128 https://example.com
 Optional flags for macOS GSS-API mode:
 
 - `-spn` — Override the service principal name (default: `HTTP@<proxy-hostname>`)
+- `-file-cache` — Enable the SSO Extension file-cache workaround (see below)
 - `-debug` — Enable debug logging
 
 ### Linux/Windows (password-based mode)
@@ -120,6 +121,7 @@ All flags:
 | `-config` | Kerberos config file path | Password mode only |
 | `-user` | Kerberos username (triggers password-based auth on macOS) | Password mode only |
 | `-realm` | Kerberos realm | Password mode only |
+| `-file-cache` | Copy credentials from macOS SSO Extension `API:` cache to `FILE:` cache (macOS only) | No |
 | `-password-file` | Path to password file (prompts if omitted) | No |
 
 ### macOS with explicit password
@@ -136,6 +138,62 @@ password-based path instead of the native GSS-API:
     -realm EXAMPLE.COM \
     -password-file /path/to/password
 ```
+
+## macOS SSO Extension file-cache workaround
+
+### Background
+
+On macOS devices managed by Microsoft Intune, the Apple Kerberos SSO
+Extension stores Kerberos credentials in an `API:` credential cache type.
+While this works transparently for apps using higher-level Apple
+frameworks (Safari, `curl`), the GSS-API function `gss_init_sec_context`
+cannot read from `API:` caches directly. This means `spnego-proxy` —
+which uses GSS.framework's C API — fails to acquire SPNEGO tokens on
+these managed devices.
+
+### How it works
+
+The `-file-cache` flag enables a workaround that:
+
+1. Enumerates all Kerberos credentials using `gss_iter_creds_f`
+   (GSS.framework API)
+2. Copies the credential with the longest remaining lifetime to a
+   temporary `FILE:` cache using `gss_krb5_copy_ccache`
+3. Redirects GSS-API to use the `FILE:` cache via `gss_krb5_ccache_name`
+4. Acquires SPNEGO tokens from the `FILE:` cache
+5. Automatically refreshes the copy when the credential approaches expiry
+6. Securely cleans up (zeroes and deletes) the file cache on exit
+
+### Usage
+
+```bash
+./spnego-proxy \
+    -addr 127.0.0.1:3128 \
+    -proxy upstream-proxy.example.com:8080 \
+    -file-cache
+```
+
+The flag is only available on macOS and cannot be combined with `-user`
+(password-based authentication).
+
+### Security trade-offs
+
+Enabling `-file-cache` writes Kerberos credential data to a temporary
+file on disk. The proxy mitigates this risk:
+
+- The file is created in a unique temporary directory with `0700`
+  permissions (owner-only access)
+- The file path is not predictable (random directory name)
+- On exit, the file contents are overwritten with zeros before deletion
+  (defense-in-depth against forensic recovery, though APFS
+  copy-on-write means this is best-effort)
+- The `gss_krb5_ccache_name` API is used instead of setting
+  `KRB5CCNAME` to avoid environment variable race conditions
+
+If your security policy prohibits writing credential material to disk,
+do not use this flag. On unaffected devices (those without the SSO
+Extension or using `kinit`-obtained tickets), `-file-cache` is
+unnecessary — the default GSS-API path works without any temporary files.
 
 ## Standards compliance
 
@@ -189,6 +247,8 @@ The project uses Go build tags to separate platform-specific authentication:
 - `main.go` — Shared proxy logic, `TokenProvider` interface, CLI flags
 - `auth_gss_darwin.go` — macOS: CGO-based GSS-API token acquisition
 - `gss_darwin.c` / `gss_darwin.h` — C helpers for GSS-API calls
+- `filecache_darwin.go` — macOS: SSO Extension file-cache workaround (Go)
+- `filecache_darwin.c` / `filecache_darwin.h` — C helpers for credential cache copying
 - `auth_gokrb5.go` — Pure-Go gokrb5 password-based auth (all platforms)
 - `auth_notdarwin.go` — Non-macOS: returns error when native GSS is unavailable
 

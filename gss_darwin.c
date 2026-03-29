@@ -141,4 +141,98 @@ gss_token_result acquire_spnego_token(const char *spn) {
   return result;
 }
 
+gss_token_result acquire_spnego_token_no_preflight(const char *spn) {
+  gss_token_result result;
+  memset(&result, 0, sizeof(result));
+
+  OM_uint32 major, minor;
+  gss_buffer_desc name_buf;
+  gss_name_t server_name = GSS_C_NO_NAME;
+  gss_ctx_id_t context = GSS_C_NO_CONTEXT;
+  gss_buffer_desc output_token = GSS_C_EMPTY_BUFFER;
+
+  // SPNEGO mechanism OID: 1.3.6.1.5.5.2
+  gss_OID_desc spnego_oid_desc = {6, (void *)"\x2b\x06\x01\x05\x05\x02"};
+  gss_OID spnego_oid = &spnego_oid_desc;
+
+  // Import server name
+  name_buf.value = (void *)spn;
+  name_buf.length = strlen(spn);
+  major = gss_import_name(&minor, &name_buf, GSS_C_NT_HOSTBASED_SERVICE,
+                          &server_name);
+  if (GSS_ERROR(major)) {
+    result.error_code = 1;
+    format_gss_error(major, minor, result.error_msg, sizeof(result.error_msg));
+    return result;
+  }
+
+  // No pre-flight gss_acquire_cred: in the SSO Extension environment,
+  // gss_acquire_cred with the SPNEGO OID always fails (GSS_S_NO_CRED)
+  // regardless of cache type. We skip it and go straight to
+  // gss_init_sec_context with GSS_C_NO_CREDENTIAL, letting the framework
+  // find credentials via the process-default cache (set by
+  // gss_krb5_ccache_name).
+  major = gss_init_sec_context(
+      &minor,
+      GSS_C_NO_CREDENTIAL,  // let framework find creds via default cache
+      &context, server_name,
+      spnego_oid,  // SPNEGO mechanism
+      GSS_C_MUTUAL_FLAG | GSS_C_REPLAY_FLAG,
+      0,  // default lifetime
+      GSS_C_NO_CHANNEL_BINDINGS,
+      GSS_C_NO_BUFFER,  // no input token (first call)
+      NULL,             // actual mech type (output)
+      &output_token,
+      NULL,  // ret_flags
+      NULL   // time_rec
+  );
+
+  // Relaxed error check for Apple GSS.framework quirk:
+  // gss_init_sec_context may return GSS_S_BAD_MECH (0x10000) while still
+  // producing a valid SPNEGO token. We accept the token if:
+  //   1. The major status is specifically GSS_S_BAD_MECH (not other errors)
+  //   2. The output token is non-empty
+  //   3. The first byte is 0x60 (ASN.1 Application Constructed tag for SPNEGO)
+  int has_usable_token = 0;
+  if (!GSS_ERROR(major) && output_token.length > 0) {
+    has_usable_token = 1;
+  } else if (major == GSS_S_BAD_MECH && output_token.length > 0 &&
+             ((unsigned char *)output_token.value)[0] == 0x60) {
+    has_usable_token = 1;
+  }
+
+  if (!has_usable_token) {
+    result.error_code = 1;
+    format_gss_error(major, minor, result.error_msg, sizeof(result.error_msg));
+    gss_release_name(&minor, &server_name);
+    if (output_token.length > 0) {
+      gss_release_buffer(&minor, &output_token);
+    }
+    if (context != GSS_C_NO_CONTEXT) {
+      gss_delete_sec_context(&minor, &context, GSS_C_NO_BUFFER);
+    }
+    return result;
+  }
+
+  // Copy output token to caller-owned memory
+  result.data = malloc(output_token.length);
+  if (result.data != NULL) {
+    memcpy(result.data, output_token.value, output_token.length);
+    result.length = output_token.length;
+  } else {
+    result.error_code = 1;
+    snprintf(result.error_msg, sizeof(result.error_msg),
+             "failed to allocate memory for token");
+  }
+
+  // Cleanup GSS-API resources
+  gss_release_buffer(&minor, &output_token);
+  gss_release_name(&minor, &server_name);
+  if (context != GSS_C_NO_CONTEXT) {
+    gss_delete_sec_context(&minor, &context, GSS_C_NO_BUFFER);
+  }
+
+  return result;
+}
+
 void free_token_data(void *data) { free(data); }
