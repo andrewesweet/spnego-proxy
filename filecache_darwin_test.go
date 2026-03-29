@@ -118,7 +118,7 @@ func TestFileCacheManagerCloseIdempotentUnderConcurrency(t *testing.T) {
 	}
 }
 
-func TestFileCacheManagerZeroFileContents(t *testing.T) {
+func TestZeroFileContents(t *testing.T) {
 	m, err := NewFileCacheManager()
 	if err != nil {
 		t.Fatalf("NewFileCacheManager: %v", err)
@@ -132,8 +132,8 @@ func TestFileCacheManagerZeroFileContents(t *testing.T) {
 	}
 
 	// Zero the file.
-	if err := m.ZeroFileContents(); err != nil {
-		t.Fatalf("ZeroFileContents: %v", err)
+	if err := zeroFileContents(m.CachePath()); err != nil {
+		t.Fatalf("zeroFileContents: %v", err)
 	}
 
 	// Read back and verify all zeros.
@@ -149,6 +149,144 @@ func TestFileCacheManagerZeroFileContents(t *testing.T) {
 			t.Errorf("byte %d = 0x%02x, want 0x00", i, b)
 			break
 		}
+	}
+}
+
+func TestZeroFileContentsEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := zeroFileContents(path); err != nil {
+		t.Fatalf("zeroFileContents on empty file: %v", err)
+	}
+	contents, _ := os.ReadFile(path)
+	if len(contents) != 0 {
+		t.Errorf("expected empty file, got %d bytes", len(contents))
+	}
+}
+
+func TestZeroFileContentsLargeFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "large")
+	// Write 10KB of non-zero data (larger than the 4096 chunk size).
+	data := make([]byte, 10240)
+	for i := range data {
+		data[i] = 0xFF
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := zeroFileContents(path); err != nil {
+		t.Fatalf("zeroFileContents on large file: %v", err)
+	}
+	contents, _ := os.ReadFile(path)
+	if len(contents) != len(data) {
+		t.Fatalf("file length = %d, want %d", len(contents), len(data))
+	}
+	for i, b := range contents {
+		if b != 0 {
+			t.Errorf("byte %d = 0x%02x, want 0x00", i, b)
+			break
+		}
+	}
+}
+
+func TestZeroFileContentsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	link := filepath.Join(dir, "link")
+	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	// zeroFileContents should refuse to follow the symlink (O_NOFOLLOW).
+	err := zeroFileContents(link)
+	if err == nil {
+		t.Fatal("expected error when zeroing a symlink, got nil")
+	}
+}
+
+func TestZeroFileContentsNonexistent(t *testing.T) {
+	err := zeroFileContents(filepath.Join(t.TempDir(), "does-not-exist"))
+	if err == nil {
+		t.Fatal("expected error for nonexistent file")
+	}
+}
+
+func TestFileCacheManagerCloseZerosAndRemovesCopiedCache(t *testing.T) {
+	m, err := NewFileCacheManager()
+	if err != nil {
+		t.Fatalf("NewFileCacheManager: %v", err)
+	}
+	tmpDir := m.tempDir
+	cachePath := m.CachePath()
+
+	// Simulate a successful copy by writing data and setting copied=true.
+	data := []byte("KERBEROS_TGT_CREDENTIAL_DATA_FOR_TESTING")
+	if err := os.WriteFile(cachePath, data, 0o600); err != nil {
+		t.Fatalf("write dummy cache: %v", err)
+	}
+	m.copied = true
+
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// The temp directory and cache file should be removed.
+	if _, err := os.Stat(tmpDir); !os.IsNotExist(err) {
+		t.Errorf("temp dir %q still exists after Close", tmpDir)
+	}
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Errorf("cache file %q still exists after Close", cachePath)
+	}
+}
+
+func TestFileCacheManagerForceRefreshRespectsMinInterval(t *testing.T) {
+	m, err := NewFileCacheManager()
+	if err != nil {
+		t.Fatalf("NewFileCacheManager: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+
+	// Simulate a recent copy.
+	m.copied = true
+	m.lastCopy = time.Now()
+	m.expiry = time.Now().Add(30 * time.Minute)
+
+	// ForceRefresh should set the flag but NeedsRefresh should still
+	// return false because the minimum interval hasn't elapsed.
+	m.ForceRefresh()
+	if m.NeedsRefresh() {
+		t.Error("NeedsRefresh() = true immediately after ForceRefresh; want false (min interval)")
+	}
+
+	// Simulate that the min interval has elapsed.
+	m.lastCopy = time.Now().Add(-fileCacheMinRefreshInterval - time.Second)
+	if !m.NeedsRefresh() {
+		t.Error("NeedsRefresh() = false after min interval elapsed with ForceRefresh; want true")
+	}
+}
+
+func TestCleanStaleCaches(t *testing.T) {
+	// Create a fake stale directory in the system temp dir.
+	staleDir, err := os.MkdirTemp("", "spnego-proxy-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleCachePath := filepath.Join(staleDir, "krb5cc")
+	if err := os.WriteFile(staleCachePath, []byte("stale-cred"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanStaleCaches()
+
+	if _, err := os.Stat(staleDir); !os.IsNotExist(err) {
+		t.Errorf("stale directory %q still exists after cleanStaleCaches", staleDir)
+		_ = os.RemoveAll(staleDir) // cleanup on failure
 	}
 }
 

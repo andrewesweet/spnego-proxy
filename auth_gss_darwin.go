@@ -86,12 +86,12 @@ func (g *GSSTokenProvider) getTokenDefault() (string, error) {
 		} else {
 			hint = " (try 'klist' to check credentials or 'kinit' to refresh)"
 		}
-		return "", &CredentialError{authError{msg: fmt.Sprintf("GSS-API error: %s%s", msg, hint)}}
+		return "", newCredentialError("GSS-API error: %s%s", msg, hint)
 	}
 	if result.data == nil || result.length == 0 {
 		return "", &NegotiationError{authError{msg: "GSS-API returned empty token"}}
 	}
-	defer C.free_token_data(result.data)
+	defer C.free(result.data)
 
 	tokenBytes := C.GoBytes(result.data, C.int(result.length))
 	return base64.StdEncoding.EncodeToString(tokenBytes), nil
@@ -133,20 +133,21 @@ func (g *GSSTokenProvider) acquireTokenNoPreFlight() (string, error) {
 	result := C.acquire_spnego_token_no_preflight(cspn)
 	if result.error_code != 0 {
 		msg := C.GoString(&result.error_msg[0])
-		return "", &CredentialError{authError{
-			msg: fmt.Sprintf("GSS-API error (file-cache): %s (cache=%s)", msg, g.fileCache.CachePath()),
-		}}
+		return "", newCredentialError("GSS-API error (file-cache): %s (cache=%s)", msg, g.fileCache.CachePath())
 	}
 	if result.data == nil || result.length == 0 {
 		return "", &NegotiationError{authError{msg: "GSS-API returned empty token (file-cache)"}}
 	}
-	defer C.free_token_data(result.data)
+	defer C.free(result.data)
 
 	tokenBytes := C.GoBytes(result.data, C.int(result.length))
 	return base64.StdEncoding.EncodeToString(tokenBytes), nil
 }
 
 func (g *GSSTokenProvider) Close() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
 	if g.fileCache != nil {
 		return g.fileCache.Close()
 	}

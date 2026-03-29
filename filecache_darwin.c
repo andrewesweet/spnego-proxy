@@ -10,7 +10,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 // gss_krb5_copy_ccache is deprecated in favor of gss_export_cred, but
 // gss_export_cred serializes to a buffer rather than writing directly to a
@@ -25,14 +24,45 @@
 static const gss_OID_desc krb5_mech_oid_desc = {
     9, (void *)"\x2a\x86\x48\x86\xf7\x12\x01\x02\x02"};
 
+// open_file_ccache initializes a krb5 context and resolves a FILE: credential
+// cache at the given path. On success, the caller must close/destroy the cache
+// and free the context. Returns 0 on success, -1 on failure (with error
+// message written to errbuf).
+static int open_file_ccache(const char *path, krb5_context *ctx_out,
+                            krb5_ccache *cc_out, char *errbuf, size_t errlen) {
+  krb5_error_code ret = krb5_init_context(ctx_out);
+  if (ret != 0) {
+    snprintf(errbuf, errlen, "krb5_init_context failed: %d", (int)ret);
+    return -1;
+  }
+
+  char ccname[1024];
+  int n = snprintf(ccname, sizeof(ccname), "FILE:%s", path);
+  if (n < 0 || (size_t)n >= sizeof(ccname)) {
+    snprintf(errbuf, errlen, "cache path too long");
+    krb5_free_context(*ctx_out);
+    *ctx_out = NULL;
+    return -1;
+  }
+
+  ret = krb5_cc_resolve(*ctx_out, ccname, cc_out);
+  if (ret != 0) {
+    snprintf(errbuf, errlen, "krb5_cc_resolve failed: %d", (int)ret);
+    krb5_free_context(*ctx_out);
+    *ctx_out = NULL;
+    return -1;
+  }
+
+  return 0;
+}
+
 // iter_ctx is passed through gss_iter_creds_f to the callback. It carries the
-// destination krb5_ccache and accumulates the result of the best (longest
-// lifetime) credential copy.
+// destination krb5_ccache and accumulates the result of the credential copy.
 typedef struct {
   krb5_context krb5_ctx;
   krb5_ccache dest_cc;
-  uint32_t best_lifetime;  // longest lifetime seen so far
-  int copied;              // 1 if at least one copy succeeded
+  uint32_t lifetime;  // remaining lifetime of the copied credential
+  int copied;         // 1 if at least one copy succeeded
   int error_code;
   char error_msg[512];
 } iter_ctx;
@@ -132,7 +162,7 @@ static void cred_iter_callback(void *userctx, gss_OID mech,
     lifetime = 3600;  // Cap at 1 hour.
   }
 
-  ctx->best_lifetime = lifetime;
+  ctx->lifetime = lifetime;
   ctx->copied = 1;
   ctx->error_code = 0;
   ctx->error_msg[0] = '\0';
@@ -142,33 +172,11 @@ filecache_result copy_creds_to_file_cache(const char *dest_path) {
   filecache_result result;
   memset(&result, 0, sizeof(result));
 
-  // Initialize a krb5 context for cache operations.
   krb5_context krb5_ctx = NULL;
-  krb5_error_code ret = krb5_init_context(&krb5_ctx);
-  if (ret != 0) {
-    result.error_code = 1;
-    snprintf(result.error_msg, sizeof(result.error_msg),
-             "krb5_init_context failed: %d", (int)ret);
-    return result;
-  }
-
-  // Build the "FILE:<path>" cache name and resolve it.
-  char ccname[1024];
-  int n = snprintf(ccname, sizeof(ccname), "FILE:%s", dest_path);
-  if (n < 0 || (size_t)n >= sizeof(ccname)) {
-    result.error_code = 1;
-    snprintf(result.error_msg, sizeof(result.error_msg), "cache path too long");
-    krb5_free_context(krb5_ctx);
-    return result;
-  }
-
   krb5_ccache dest_cc = NULL;
-  ret = krb5_cc_resolve(krb5_ctx, ccname, &dest_cc);
-  if (ret != 0) {
+  if (open_file_ccache(dest_path, &krb5_ctx, &dest_cc, result.error_msg,
+                       sizeof(result.error_msg)) != 0) {
     result.error_code = 1;
-    snprintf(result.error_msg, sizeof(result.error_msg),
-             "krb5_cc_resolve failed: %d", (int)ret);
-    krb5_free_context(krb5_ctx);
     return result;
   }
 
@@ -201,7 +209,7 @@ filecache_result copy_creds_to_file_cache(const char *dest_path) {
     return result;
   }
 
-  result.lifetime = ctx.best_lifetime;
+  result.lifetime = ctx.lifetime;
   return result;
 }
 
@@ -218,31 +226,15 @@ int destroy_file_cache(const char *path) {
   // The caller is responsible for zeroing the file contents before calling
   // this function (defense-in-depth).
   krb5_context krb5_ctx = NULL;
-  krb5_error_code ret = krb5_init_context(&krb5_ctx);
-  if (ret != 0) {
-    // Fallback: just unlink directly.
-    unlink(path);
-    return -1;
-  }
-
-  char ccname[1024];
-  int n = snprintf(ccname, sizeof(ccname), "FILE:%s", path);
-  if (n < 0 || (size_t)n >= sizeof(ccname)) {
-    krb5_free_context(krb5_ctx);
-    unlink(path);
-    return -1;
-  }
-
   krb5_ccache cc = NULL;
-  ret = krb5_cc_resolve(krb5_ctx, ccname, &cc);
-  if (ret != 0) {
-    krb5_free_context(krb5_ctx);
+  char errbuf[256];
+  if (open_file_ccache(path, &krb5_ctx, &cc, errbuf, sizeof(errbuf)) != 0) {
     unlink(path);
     return -1;
   }
 
   // krb5_cc_destroy unlinks the file. Deprecated but no GSS replacement.
-  ret = krb5_cc_destroy(krb5_ctx, cc);
+  krb5_error_code ret = krb5_cc_destroy(krb5_ctx, cc);
   // cc is freed by krb5_cc_destroy; do not call krb5_cc_close.
   krb5_free_context(krb5_ctx);
 

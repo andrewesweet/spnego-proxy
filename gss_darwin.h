@@ -9,7 +9,7 @@
 
 // gss_token_result holds the output of a GSS-API token acquisition.
 typedef struct {
-  void *data;      // Token bytes (caller must free via free_token_data)
+  void *data;      // Token bytes (caller must free via free())
   size_t length;   // Token length in bytes
   int error_code;  // Non-zero on error
   char error_msg[256];
@@ -31,9 +31,5 @@ gss_token_result acquire_spnego_token(const char *spn);
 // successfully despite a GSS_S_BAD_MECH major status when using FILE: caches
 // copied from the SSO Extension's API: cache.
 gss_token_result acquire_spnego_token_no_preflight(const char *spn);
-
-// free_token_data frees token data returned by acquire_spnego_token or
-// acquire_spnego_token_no_preflight.
-void free_token_data(void *data);
 
 #endif

@@ -40,15 +40,42 @@ type FileCacheManager struct {
 	expiry        time.Time // estimated TGT expiry
 	lastCopy      time.Time // time of last successful copy
 	copied        bool      // whether at least one copy has succeeded
+	forceRefresh  bool      // set by ForceRefresh(); cleared after next copy
 	ccacheNameSet bool      // whether gss_krb5_ccache_name has been called
 	closed        bool
 	mu            sync.Mutex // protects closed flag for idempotent Close()
+}
+
+// cleanStaleCaches removes leftover spnego-proxy-* temp directories from
+// previous runs that were not cleaned up (e.g., due to SIGKILL or crash).
+// This is best-effort; errors are logged but not returned.
+func cleanStaleCaches() {
+	pattern := filepath.Join(os.TempDir(), "spnego-proxy-*")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return
+	}
+	for _, dir := range matches {
+		// Zero the cache file before removing, in case it contains credentials.
+		cachePath := filepath.Join(dir, "krb5cc")
+		if err := zeroFileContents(cachePath); err == nil {
+			slog.Debug("zeroed stale cache file", "path", cachePath)
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			slog.Warn("failed to remove stale cache directory", "path", dir, "error", err)
+		} else {
+			slog.Info("removed stale cache directory", "path", dir)
+		}
+	}
 }
 
 // NewFileCacheManager creates a secure temporary directory and returns a
 // manager that will populate a FILE: credential cache inside it. The cache
 // is not populated until EnsureCache is called (lazy initialization).
 func NewFileCacheManager() (*FileCacheManager, error) {
+	// Clean up any stale cache directories from crashed previous runs.
+	cleanStaleCaches()
+
 	tmpDir, err := os.MkdirTemp("", "spnego-proxy-")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp directory: %w", err)
@@ -80,16 +107,22 @@ func (m *FileCacheManager) CachePath() string {
 }
 
 // NeedsRefresh reports whether the cache needs to be (re-)populated.
-// This returns true if no copy has been done, or if the TGT is near expiry.
+// This returns true if no copy has been done, if a forced refresh was
+// requested, or if the TGT is near expiry. The minimum refresh interval
+// is always enforced to prevent re-copy storms.
 func (m *FileCacheManager) NeedsRefresh() bool {
 	if !m.copied {
 		return true
 	}
 
-	// If the TGT lifetime was very short (< refresh margin), avoid a
-	// perpetual re-copy loop by enforcing a minimum interval.
+	// Enforce minimum interval to prevent re-copy storms, even when
+	// ForceRefresh has been called.
 	if time.Since(m.lastCopy) < fileCacheMinRefreshInterval {
 		return false
+	}
+
+	if m.forceRefresh {
+		return true
 	}
 
 	return time.Until(m.expiry) < fileCacheRefreshMargin
@@ -97,8 +130,9 @@ func (m *FileCacheManager) NeedsRefresh() bool {
 
 // ForceRefresh marks the cache as needing refresh on the next EnsureCache
 // call. This is used after a token acquisition failure to force a re-copy.
+// The minimum refresh interval is still enforced to prevent re-copy storms.
 func (m *FileCacheManager) ForceRefresh() {
-	m.copied = false
+	m.forceRefresh = true
 }
 
 // EnsureCache populates the FILE: credential cache if needed (first call
@@ -116,25 +150,19 @@ func (m *FileCacheManager) EnsureCache() error {
 	result := C.copy_creds_to_file_cache(cpath)
 	if result.error_code != 0 {
 		msg := C.GoString(&result.error_msg[0])
-		return &CredentialError{authError{
-			msg: fmt.Sprintf("file cache copy failed: %s", msg),
-		}}
+		return newCredentialError("file cache copy failed: %s", msg)
 	}
 
 	// Verify the cache file was created with restrictive permissions.
 	info, err := os.Stat(m.cachePath)
 	if err != nil {
-		return &CredentialError{authError{
-			msg: fmt.Sprintf("cache file not created: %v", err),
-		}}
+		return newCredentialError("cache file not created: %v", err)
 	}
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		slog.Warn("cache file has unexpected permissions, tightening",
 			"path", m.cachePath, "mode", fmt.Sprintf("%04o", perm))
 		if err := os.Chmod(m.cachePath, 0o600); err != nil {
-			return &CredentialError{authError{
-				msg: fmt.Sprintf("failed to restrict cache file permissions: %v", err),
-			}}
+			return newCredentialError("failed to restrict cache file permissions: %v", err)
 		}
 	}
 
@@ -144,6 +172,7 @@ func (m *FileCacheManager) EnsureCache() error {
 	m.expiry = now.Add(lifetime)
 	m.lastCopy = now
 	m.copied = true
+	m.forceRefresh = false
 
 	slog.Info("credentials copied to file cache",
 		"cache_path", m.cachePath,
@@ -156,20 +185,11 @@ func (m *FileCacheManager) EnsureCache() error {
 	defer C.free(unsafe.Pointer(ccname))
 
 	if C.set_default_ccache_name(ccname) != 0 {
-		return &CredentialError{authError{
-			msg: "failed to set default credential cache name via gss_krb5_ccache_name",
-		}}
+		return newCredentialError("failed to set default credential cache name via gss_krb5_ccache_name")
 	}
 	m.ccacheNameSet = true
 
 	return nil
-}
-
-// ZeroFileContents overwrites the cache file contents with zeros.
-// This is defense-in-depth before file deletion, since krb5_cc_destroy
-// may only unlink without zeroing on some implementations.
-func (m *FileCacheManager) ZeroFileContents() error {
-	return zeroFileContents(m.cachePath)
 }
 
 // zeroFileContents overwrites the file at path with zero bytes.
