@@ -119,13 +119,10 @@ gss_token_result acquire_spnego_token(const char *spn) {
                            GSS_C_INITIATE, &cred, NULL, NULL);
   if (GSS_ERROR(major)) {
     result.error_code = 1;
-    format_gss_error(major, minor, result.error_msg, sizeof(result.error_msg));
-    // Prepend "credential check: " prefix. Format into a temporary buffer
-    // first, then copy back with the prefix.
-    char tmp[sizeof(result.error_msg)];
-    memcpy(tmp, result.error_msg, sizeof(tmp));
+    char gss_err[230];
+    format_gss_error(major, minor, gss_err, sizeof(gss_err));
     snprintf(result.error_msg, sizeof(result.error_msg), "credential check: %s",
-             tmp);
+             gss_err);
     gss_release_name(&minor, &server_name);
     return result;
   }
