@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 // gss_krb5_copy_ccache is deprecated in favor of gss_export_cred, but
 // gss_export_cred serializes to a buffer rather than writing directly to a

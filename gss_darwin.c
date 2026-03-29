@@ -11,13 +11,21 @@
 
 static void append_status_messages(OM_uint32 status_value, int status_type,
                                    char *buf, size_t buflen, size_t *offset) {
+  if (buflen < 3) {
+    return;
+  }
   OM_uint32 msg_ctx = 0;
   OM_uint32 min_stat;
   gss_buffer_desc msg_buf;
+  int iterations = 0;
 
   do {
-    gss_display_status(&min_stat, status_value, status_type, GSS_C_NO_OID,
-                       &msg_ctx, &msg_buf);
+    OM_uint32 ret =
+        gss_display_status(&min_stat, status_value, status_type, GSS_C_NO_OID,
+                           &msg_ctx, &msg_buf);
+    if (GSS_ERROR(ret)) {
+      break;
+    }
     if (*offset > 0 && *offset < buflen - 2) {
       buf[(*offset)++] = ';';
       buf[(*offset)++] = ' ';
@@ -28,7 +36,7 @@ static void append_status_messages(OM_uint32 status_value, int status_type,
     memcpy(buf + *offset, msg_buf.value, to_copy);
     *offset += to_copy;
     gss_release_buffer(&min_stat, &msg_buf);
-  } while (msg_ctx != 0 && *offset < buflen - 1);
+  } while (msg_ctx != 0 && *offset < buflen - 1 && ++iterations < 32);
 }
 
 // SPNEGO mechanism OID: 1.3.6.1.5.5.2

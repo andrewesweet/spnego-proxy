@@ -72,5 +72,22 @@ func FuzzConnectPortAllowed(f *testing.F) {
 				t.Errorf("connectPortAllowed(%q, %v) = false but port is in list", port, allowed)
 			}
 		}
+
+		// Invariant 4: if port is NOT in the list and no wildcard, result must be false.
+		if len(allowed) > 0 {
+			hasWildcard := false
+			inList := false
+			for _, p := range allowed {
+				if p == "*" {
+					hasWildcard = true
+				}
+				if p == port {
+					inList = true
+				}
+			}
+			if !hasWildcard && !inList && result {
+				t.Errorf("connectPortAllowed(%q, %v) = true, want false (port not in list, no wildcard)", port, allowed)
+			}
+		}
 	})
 }

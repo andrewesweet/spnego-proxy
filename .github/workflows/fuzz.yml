@@ -12,6 +12,7 @@ jobs:
   fuzz-cross-platform:
     name: Fuzz (cross-platform)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -43,6 +44,7 @@ jobs:
   fuzz-darwin:
     name: Fuzz (darwin)
     runs-on: macos-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
