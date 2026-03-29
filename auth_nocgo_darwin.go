@@ -6,5 +6,8 @@ import "errors"
 
 // newNativeTokenProvider on darwin without CGO cannot use the GSS-API framework.
 func newNativeTokenProvider(proxy, spn string, fileCacheEnabled bool) (TokenProvider, error) {
+	if fileCacheEnabled {
+		return nil, errors.New("-file-cache requires CGO; rebuild with CGO_ENABLED=1 on macOS")
+	}
 	return nil, errors.New("native GSS-API requires CGO; rebuild with CGO_ENABLED=1 on macOS, or use -user for password-based authentication")
 }

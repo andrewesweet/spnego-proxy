@@ -6,14 +6,13 @@
 #define FILECACHE_DARWIN_H
 
 #include <stdint.h>
-#include <time.h>
 
 // filecache_result holds the outcome of a credential cache copy operation.
 typedef struct {
-  int error_code;      // 0 on success
-  char error_msg[512]; // error description
-  uint32_t lifetime;   // remaining credential lifetime in seconds (from
-                       // gss_inquire_cred)
+  int error_code;       // 0 on success
+  char error_msg[512];  // error description
+  uint32_t lifetime;    // remaining credential lifetime in seconds (from
+                        // gss_inquire_cred)
 } filecache_result;
 
 // copy_creds_to_file_cache enumerates Kerberos credentials via

@@ -199,8 +199,9 @@ func (m *FileCacheManager) Close() error {
 		C.free(unsafe.Pointer(cpath))
 	}
 
-	// Remove the temp directory (should be empty after cache destruction).
-	if err := os.Remove(m.tempDir); err != nil && !os.IsNotExist(err) {
+	// Remove the temp directory (should be empty after cache destruction,
+	// but use RemoveAll for robustness if destroy_file_cache failed to unlink).
+	if err := os.RemoveAll(m.tempDir); err != nil {
 		slog.Warn("failed to remove temp directory", "path", m.tempDir, "error", err)
 	}
 

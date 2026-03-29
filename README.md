@@ -164,7 +164,7 @@ The `-file-cache` flag enables a workaround that:
 5. Automatically refreshes the copy when the credential approaches expiry
 6. Securely cleans up (zeroes and deletes) the file cache on exit
 
-### Usage
+### Example
 
 ```bash
 ./spnego-proxy \

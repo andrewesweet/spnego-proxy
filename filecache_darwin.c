@@ -13,6 +13,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+// gss_krb5_copy_ccache is deprecated in favor of gss_export_cred, but
+// gss_export_cred serializes to a buffer rather than writing directly to a
+// krb5_ccache. Since we need a FILE: ccache on disk (for gss_init_sec_context
+// via gss_krb5_ccache_name), gss_krb5_copy_ccache is the correct API.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
 // Kerberos 5 mechanism OID: 1.2.840.113554.1.2.2
 static const gss_OID_desc krb5_mech_oid_desc = {
     9, (void *)"\x2a\x86\x48\x86\xf7\x12\x01\x02\x02"};
@@ -24,8 +31,8 @@ typedef struct {
   krb5_context krb5_ctx;
   krb5_ccache dest_cc;
   const char *dest_path;
-  uint32_t best_lifetime; // longest lifetime seen so far
-  int copied;             // 1 if at least one copy succeeded
+  uint32_t best_lifetime;  // longest lifetime seen so far
+  int copied;              // 1 if at least one copy succeeded
   int error_code;
   char error_msg[512];
 } iter_ctx;
@@ -95,7 +102,7 @@ static void cred_iter_callback(void *userctx, gss_OID mech,
   // Query the credential's remaining lifetime.
   major = gss_inquire_cred(&minor, cred, NULL, &lifetime, NULL, NULL);
   if (GSS_ERROR(major) || lifetime == 0) {
-    return; // Skip expired or unqueryable credentials.
+    return;  // Skip expired or unqueryable credentials.
   }
 
   // Only copy if this credential has a longer lifetime than what we already
@@ -125,7 +132,7 @@ static void cred_iter_callback(void *userctx, gss_OID mech,
   // Cap GSS_C_INDEFINITE to avoid overflow in Go time calculations.
   // GSS_C_INDEFINITE is 0xFFFFFFFF on most implementations.
   if (lifetime == 0xFFFFFFFF) {
-    lifetime = 3600; // Cap at 1 hour.
+    lifetime = 3600;  // Cap at 1 hour.
   }
 
   ctx->best_lifetime = lifetime;
@@ -153,8 +160,7 @@ filecache_result copy_creds_to_file_cache(const char *dest_path) {
   int n = snprintf(ccname, sizeof(ccname), "FILE:%s", dest_path);
   if (n < 0 || (size_t)n >= sizeof(ccname)) {
     result.error_code = 1;
-    snprintf(result.error_msg, sizeof(result.error_msg),
-             "cache path too long");
+    snprintf(result.error_msg, sizeof(result.error_msg), "cache path too long");
     krb5_free_context(krb5_ctx);
     return result;
   }
@@ -184,7 +190,7 @@ filecache_result copy_creds_to_file_cache(const char *dest_path) {
                    cred_iter_callback);
 
   // Close the krb5 cache handle (does not destroy the file).
-  krb5_cc_close(krb5_ctx, dest_cc); // deprecated but no GSS equivalent
+  krb5_cc_close(krb5_ctx, dest_cc);  // deprecated but no GSS equivalent
   krb5_free_context(krb5_ctx);
 
   if (!ctx.copied) {
@@ -202,6 +208,8 @@ filecache_result copy_creds_to_file_cache(const char *dest_path) {
   result.lifetime = ctx.best_lifetime;
   return result;
 }
+
+#pragma clang diagnostic pop
 
 int set_default_ccache_name(const char *name) {
   OM_uint32 minor;
