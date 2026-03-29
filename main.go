@@ -1083,12 +1083,11 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 	// D7 (RFC 9110 §9.3.6): relay the upstream's actual response to the
 	// client. We never synthesise our own 2xx here.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Upstream rejected the CONNECT — write the full response
-		// (non-2xx is terminal, so Content-Length/Connection are fine)
-		// and close. Connection is cleaned up by deferred conn.Close()
-		// in handleClient (D5).
-		resp.Body = http.NoBody
-		resp.ContentLength = 0
+		// Upstream rejected the CONNECT — forward the full response
+		// including any rejection body (e.g. HTML error page).
+		// Non-2xx is terminal, so Content-Length/Connection are fine.
+		// Connection is cleaned up by deferred conn.Close() in
+		// handleClient (D5).
 		if err := resp.Write(conn); err != nil {
 			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
 		}
