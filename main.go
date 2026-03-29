@@ -222,6 +222,26 @@ func injectVia(header http.Header, proto, pseudonym string) {
 	appendHeaderValue(header, "Via", proto+" "+pseudonym)
 }
 
+// writeConnectOK writes a raw CONNECT 2xx response to conn without using
+// http.Response.Write, which would emit Content-Length: 0 and Connection:
+// close headers. Per RFC 9110 §9.3.6, a successful CONNECT response consists
+// only of a status line and optional headers — there is no message body, so
+// Content-Length is semantically meaningless. HTTP clients like Bun and undici
+// interpret Content-Length: 0 literally and close the connection before the
+// TLS handshake can begin.
+func writeConnectOK(conn net.Conn, resp *http.Response) error {
+	var buf strings.Builder
+	fmt.Fprintf(&buf, "HTTP/%d.%d %d %s\r\n",
+		resp.ProtoMajor, resp.ProtoMinor,
+		resp.StatusCode, http.StatusText(resp.StatusCode))
+	if via := resp.Header.Get("Via"); via != "" {
+		fmt.Fprintf(&buf, "Via: %s\r\n", via)
+	}
+	buf.WriteString("\r\n")
+	_, err := io.WriteString(conn, buf.String())
+	return err
+}
+
 // logTECLConflict logs the Transfer-Encoding / Content-Length conflict
 // resolution warning per RFC 9110 §6.2. direction is "request" or "response".
 func logTECLConflict(direction string, te []string, cl string) {
@@ -830,15 +850,12 @@ func handleDirectConnect(conn net.Conn, req *http.Request, reqReader *bufio.Read
 
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
-		Status:     "200 Connection Established",
-		Proto:      "HTTP/1.1",
 		ProtoMajor: 1,
 		ProtoMinor: 1,
 		Header:     make(http.Header),
-		Body:       http.NoBody,
 	}
 	injectVia(resp.Header, req.Proto, cfg.Pseudonym)
-	if err := resp.Write(conn); err != nil {
+	if err := writeConnectOK(conn, resp); err != nil {
 		slog.Error("noproxy CONNECT response write failed", "error", err, "target", target, "client_addr", clientAddr)
 		return
 	}
@@ -1063,25 +1080,28 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 		return
 	}
 
-	// For CONNECT responses, the "body" is the raw tunnel data — it must
-	// not be written by resp.Write (that would block waiting for the
-	// upstream to close the connection). We write only the response
-	// headers here; raw tunnel forwarding happens below after 2xx.
-	resp.Body = http.NoBody
-	resp.ContentLength = 0
-
 	// D7 (RFC 9110 §9.3.6): relay the upstream's actual response to the
 	// client. We never synthesise our own 2xx here.
-	if err := resp.Write(conn); err != nil {
-		slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Upstream rejected the CONNECT — write the full response
+		// (non-2xx is terminal, so Content-Length/Connection are fine)
+		// and close. Connection is cleaned up by deferred conn.Close()
+		// in handleClient (D5).
+		resp.Body = http.NoBody
+		resp.ContentLength = 0
+		if err := resp.Write(conn); err != nil {
+			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+		}
+		slog.Debug("upstream rejected CONNECT", "status", resp.StatusCode, "client_addr", clientAddr)
 		return
 	}
 
-	// Only start bidirectional tunnel forwarding after confirmed 2xx.
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Upstream rejected the CONNECT — connection will be closed by
-		// the deferred conn.Close() in handleClient (D5).
-		slog.Debug("upstream rejected CONNECT", "status", resp.StatusCode, "client_addr", clientAddr)
+	// For 2xx CONNECT responses, write a raw status line instead of using
+	// resp.Write, which emits Content-Length: 0 and Connection: close —
+	// headers that cause Bun/undici clients to close the connection before
+	// the TLS handshake through the tunnel can begin.
+	if err := writeConnectOK(conn, resp); err != nil {
+		slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
 		return
 	}
 

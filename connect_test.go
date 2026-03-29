@@ -559,6 +559,12 @@ func TestD3_RFC9112_NoTransferEncodingInCONNECTResponse(t *testing.T) {
 
 	// D3: Transfer-Encoding MUST NOT appear in the CONNECT 2xx response.
 	assertHeaderAbsent(t, resp.Header, "Transfer-Encoding")
+
+	// Content-Length and Connection: close MUST NOT appear in the CONNECT
+	// 2xx response — they cause Bun/undici to close the connection before
+	// the TLS handshake through the tunnel can begin.
+	assertHeaderAbsent(t, resp.Header, "Content-Length")
+	assertHeaderAbsent(t, resp.Header, "Connection")
 }
 
 // ---------------------------------------------------------------------------
