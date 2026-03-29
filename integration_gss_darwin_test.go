@@ -27,7 +27,7 @@ func TestGSSTokenProviderWithEphemeralKDC(t *testing.T) {
 	defer kdc.Close()
 	kdc.SetEnv(t)
 
-	provider, err := NewGSSTokenProvider("localhost", "")
+	provider, err := NewGSSTokenProvider("localhost", "", false)
 	if err != nil {
 		t.Fatalf("NewGSSTokenProvider: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestGSSTokenProviderExplicitSPNWithKDC(t *testing.T) {
 	defer kdc.Close()
 	kdc.SetEnv(t)
 
-	provider, err := NewGSSTokenProvider("localhost", "HTTP/localhost")
+	provider, err := NewGSSTokenProvider("localhost", "HTTP/localhost", false)
 	if err != nil {
 		t.Fatalf("NewGSSTokenProvider: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestGSSTokenProviderHostWithPort(t *testing.T) {
 	defer kdc.Close()
 	kdc.SetEnv(t)
 
-	provider, err := NewGSSTokenProvider("localhost:8080", "")
+	provider, err := NewGSSTokenProvider("localhost:8080", "", false)
 	if err != nil {
 		t.Fatalf("NewGSSTokenProvider: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestGSSTokenProviderReacquire(t *testing.T) {
 	defer kdc.Close()
 	kdc.SetEnv(t)
 
-	provider, err := NewGSSTokenProvider("localhost", "")
+	provider, err := NewGSSTokenProvider("localhost", "", false)
 	if err != nil {
 		t.Fatalf("NewGSSTokenProvider: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestGSSTokenProviderMissingCache(t *testing.T) {
 		t.Fatalf("remove ccache: %v", err)
 	}
 
-	provider, err := NewGSSTokenProvider("localhost", "")
+	provider, err := NewGSSTokenProvider("localhost", "", false)
 	if err != nil {
 		t.Fatalf("NewGSSTokenProvider: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestGSSTokenProviderUnregisteredSPN(t *testing.T) {
 	kdc.SetEnv(t)
 
 	// Use an SPN that was never registered as a principal in the KDC.
-	provider, err := NewGSSTokenProvider("unknown.host.example", "")
+	provider, err := NewGSSTokenProvider("unknown.host.example", "", false)
 	if err != nil {
 		t.Fatalf("NewGSSTokenProvider: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestGSSProxyChainWithEphemeralKDC(t *testing.T) {
 	defer kdc.Close()
 	kdc.SetEnv(t)
 
-	provider, err := NewGSSTokenProvider("localhost", "")
+	provider, err := NewGSSTokenProvider("localhost", "", false)
 	if err != nil {
 		t.Fatalf("NewGSSTokenProvider: %v", err)
 	}
