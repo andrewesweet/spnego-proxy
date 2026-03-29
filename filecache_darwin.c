@@ -6,6 +6,7 @@
 
 #include <GSS/GSS.h>
 #include <GSS/gssapi_krb5.h>
+#include <Kerberos/krb5.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

@@ -4,7 +4,7 @@ package main
 
 /*
 #cgo darwin CFLAGS: -DGSS_USE_APPLE_FRAMEWORK -Wno-deprecated-declarations
-#cgo darwin LDFLAGS: -framework GSS
+#cgo darwin LDFLAGS: -framework GSS -framework Kerberos
 #include "filecache_darwin.h"
 #include <stdlib.h>
 */
