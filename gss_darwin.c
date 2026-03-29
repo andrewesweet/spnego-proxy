@@ -67,7 +67,7 @@ static int import_server_name(const char *spn, gss_name_t *server_name,
 
 // copy_token_to_result copies the output token to caller-owned memory in
 // result. On allocation failure, it sets result->error_code.
-static void copy_token_to_result(gss_buffer_desc *output_token,
+static void copy_token_to_result(const gss_buffer_desc *output_token,
                                  gss_token_result *result) {
   if (output_token->length == 0) {
     return;

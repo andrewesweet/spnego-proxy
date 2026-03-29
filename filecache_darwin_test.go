@@ -137,7 +137,7 @@ func TestZeroFileContents(t *testing.T) {
 	}
 
 	// Read back and verify all zeros.
-	contents, err := os.ReadFile(m.CachePath())
+	contents, err := os.ReadFile(m.CachePath()) //nolint:gosec // path from test-controlled FileCacheManager
 	if err != nil {
 		t.Fatalf("read zeroed file: %v", err)
 	}
@@ -161,7 +161,10 @@ func TestZeroFileContentsEmptyFile(t *testing.T) {
 	if err := zeroFileContents(path); err != nil {
 		t.Fatalf("zeroFileContents on empty file: %v", err)
 	}
-	contents, _ := os.ReadFile(path)
+	contents, err := os.ReadFile(path) //nolint:gosec // path from t.TempDir()
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
 	if len(contents) != 0 {
 		t.Errorf("expected empty file, got %d bytes", len(contents))
 	}
@@ -181,7 +184,10 @@ func TestZeroFileContentsLargeFile(t *testing.T) {
 	if err := zeroFileContents(path); err != nil {
 		t.Fatalf("zeroFileContents on large file: %v", err)
 	}
-	contents, _ := os.ReadFile(path)
+	contents, err := os.ReadFile(path) //nolint:gosec // path from t.TempDir()
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
 	if len(contents) != len(data) {
 		t.Fatalf("file length = %d, want %d", len(contents), len(data))
 	}
@@ -448,7 +454,7 @@ func FuzzZeroFileContents(f *testing.F) {
 		}
 
 		// Verify all zeros.
-		contents, err := os.ReadFile(path)
+		contents, err := os.ReadFile(path) //nolint:gosec // path from t.TempDir()
 		if err != nil {
 			t.Fatal(err)
 		}
