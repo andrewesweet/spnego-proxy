@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -99,15 +100,15 @@ func FuzzExtractHost(f *testing.F) {
 			t.Errorf("extractHost(%q) = %q (longer than input)", addr, result)
 		}
 
-		// Invariant 2: extractHost must be idempotent.
-		if result2 := extractHost(result); result2 != result {
-			t.Errorf("extractHost not idempotent: extractHost(%q) = %q, extractHost(%q) = %q",
-				addr, result, result, result2)
-		}
-
-		// Invariant 3: result must be a substring of the input (or empty if input is empty).
+		// Invariant 2: result must be a substring of the input (or empty).
 		if result != "" && !strings.Contains(addr, result) {
 			t.Errorf("extractHost(%q) = %q (not a substring of input)", addr, result)
+		}
+
+		// Invariant 3: result must not contain a trailing port suffix.
+		// If the input has a valid host:port, the port must be stripped.
+		if h, _, err := net.SplitHostPort(addr); err == nil && result != h {
+			t.Errorf("extractHost(%q) = %q, want %q (host from SplitHostPort)", addr, result, h)
 		}
 
 		// Invariant 4: must not panic (implicit).
