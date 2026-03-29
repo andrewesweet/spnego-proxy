@@ -21,6 +21,11 @@ import (
 	"unsafe"
 )
 
+// newCredentialError creates a CredentialError with a formatted message.
+func newCredentialError(format string, args ...any) *CredentialError {
+	return &CredentialError{authError{msg: fmt.Sprintf(format, args...)}}
+}
+
 // fileCacheRefreshMargin is the time before TGT expiry at which the file
 // cache will be proactively refreshed. A refresh is also triggered on
 // demand if token acquisition fails.

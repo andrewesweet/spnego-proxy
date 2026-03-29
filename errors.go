@@ -1,7 +1,5 @@
 package main
 
-import "fmt"
-
 // authError is a shared base for authentication-related errors. It carries a
 // human-readable message and an optional wrapped cause. Embedding authError
 // into a concrete error type gives that type Error() and Unwrap() for free.
@@ -18,11 +16,6 @@ func (e *authError) Unwrap() error { return e.cause }
 // detect this with errors.As to return a targeted "refresh credentials"
 // message. The Unwrap method preserves the original error for debugging.
 type CredentialError struct{ authError }
-
-// newCredentialError creates a CredentialError with a formatted message.
-func newCredentialError(format string, args ...any) *CredentialError {
-	return &CredentialError{authError{msg: fmt.Sprintf(format, args...)}}
-}
 
 // NegotiationError indicates that SPNEGO/Kerberos negotiation failed after
 // credentials were available — typically a misconfigured SPN, unreachable

@@ -69,13 +69,15 @@ jobs:
 
       - name: Run cppcheck
         run: |
-          SDK="$(xcrun --show-sdk-path)"
+          # Only gss_darwin.c is analyzed here. filecache_darwin.c uses
+          # framework-style includes (<GSS/GSS.h>, <Kerberos/krb5.h>) that
+          # cppcheck cannot resolve without compiler-level framework search
+          # paths. clang-tidy (which uses the real compiler) covers all C
+          # files including filecache_darwin.c.
           cppcheck \
             --enable=all \
             --error-exitcode=1 \
             --check-level=exhaustive \
             --suppress=missingIncludeSystem \
             --suppress=unusedFunction \
-            -I "${SDK}/System/Library/Frameworks/GSS.framework/Headers" \
-            -I "${SDK}/System/Library/Frameworks/Kerberos.framework/Headers" \
-            gss_darwin.c filecache_darwin.c
+            gss_darwin.c
