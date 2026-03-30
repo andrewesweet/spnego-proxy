@@ -8,6 +8,7 @@
 
 #include <GSS/GSS.h>
 #include <GSS/gssapi_krb5.h>
+#include <Kerberos/krb5.h>
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"

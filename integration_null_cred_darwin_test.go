@@ -33,7 +33,7 @@ func buildDylib(t *testing.T, srcName string) string {
 
 	dylibName := strings.TrimSuffix(srcName, ".c") + ".dylib"
 	dylibPath := filepath.Join(t.TempDir(), dylibName)
-	cmd := exec.Command("clang",
+	cmd := exec.Command("clang", //nolint:gosec // G204: building test dylib from known source
 		"-dynamiclib",
 		"-framework", "GSS",
 		"-framework", "Kerberos",
@@ -305,4 +305,3 @@ func testNullCredRefreshInner(t *testing.T) {
 		t.Errorf("cache does not contain realm %s after refresh", ephemeralKDCRealm)
 	}
 }
-
