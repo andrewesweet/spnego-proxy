@@ -2,8 +2,9 @@
 // with a version that always calls the callback with a NULL credential
 // handle, simulating the Apple SSO Extension behavior on affected devices.
 //
-// Build: clang -dynamiclib -framework GSS -o interpose_null_cred.dylib interpose_null_cred.c
-// Usage: DYLD_INSERT_LIBRARIES=./interpose_null_cred.dylib ./your_binary
+// Build: clang -dynamiclib -framework GSS -o interpose_null_cred.dylib
+// interpose_null_cred.c Usage:
+// DYLD_INSERT_LIBRARIES=./interpose_null_cred.dylib ./your_binary
 //
 // This is ONLY for testing; it is not compiled into the production binary.
 
@@ -16,8 +17,7 @@ static const gss_OID_desc krb5_oid = {
 // Replacement gss_iter_creds_f that simulates the Apple SSO Extension
 // behavior: enumerate exactly one credential but pass NULL as the handle.
 static OM_uint32 interposed_gss_iter_creds_f(
-    OM_uint32 *minor_status, OM_uint32 flags, gss_const_OID mech,
-    void *userctx,
+    OM_uint32 *minor_status, OM_uint32 flags, gss_const_OID mech, void *userctx,
     void (*useriter)(void *, gss_OID, gss_cred_id_t)) {
   (void)flags;
   (void)mech;
