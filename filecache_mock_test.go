@@ -283,7 +283,7 @@ func TestEnsureCacheTightensPermissions(t *testing.T) {
 
 	// Pre-create file with overly permissive mode. The mock won't create
 	// it, so we do it manually to test the permission-tightening path.
-	if err := os.WriteFile(m.cachePath, []byte("creds"), 0o644); err != nil {
+	if err := os.WriteFile(m.cachePath, []byte("creds"), 0o644); err != nil { //nolint:gosec // intentionally permissive for testing permission tightening
 		t.Fatal(err)
 	}
 
@@ -450,7 +450,6 @@ func TestCloseDestroyCacheErrorIsNonFatal(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestEnsureCacheRecoversAfterFailure(t *testing.T) {
-	callCount := 0
 	mock := &mockCredentialCache{
 		copyCredsLifetime: 30 * time.Minute,
 		copyCredsMethod:   copyMethodGSS,
@@ -464,17 +463,15 @@ func TestEnsureCacheRecoversAfterFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("first EnsureCache should fail")
 	}
-	callCount++
 
 	// Second call succeeds.
 	mock.copyCredsErr = nil
 	if err := m.EnsureCache(); err != nil {
 		t.Fatalf("second EnsureCache should succeed: %v", err)
 	}
-	callCount++
 
-	if len(mock.copyCredsCalls) != callCount {
-		t.Errorf("CopyCreds called %d times, want %d", len(mock.copyCredsCalls), callCount)
+	if len(mock.copyCredsCalls) != 2 {
+		t.Errorf("CopyCreds called %d times, want 2", len(mock.copyCredsCalls))
 	}
 	if !m.copied {
 		t.Error("copied should be true after recovery")
