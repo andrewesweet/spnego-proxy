@@ -33,14 +33,14 @@ func setupIntegrationKDC(t *testing.T) *EphemeralKDC {
 	return kdc
 }
 
-// newFileCacheTestProvider creates a GSSTokenProvider with file-cache enabled.
-// The caller must have already configured the Kerberos environment (e.g. via
-// setupIntegrationKDC). It registers cleanup via t.Cleanup.
-func newFileCacheTestProvider(t *testing.T) *GSSTokenProvider {
+// newFileCacheTestProvider creates a FileCacheTokenProvider backed by the
+// current Kerberos environment. The caller must have already configured the
+// environment (e.g. via setupIntegrationKDC). It registers cleanup via t.Cleanup.
+func newFileCacheTestProvider(t *testing.T) *FileCacheTokenProvider {
 	t.Helper()
-	provider, err := NewGSSTokenProvider("localhost", "", true)
+	provider, err := NewFileCacheTokenProvider("localhost", "")
 	if err != nil {
-		t.Fatalf("NewGSSTokenProvider (file-cache): %v", err)
+		t.Fatalf("NewFileCacheTokenProvider: %v", err)
 	}
 	t.Cleanup(func() { _ = provider.Close() })
 	return provider
@@ -255,9 +255,9 @@ func TestFileCacheCcacheNameRedirectsTokenAcquisition(t *testing.T) {
 	// the token acquisition should still succeed using the FILE: cache.
 	t.Setenv("KRB5CCNAME", "FILE:/nonexistent/krb5cc_bogus")
 
-	provider, err := NewGSSTokenProvider("localhost", "", true)
+	provider, err := NewFileCacheTokenProvider("localhost", "")
 	if err != nil {
-		t.Fatalf("NewGSSTokenProvider: %v", err)
+		t.Fatalf("NewFileCacheTokenProvider: %v", err)
 	}
 	t.Cleanup(func() { _ = provider.Close() })
 
@@ -277,9 +277,9 @@ func TestFileCacheErrorWhenNoCredentialsExist(t *testing.T) {
 	// No KDC, no kinit, no credentials.
 	t.Setenv("KRB5CCNAME", "FILE:/nonexistent/krb5cc_test_"+t.Name())
 
-	provider, err := NewGSSTokenProvider("proxy.example.com:8080", "", true)
+	provider, err := NewFileCacheTokenProvider("proxy.example.com:8080", "")
 	if err != nil {
-		t.Fatalf("NewGSSTokenProvider: %v", err)
+		t.Fatalf("NewFileCacheTokenProvider: %v", err)
 	}
 	t.Cleanup(func() { _ = provider.Close() })
 

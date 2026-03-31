@@ -104,7 +104,7 @@ func (c *cgoCredentialCache) DestroyCache(path string) error {
 // FileCacheManager manages the lifecycle of a FILE: credential cache
 // populated from the system credential cache (typically the SSO Extension's
 // API: cache). It is safe for concurrent use; all public methods are
-// serialized by the caller's mutex (GSSTokenProvider.mu).
+// serialized by the caller's mutex (FileCacheTokenProvider.mu).
 type FileCacheManager struct {
 	cc            credentialCache // abstracted credential cache operations
 	cachePath     string          // path to the FILE: cache on disk

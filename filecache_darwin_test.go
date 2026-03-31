@@ -351,15 +351,15 @@ func TestFileCacheManagerNeedsRefresh(t *testing.T) {
 	}
 }
 
-func TestGSSTokenProviderFileCacheInit(t *testing.T) {
-	provider, err := NewGSSTokenProvider("proxy.example.com:8080", "", true)
+func TestFileCacheTokenProviderInit(t *testing.T) {
+	provider, err := NewFileCacheTokenProvider("proxy.example.com:8080", "")
 	if err != nil {
-		t.Fatalf("NewGSSTokenProvider with file-cache: %v", err)
+		t.Fatalf("NewFileCacheTokenProvider: %v", err)
 	}
 	t.Cleanup(func() { _ = provider.Close() })
 
 	if provider.fileCache == nil {
-		t.Fatal("expected non-nil fileCache when fileCacheEnabled=true")
+		t.Fatal("expected non-nil fileCache")
 	}
 
 	// Verify the temp dir was actually created on disk with correct perms.
@@ -370,24 +370,17 @@ func TestGSSTokenProviderFileCacheInit(t *testing.T) {
 	if perm := info.Mode().Perm(); perm != 0o700 {
 		t.Errorf("temp dir permissions = %04o, want 0700", perm)
 	}
-}
 
-func TestGSSTokenProviderNoFileCacheByDefault(t *testing.T) {
-	provider, err := NewGSSTokenProvider("proxy.example.com:8080", "", false)
-	if err != nil {
-		t.Fatalf("NewGSSTokenProvider: %v", err)
-	}
-	t.Cleanup(func() { _ = provider.Close() })
-
-	if provider.fileCache != nil {
-		t.Error("expected nil fileCache when fileCacheEnabled=false")
+	// Verify the inner GSSTokenProvider has the correct SPN.
+	if provider.gss.spn != "HTTP@proxy.example.com" {
+		t.Errorf("inner SPN = %q, want %q", provider.gss.spn, "HTTP@proxy.example.com")
 	}
 }
 
-func TestGSSTokenProviderCloseCallsFileCacheClose(t *testing.T) {
-	provider, err := NewGSSTokenProvider("proxy.example.com:8080", "", true)
+func TestFileCacheTokenProviderCloseCallsFileCacheClose(t *testing.T) {
+	provider, err := NewFileCacheTokenProvider("proxy.example.com:8080", "")
 	if err != nil {
-		t.Fatalf("NewGSSTokenProvider: %v", err)
+		t.Fatalf("NewFileCacheTokenProvider: %v", err)
 	}
 
 	tmpDir := provider.fileCache.tempDir
@@ -403,21 +396,32 @@ func TestGSSTokenProviderCloseCallsFileCacheClose(t *testing.T) {
 
 func TestNewNativeTokenProviderFileCacheFlagPassthrough(t *testing.T) {
 	// This test verifies that the file-cache flag is accepted and creates
-	// a provider with file-cache enabled. The initial credential probe will
-	// fail (no KDC), but the provider should still be created.
+	// a FileCacheTokenProvider. The initial credential probe will fail
+	// (no KDC), but the provider should still be created.
 	provider, err := newNativeTokenProvider("proxy.example.com:8080", "", true)
 	if err != nil {
 		t.Fatalf("newNativeTokenProvider with file-cache: %v", err)
 	}
 	t.Cleanup(func() { _ = provider.Close() })
 
-	// Verify it's a GSSTokenProvider with file cache.
-	gss, ok := provider.(*GSSTokenProvider)
+	fcp, ok := provider.(*FileCacheTokenProvider)
 	if !ok {
-		t.Fatalf("expected *GSSTokenProvider, got %T", provider)
+		t.Fatalf("expected *FileCacheTokenProvider, got %T", provider)
 	}
-	if gss.fileCache == nil {
+	if fcp.fileCache == nil {
 		t.Error("expected non-nil fileCache")
+	}
+}
+
+func TestNewNativeTokenProviderWithoutFileCache(t *testing.T) {
+	provider, err := newNativeTokenProvider("proxy.example.com:8080", "", false)
+	if err != nil {
+		t.Fatalf("newNativeTokenProvider: %v", err)
+	}
+	t.Cleanup(func() { _ = provider.Close() })
+
+	if _, ok := provider.(*GSSTokenProvider); !ok {
+		t.Fatalf("expected *GSSTokenProvider, got %T", provider)
 	}
 }
 

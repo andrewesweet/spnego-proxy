@@ -7,7 +7,7 @@ import (
 )
 
 func TestGSSTokenProviderInit(t *testing.T) {
-	provider, err := NewGSSTokenProvider("proxy.example.com:8080", "", false)
+	provider, err := NewGSSTokenProvider("proxy.example.com:8080", "")
 	if err != nil {
 		t.Fatalf("Failed to create GSSTokenProvider: %v", err)
 	}
@@ -19,7 +19,7 @@ func TestGSSTokenProviderInit(t *testing.T) {
 }
 
 func TestGSSTokenProviderExplicitSPN(t *testing.T) {
-	provider, err := NewGSSTokenProvider("proxy.example.com:8080", "HTTP@custom.example.com", false)
+	provider, err := NewGSSTokenProvider("proxy.example.com:8080", "HTTP@custom.example.com")
 	if err != nil {
 		t.Fatalf("Failed to create GSSTokenProvider: %v", err)
 	}
@@ -31,7 +31,7 @@ func TestGSSTokenProviderExplicitSPN(t *testing.T) {
 }
 
 func TestGSSTokenProviderNoPort(t *testing.T) {
-	provider, err := NewGSSTokenProvider("proxy.example.com", "", false)
+	provider, err := NewGSSTokenProvider("proxy.example.com", "")
 	if err != nil {
 		t.Fatalf("Failed to create GSSTokenProvider: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestGSSTokenProviderNoPort(t *testing.T) {
 func TestGSSTokenProviderNormalizesKrb5SPN(t *testing.T) {
 	// A user passing the Kerberos principal format should have it automatically
 	// converted to the GSS-API hostbased service name format (HTTP@host).
-	provider, err := NewGSSTokenProvider("proxy.example.com:8080", "HTTP/custom.example.com", false)
+	provider, err := NewGSSTokenProvider("proxy.example.com:8080", "HTTP/custom.example.com")
 	if err != nil {
 		t.Fatalf("Failed to create GSSTokenProvider: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestGSSTokenProviderNormalizesKrb5SPN(t *testing.T) {
 func TestGSSTokenAcquisitionWithoutTickets(t *testing.T) {
 	// This test verifies the GSS-API call path works even when no tickets
 	// are available. It should return an error (no credentials) rather than crash.
-	provider, err := NewGSSTokenProvider("proxy.example.com:8080", "", false)
+	provider, err := NewGSSTokenProvider("proxy.example.com:8080", "")
 	if err != nil {
 		t.Fatalf("Failed to create GSSTokenProvider: %v", err)
 	}

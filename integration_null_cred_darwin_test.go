@@ -200,9 +200,9 @@ func TestFileCacheInterposeNullCredEndToEnd(t *testing.T) {
 func testNullCredEndToEndInner(t *testing.T) {
 	t.Helper()
 
-	provider, err := NewGSSTokenProvider("localhost", "", true)
+	provider, err := NewFileCacheTokenProvider("localhost", "")
 	if err != nil {
-		t.Fatalf("NewGSSTokenProvider: %v", err)
+		t.Fatalf("NewFileCacheTokenProvider: %v", err)
 	}
 	t.Cleanup(func() { _ = provider.Close() })
 

@@ -45,7 +45,7 @@ func TestSSODeviceIsAffected(t *testing.T) {
 	skipUnlessSSO(t)
 	logSystemDiagnostics(t)
 
-	provider, err := NewGSSTokenProvider("localhost", "", false)
+	provider, err := NewGSSTokenProvider("localhost", "")
 	if err != nil {
 		t.Fatalf("NewGSSTokenProvider: %v", err)
 	}
@@ -131,13 +131,13 @@ func TestSSOCcacheNameOverridesDefault(t *testing.T) {
 
 	// gss_krb5_ccache_name was called by EnsureCache.
 	// Now try acquiring a token using the no-preflight path.
-	provider, err := NewGSSTokenProvider("localhost", "", true)
+	provider, err := NewFileCacheTokenProvider("localhost", "")
 	if err != nil {
-		t.Fatalf("NewGSSTokenProvider: %v", err)
+		t.Fatalf("NewFileCacheTokenProvider: %v", err)
 	}
 	t.Cleanup(func() { _ = provider.Close() })
 
-	token, err := provider.acquireTokenNoPreFlight()
+	token, err := provider.gss.acquireTokenNoPreFlight()
 	if err != nil {
 		logSystemDiagnostics(t)
 		t.Fatalf("acquireTokenNoPreFlight: %v", err)
@@ -150,9 +150,9 @@ func TestSSOCcacheNameOverridesDefault(t *testing.T) {
 func TestSSOTokenHasSPNEGOStructure(t *testing.T) {
 	skipUnlessSSO(t)
 
-	provider, err := NewGSSTokenProvider("localhost", "", true)
+	provider, err := NewFileCacheTokenProvider("localhost", "")
 	if err != nil {
-		t.Fatalf("NewGSSTokenProvider: %v", err)
+		t.Fatalf("NewFileCacheTokenProvider: %v", err)
 	}
 	t.Cleanup(func() { _ = provider.Close() })
 
@@ -174,9 +174,9 @@ func TestSSOTokenHasSPNEGOStructure(t *testing.T) {
 func TestSSOGetTokenEndToEnd(t *testing.T) {
 	skipUnlessSSO(t)
 
-	provider, err := NewGSSTokenProvider("localhost", "", true)
+	provider, err := NewFileCacheTokenProvider("localhost", "")
 	if err != nil {
-		t.Fatalf("NewGSSTokenProvider: %v", err)
+		t.Fatalf("NewFileCacheTokenProvider: %v", err)
 	}
 	t.Cleanup(func() { _ = provider.Close() })
 
@@ -195,9 +195,9 @@ func TestSSOGetTokenEndToEnd(t *testing.T) {
 func TestSSOCleanupRemovesFileCache(t *testing.T) {
 	skipUnlessSSO(t)
 
-	provider, err := NewGSSTokenProvider("localhost", "", true)
+	provider, err := NewFileCacheTokenProvider("localhost", "")
 	if err != nil {
-		t.Fatalf("NewGSSTokenProvider: %v", err)
+		t.Fatalf("NewFileCacheTokenProvider: %v", err)
 	}
 
 	// Trigger cache population.

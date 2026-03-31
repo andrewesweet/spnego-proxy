@@ -19,7 +19,7 @@ import (
 func TestGSSTokenProviderWithEphemeralKDC(t *testing.T) {
 	kdc := setupIntegrationKDC(t)
 
-	provider, err := NewGSSTokenProvider("localhost", "", false)
+	provider, err := NewGSSTokenProvider("localhost", "")
 	if err != nil {
 		t.Fatalf("NewGSSTokenProvider: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestGSSTokenProviderWithEphemeralKDC(t *testing.T) {
 func TestGSSTokenProviderExplicitSPNWithKDC(t *testing.T) {
 	setupIntegrationKDC(t)
 
-	provider, err := NewGSSTokenProvider("localhost", "HTTP/localhost", false)
+	provider, err := NewGSSTokenProvider("localhost", "HTTP/localhost")
 	if err != nil {
 		t.Fatalf("NewGSSTokenProvider: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestGSSTokenProviderExplicitSPNWithKDC(t *testing.T) {
 func TestGSSTokenProviderHostWithPort(t *testing.T) {
 	setupIntegrationKDC(t)
 
-	provider, err := NewGSSTokenProvider("localhost:8080", "", false)
+	provider, err := NewGSSTokenProvider("localhost:8080", "")
 	if err != nil {
 		t.Fatalf("NewGSSTokenProvider: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestGSSTokenProviderHostWithPort(t *testing.T) {
 func TestGSSTokenProviderReacquire(t *testing.T) {
 	setupIntegrationKDC(t)
 
-	provider, err := NewGSSTokenProvider("localhost", "", false)
+	provider, err := NewGSSTokenProvider("localhost", "")
 	if err != nil {
 		t.Fatalf("NewGSSTokenProvider: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestGSSTokenProviderMissingCache(t *testing.T) {
 		t.Fatalf("remove ccache: %v", err)
 	}
 
-	provider, err := NewGSSTokenProvider("localhost", "", false)
+	provider, err := NewGSSTokenProvider("localhost", "")
 	if err != nil {
 		t.Fatalf("NewGSSTokenProvider: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestGSSTokenProviderUnregisteredSPN(t *testing.T) {
 	setupIntegrationKDC(t)
 
 	// Use an SPN that was never registered as a principal in the KDC.
-	provider, err := NewGSSTokenProvider("unknown.host.example", "", false)
+	provider, err := NewGSSTokenProvider("unknown.host.example", "")
 	if err != nil {
 		t.Fatalf("NewGSSTokenProvider: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestGSSTokenProviderUnregisteredSPN(t *testing.T) {
 func TestGSSProxyChainWithEphemeralKDC(t *testing.T) {
 	setupIntegrationKDC(t)
 
-	provider, err := NewGSSTokenProvider("localhost", "", false)
+	provider, err := NewGSSTokenProvider("localhost", "")
 	if err != nil {
 		t.Fatalf("NewGSSTokenProvider: %v", err)
 	}
