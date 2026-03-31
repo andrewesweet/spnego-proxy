@@ -45,13 +45,9 @@ func TestSSODeviceIsAffected(t *testing.T) {
 	skipUnlessSSO(t)
 	logSystemDiagnostics(t)
 
-	provider, err := NewGSSTokenProvider("localhost", "")
-	if err != nil {
-		t.Fatalf("NewGSSTokenProvider: %v", err)
-	}
-	defer func() { _ = provider.Close() }()
+	provider := newTestGSSProvider(t, "localhost", "")
 
-	_, err = provider.GetToken()
+	_, err := provider.GetToken()
 	if err == nil {
 		t.Skip("GetToken succeeded without -file-cache; this device is NOT affected by the API: cache issue. Remaining SSO tests would be vacuous.")
 	}
@@ -62,11 +58,7 @@ func TestSSODeviceIsAffected(t *testing.T) {
 func TestSSOIterCredsFindsAPICache(t *testing.T) {
 	skipUnlessSSO(t)
 
-	m, err := NewFileCacheManager()
-	if err != nil {
-		t.Fatalf("NewFileCacheManager: %v", err)
-	}
-	t.Cleanup(func() { _ = m.Close() })
+	m := newTestFCM(t)
 
 	err = m.EnsureCache()
 	if err != nil {
@@ -81,11 +73,7 @@ func TestSSOIterCredsFindsAPICache(t *testing.T) {
 func TestSSOCopyCcacheFromAPIToFile(t *testing.T) {
 	skipUnlessSSO(t)
 
-	m, err := NewFileCacheManager()
-	if err != nil {
-		t.Fatalf("NewFileCacheManager: %v", err)
-	}
-	t.Cleanup(func() { _ = m.Close() })
+	m := newTestFCM(t)
 
 	if err := m.EnsureCache(); err != nil {
 		logSystemDiagnostics(t)
@@ -118,11 +106,7 @@ func TestSSOCopyCcacheFromAPIToFile(t *testing.T) {
 func TestSSOCcacheNameOverridesDefault(t *testing.T) {
 	skipUnlessSSO(t)
 
-	m, err := NewFileCacheManager()
-	if err != nil {
-		t.Fatalf("NewFileCacheManager: %v", err)
-	}
-	t.Cleanup(func() { _ = m.Close() })
+	m := newTestFCM(t)
 
 	if err := m.EnsureCache(); err != nil {
 		logSystemDiagnostics(t)
@@ -131,11 +115,7 @@ func TestSSOCcacheNameOverridesDefault(t *testing.T) {
 
 	// gss_krb5_ccache_name was called by EnsureCache.
 	// Now try acquiring a token using the no-preflight path.
-	provider, err := NewFileCacheTokenProvider("localhost", "")
-	if err != nil {
-		t.Fatalf("NewFileCacheTokenProvider: %v", err)
-	}
-	t.Cleanup(func() { _ = provider.Close() })
+	provider := newFileCacheTestProvider(t)
 
 	token, err := provider.gss.acquireTokenNoPreFlight()
 	if err != nil {
@@ -150,11 +130,7 @@ func TestSSOCcacheNameOverridesDefault(t *testing.T) {
 func TestSSOTokenHasSPNEGOStructure(t *testing.T) {
 	skipUnlessSSO(t)
 
-	provider, err := NewFileCacheTokenProvider("localhost", "")
-	if err != nil {
-		t.Fatalf("NewFileCacheTokenProvider: %v", err)
-	}
-	t.Cleanup(func() { _ = provider.Close() })
+	provider := newFileCacheTestProvider(t)
 
 	token, err := provider.GetToken()
 	if err != nil {
@@ -174,11 +150,7 @@ func TestSSOTokenHasSPNEGOStructure(t *testing.T) {
 func TestSSOGetTokenEndToEnd(t *testing.T) {
 	skipUnlessSSO(t)
 
-	provider, err := NewFileCacheTokenProvider("localhost", "")
-	if err != nil {
-		t.Fatalf("NewFileCacheTokenProvider: %v", err)
-	}
-	t.Cleanup(func() { _ = provider.Close() })
+	provider := newFileCacheTestProvider(t)
 
 	// Multiple acquisitions to verify cache reuse.
 	for i := range 3 {

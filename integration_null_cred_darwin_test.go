@@ -98,11 +98,7 @@ func TestFileCacheInterposeNullCred(t *testing.T) {
 func testNullCredInner(t *testing.T) {
 	t.Helper()
 
-	m, err := NewFileCacheManager()
-	if err != nil {
-		t.Fatalf("NewFileCacheManager: %v", err)
-	}
-	t.Cleanup(func() { _ = m.Close() })
+	m := newTestFCM(t)
 
 	if err := m.EnsureCache(); err != nil {
 		t.Fatalf("EnsureCache with interposed NULL creds: %v", err)
@@ -162,11 +158,7 @@ func TestFileCacheInterposeCopyCcacheFail(t *testing.T) {
 func testCopyCcacheFailInner(t *testing.T) {
 	t.Helper()
 
-	m, err := NewFileCacheManager()
-	if err != nil {
-		t.Fatalf("NewFileCacheManager: %v", err)
-	}
-	t.Cleanup(func() { _ = m.Close() })
+	m := newTestFCM(t)
 
 	// EnsureCache should succeed via the try_initialize_and_copy fallback,
 	// since gss_krb5_copy_ccache is interposed to always fail.
@@ -200,11 +192,7 @@ func TestFileCacheInterposeNullCredEndToEnd(t *testing.T) {
 func testNullCredEndToEndInner(t *testing.T) {
 	t.Helper()
 
-	provider, err := NewFileCacheTokenProvider("localhost", "")
-	if err != nil {
-		t.Fatalf("NewFileCacheTokenProvider: %v", err)
-	}
-	t.Cleanup(func() { _ = provider.Close() })
+	provider := newFileCacheTestProvider(t)
 
 	// GetToken triggers EnsureCache (krb5 fallback) then gss_init_sec_context.
 	token, err := provider.GetToken()
@@ -229,11 +217,7 @@ func TestFileCacheInterposeNullCredRefresh(t *testing.T) {
 func testNullCredRefreshInner(t *testing.T) {
 	t.Helper()
 
-	m, err := NewFileCacheManager()
-	if err != nil {
-		t.Fatalf("NewFileCacheManager: %v", err)
-	}
-	t.Cleanup(func() { _ = m.Close() })
+	m := newTestFCM(t)
 
 	// Initial copy.
 	if err := m.EnsureCache(); err != nil {

@@ -9,12 +9,20 @@ import (
 	"time"
 )
 
-func TestFileCacheManagerCreatesSecureTempDir(t *testing.T) {
+// newTestFCM creates a FileCacheManager and registers cleanup via t.Cleanup.
+// Do not use in tests that explicitly test Close() behavior.
+func newTestFCM(t *testing.T) *FileCacheManager {
+	t.Helper()
 	m, err := NewFileCacheManager()
 	if err != nil {
 		t.Fatalf("NewFileCacheManager: %v", err)
 	}
 	t.Cleanup(func() { _ = m.Close() })
+	return m
+}
+
+func TestFileCacheManagerCreatesSecureTempDir(t *testing.T) {
+	m := newTestFCM(t)
 
 	info, err := os.Stat(m.tempDir)
 	if err != nil {
@@ -29,11 +37,7 @@ func TestFileCacheManagerCreatesSecureTempDir(t *testing.T) {
 }
 
 func TestFileCacheManagerCachePathInsideTempDir(t *testing.T) {
-	m, err := NewFileCacheManager()
-	if err != nil {
-		t.Fatalf("NewFileCacheManager: %v", err)
-	}
-	t.Cleanup(func() { _ = m.Close() })
+	m := newTestFCM(t)
 
 	dir := filepath.Dir(m.CachePath())
 	if dir != m.tempDir {
@@ -42,17 +46,8 @@ func TestFileCacheManagerCachePathInsideTempDir(t *testing.T) {
 }
 
 func TestFileCacheManagerCachePathNotPredictable(t *testing.T) {
-	m1, err := NewFileCacheManager()
-	if err != nil {
-		t.Fatalf("NewFileCacheManager (1): %v", err)
-	}
-	t.Cleanup(func() { _ = m1.Close() })
-
-	m2, err := NewFileCacheManager()
-	if err != nil {
-		t.Fatalf("NewFileCacheManager (2): %v", err)
-	}
-	t.Cleanup(func() { _ = m2.Close() })
+	m1 := newTestFCM(t)
+	m2 := newTestFCM(t)
 
 	if m1.CachePath() == m2.CachePath() {
 		t.Error("two FileCacheManagers produced identical cache paths")
@@ -119,11 +114,7 @@ func TestFileCacheManagerCloseIdempotentUnderConcurrency(t *testing.T) {
 }
 
 func TestZeroFileContents(t *testing.T) {
-	m, err := NewFileCacheManager()
-	if err != nil {
-		t.Fatalf("NewFileCacheManager: %v", err)
-	}
-	t.Cleanup(func() { _ = m.Close() })
+	m := newTestFCM(t)
 
 	// Write known non-zero data.
 	data := []byte("KERBEROS_CREDENTIAL_DATA_SENSITIVE")
@@ -252,11 +243,7 @@ func TestFileCacheManagerCloseZerosAndRemovesCopiedCache(t *testing.T) {
 }
 
 func TestFileCacheManagerForceRefreshRespectsMinInterval(t *testing.T) {
-	m, err := NewFileCacheManager()
-	if err != nil {
-		t.Fatalf("NewFileCacheManager: %v", err)
-	}
-	t.Cleanup(func() { _ = m.Close() })
+	m := newTestFCM(t)
 
 	// Simulate a recent copy.
 	m.copied = true
@@ -334,11 +321,7 @@ func TestFileCacheManagerNeedsRefresh(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m, err := NewFileCacheManager()
-			if err != nil {
-				t.Fatalf("NewFileCacheManager: %v", err)
-			}
-			t.Cleanup(func() { _ = m.Close() })
+			m := newTestFCM(t)
 
 			m.copied = tt.copied
 			m.expiry = tt.expiry

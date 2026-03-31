@@ -19,11 +19,7 @@ import (
 func TestGSSTokenProviderWithEphemeralKDC(t *testing.T) {
 	kdc := setupIntegrationKDC(t)
 
-	provider, err := NewGSSTokenProvider("localhost", "")
-	if err != nil {
-		t.Fatalf("NewGSSTokenProvider: %v", err)
-	}
-	defer func() { _ = provider.Close() }()
+	provider := newTestGSSProvider(t, "localhost", "")
 
 	if provider.spn != "HTTP@localhost" {
 		t.Errorf("expected SPN HTTP@localhost, got %s", provider.spn)
@@ -49,11 +45,7 @@ func TestGSSTokenProviderWithEphemeralKDC(t *testing.T) {
 func TestGSSTokenProviderExplicitSPNWithKDC(t *testing.T) {
 	setupIntegrationKDC(t)
 
-	provider, err := NewGSSTokenProvider("localhost", "HTTP/localhost")
-	if err != nil {
-		t.Fatalf("NewGSSTokenProvider: %v", err)
-	}
-	defer func() { _ = provider.Close() }()
+	provider := newTestGSSProvider(t, "localhost", "HTTP/localhost")
 
 	if provider.spn != "HTTP@localhost" {
 		t.Errorf("expected normalized SPN HTTP@localhost, got %s", provider.spn)
@@ -73,11 +65,7 @@ func TestGSSTokenProviderExplicitSPNWithKDC(t *testing.T) {
 func TestGSSTokenProviderHostWithPort(t *testing.T) {
 	setupIntegrationKDC(t)
 
-	provider, err := NewGSSTokenProvider("localhost:8080", "")
-	if err != nil {
-		t.Fatalf("NewGSSTokenProvider: %v", err)
-	}
-	defer func() { _ = provider.Close() }()
+	provider := newTestGSSProvider(t, "localhost:8080", "")
 
 	if provider.spn != "HTTP@localhost" {
 		t.Errorf("expected SPN HTTP@localhost, got %s", provider.spn)
@@ -97,11 +85,7 @@ func TestGSSTokenProviderHostWithPort(t *testing.T) {
 func TestGSSTokenProviderReacquire(t *testing.T) {
 	setupIntegrationKDC(t)
 
-	provider, err := NewGSSTokenProvider("localhost", "")
-	if err != nil {
-		t.Fatalf("NewGSSTokenProvider: %v", err)
-	}
-	defer func() { _ = provider.Close() }()
+	provider := newTestGSSProvider(t, "localhost", "")
 
 	for i := range 3 {
 		token, err := provider.GetToken()
@@ -125,13 +109,9 @@ func TestGSSTokenProviderMissingCache(t *testing.T) {
 		t.Fatalf("remove ccache: %v", err)
 	}
 
-	provider, err := NewGSSTokenProvider("localhost", "")
-	if err != nil {
-		t.Fatalf("NewGSSTokenProvider: %v", err)
-	}
-	defer func() { _ = provider.Close() }()
+	provider := newTestGSSProvider(t, "localhost", "")
 
-	_, err = provider.GetToken()
+	_, err := provider.GetToken()
 	if err == nil {
 		t.Fatal("expected error from GetToken with removed credential cache, got nil")
 	}
@@ -149,13 +129,9 @@ func TestGSSTokenProviderUnregisteredSPN(t *testing.T) {
 	setupIntegrationKDC(t)
 
 	// Use an SPN that was never registered as a principal in the KDC.
-	provider, err := NewGSSTokenProvider("unknown.host.example", "")
-	if err != nil {
-		t.Fatalf("NewGSSTokenProvider: %v", err)
-	}
-	defer func() { _ = provider.Close() }()
+	provider := newTestGSSProvider(t, "unknown.host.example", "")
 
-	_, err = provider.GetToken()
+	_, err := provider.GetToken()
 	if err == nil {
 		t.Fatal("expected error from GetToken with unregistered SPN, got nil")
 	}
@@ -169,11 +145,7 @@ func TestGSSTokenProviderUnregisteredSPN(t *testing.T) {
 func TestGSSProxyChainWithEphemeralKDC(t *testing.T) {
 	setupIntegrationKDC(t)
 
-	provider, err := NewGSSTokenProvider("localhost", "")
-	if err != nil {
-		t.Fatalf("NewGSSTokenProvider: %v", err)
-	}
-	defer func() { _ = provider.Close() }()
+	provider := newTestGSSProvider(t, "localhost", "")
 
 	// Start a fake upstream proxy that captures the Proxy-Authorization and Via headers.
 	gotAuth := make(chan string, 1)

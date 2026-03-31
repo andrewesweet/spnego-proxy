@@ -84,11 +84,7 @@ func validateSPNEGOToken(t *testing.T, token string) []byte {
 func TestFileCacheCopyProducesValidFileCache(t *testing.T) {
 	setupIntegrationKDC(t)
 
-	m, err := NewFileCacheManager()
-	if err != nil {
-		t.Fatalf("NewFileCacheManager: %v", err)
-	}
-	t.Cleanup(func() { _ = m.Close() })
+	m := newTestFCM(t)
 
 	if err := m.EnsureCache(); err != nil {
 		t.Fatalf("EnsureCache: %v", err)
@@ -190,11 +186,7 @@ func TestFileCacheExpiryTriggersRecopy(t *testing.T) {
 func TestFileCacheIterCredsFindsCredential(t *testing.T) {
 	setupIntegrationKDC(t)
 
-	m, err := NewFileCacheManager()
-	if err != nil {
-		t.Fatalf("NewFileCacheManager: %v", err)
-	}
-	t.Cleanup(func() { _ = m.Close() })
+	m := newTestFCM(t)
 
 	if err := m.EnsureCache(); err != nil {
 		t.Fatalf("EnsureCache: %v", err)
@@ -219,11 +211,7 @@ func TestFileCacheIterCredsWithNoCredentials(t *testing.T) {
 	// Point to a nonexistent cache so there are no credentials to find.
 	t.Setenv("KRB5CCNAME", "FILE:/nonexistent/krb5cc_test_"+t.Name())
 
-	m, err := NewFileCacheManager()
-	if err != nil {
-		t.Fatalf("NewFileCacheManager: %v", err)
-	}
-	t.Cleanup(func() { _ = m.Close() })
+	m := newTestFCM(t)
 
 	err = m.EnsureCache()
 	if err == nil {
@@ -241,11 +229,7 @@ func TestFileCacheCcacheNameRedirectsTokenAcquisition(t *testing.T) {
 	setupIntegrationKDC(t)
 
 	// Copy credentials to a file cache.
-	m, err := NewFileCacheManager()
-	if err != nil {
-		t.Fatalf("NewFileCacheManager: %v", err)
-	}
-	t.Cleanup(func() { _ = m.Close() })
+	m := newTestFCM(t)
 
 	if err := m.EnsureCache(); err != nil {
 		t.Fatalf("EnsureCache: %v", err)
@@ -255,11 +239,7 @@ func TestFileCacheCcacheNameRedirectsTokenAcquisition(t *testing.T) {
 	// the token acquisition should still succeed using the FILE: cache.
 	t.Setenv("KRB5CCNAME", "FILE:/nonexistent/krb5cc_bogus")
 
-	provider, err := NewFileCacheTokenProvider("localhost", "")
-	if err != nil {
-		t.Fatalf("NewFileCacheTokenProvider: %v", err)
-	}
-	t.Cleanup(func() { _ = provider.Close() })
+	provider := newFileCacheTestProvider(t)
 
 	token, err := provider.GetToken()
 	if err != nil {
