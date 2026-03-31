@@ -7,12 +7,19 @@
 
 #include <stdint.h>
 
+// Error message buffer size for filecache_result.
+#define FILECACHE_ERROR_MSG_SIZE 512
+
+// Copy method identifiers for filecache_result.copy_method.
+#define FILECACHE_COPY_METHOD_GSS 0
+#define FILECACHE_COPY_METHOD_KRB5_DIRECT 1
+
 // filecache_result holds the outcome of a credential cache copy operation.
 typedef struct {
-  int error_code;       // 0 on success
-  char error_msg[512];  // error description
+  int error_code;                            // 0 on success
+  char error_msg[FILECACHE_ERROR_MSG_SIZE];  // error description
   uint32_t lifetime;    // remaining credential lifetime in seconds
-  uint8_t copy_method;  // 0 = GSS iterator, 1 = krb5 direct copy fallback
+  uint8_t copy_method;  // FILECACHE_COPY_METHOD_*
 } filecache_result;
 
 // copy_creds_to_file_cache enumerates Kerberos credentials via

@@ -346,7 +346,7 @@ filecache_result copy_creds_to_file_cache(const char *dest_path) {
       ctx.copied = 1;
       ctx.lifetime = lifetime;
       ctx.error_msg[0] = '\0';
-      result.copy_method = 1;  // krb5 direct copy
+      result.copy_method = FILECACHE_COPY_METHOD_KRB5_DIRECT;
     } else {
       // Include both GSS and krb5 context in the error message.
       if (ctx.saw_null_cred) {

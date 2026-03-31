@@ -7,12 +7,15 @@
 
 #include <stddef.h>
 
+// Error message buffer size for gss_token_result.
+#define GSS_TOKEN_ERROR_MSG_SIZE 256
+
 // gss_token_result holds the output of a GSS-API token acquisition.
 typedef struct {
   void *data;      // Token bytes (caller must free via free())
   size_t length;   // Token length in bytes
   int error_code;  // Non-zero on error
-  char error_msg[256];
+  char error_msg[GSS_TOKEN_ERROR_MSG_SIZE];
 } gss_token_result;
 
 // acquire_spnego_token acquires a SPNEGO token for the given service principal

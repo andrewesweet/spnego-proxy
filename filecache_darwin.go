@@ -26,6 +26,12 @@ func newCredentialError(format string, args ...any) *CredentialError {
 	return &CredentialError{authError{msg: fmt.Sprintf(format, args...)}}
 }
 
+// Copy method identifiers returned by credentialCache.CopyCreds.
+const (
+	copyMethodGSS        = "gss"
+	copyMethodKrb5Direct = "krb5_direct"
+)
+
 // fileCacheRefreshMargin is the time before TGT expiry at which the file
 // cache will be proactively refreshed. A refresh is also triggered on
 // demand if token acquisition fails.
@@ -35,18 +41,79 @@ const fileCacheRefreshMargin = 5 * time.Minute
 // TGT lifetime is shorter than the refresh margin.
 const fileCacheMinRefreshInterval = 30 * time.Second
 
+// credentialCache abstracts the low-level credential cache operations,
+// decoupling FileCacheManager from CGo. This enables testing with
+// alternative implementations.
+type credentialCache interface {
+	// CopyCreds copies credentials from the system cache to destPath.
+	// Returns the remaining TGT lifetime, the copy method used, and any error.
+	CopyCreds(destPath string) (lifetime time.Duration, method string, err error)
+
+	// SetDefaultCCacheName sets the process-default credential cache name.
+	// Pass empty string to reset to system default.
+	SetDefaultCCacheName(name string) error
+
+	// DestroyCache removes and deallocates the FILE: cache at path.
+	DestroyCache(path string) error
+}
+
+// cgoCredentialCache implements credentialCache using CGo calls to the
+// native GSS-API and krb5 libraries.
+type cgoCredentialCache struct{}
+
+func (c *cgoCredentialCache) CopyCreds(destPath string) (time.Duration, string, error) {
+	cpath := C.CString(destPath)
+	defer C.free(unsafe.Pointer(cpath))
+
+	result := C.copy_creds_to_file_cache(cpath)
+	if result.error_code != 0 {
+		msg := C.GoString(&result.error_msg[0])
+		return 0, "", newCredentialError("file cache copy failed: %s", msg)
+	}
+
+	lifetime := time.Duration(result.lifetime) * time.Second
+	method := copyMethodGSS
+	if result.copy_method == C.FILECACHE_COPY_METHOD_KRB5_DIRECT {
+		method = copyMethodKrb5Direct
+	}
+
+	return lifetime, method, nil
+}
+
+func (c *cgoCredentialCache) SetDefaultCCacheName(name string) error {
+	var cname *C.char
+	if name != "" {
+		cname = C.CString(name)
+		defer C.free(unsafe.Pointer(cname))
+	}
+	if C.set_default_ccache_name(cname) != 0 {
+		return newCredentialError("failed to set default credential cache name via gss_krb5_ccache_name")
+	}
+	return nil
+}
+
+func (c *cgoCredentialCache) DestroyCache(path string) error {
+	cpath := C.CString(path)
+	defer C.free(unsafe.Pointer(cpath))
+	if C.destroy_file_cache(cpath) != 0 {
+		return fmt.Errorf("failed to destroy file cache at %s", path)
+	}
+	return nil
+}
+
 // FileCacheManager manages the lifecycle of a FILE: credential cache
 // populated from the system credential cache (typically the SSO Extension's
 // API: cache). It is safe for concurrent use; all public methods are
 // serialized by the caller's mutex (GSSTokenProvider.mu).
 type FileCacheManager struct {
-	cachePath     string    // path to the FILE: cache on disk
-	tempDir       string    // parent temp directory (0700)
-	expiry        time.Time // estimated TGT expiry
-	lastCopy      time.Time // time of last successful copy
-	copied        bool      // whether at least one copy has succeeded
-	forceRefresh  bool      // set by ForceRefresh(); cleared after next copy
-	ccacheNameSet bool      // whether gss_krb5_ccache_name has been called
+	cc            credentialCache // abstracted credential cache operations
+	cachePath     string          // path to the FILE: cache on disk
+	tempDir       string          // parent temp directory (0700)
+	expiry        time.Time       // estimated TGT expiry
+	lastCopy      time.Time       // time of last successful copy
+	copied        bool            // whether at least one copy has succeeded
+	forceRefresh  bool            // set by ForceRefresh(); cleared after next copy
+	ccacheNameSet bool            // whether gss_krb5_ccache_name has been called
 	closed        bool
 	mu            sync.Mutex // protects closed flag for idempotent Close()
 }
@@ -101,6 +168,7 @@ func NewFileCacheManager() (*FileCacheManager, error) {
 	slog.Info("file cache manager initialized", "cache_path", cachePath)
 
 	return &FileCacheManager{
+		cc:        &cgoCredentialCache{},
 		cachePath: cachePath,
 		tempDir:   tmpDir,
 	}, nil
@@ -149,13 +217,9 @@ func (m *FileCacheManager) EnsureCache() error {
 		return nil
 	}
 
-	cpath := C.CString(m.cachePath)
-	defer C.free(unsafe.Pointer(cpath))
-
-	result := C.copy_creds_to_file_cache(cpath)
-	if result.error_code != 0 {
-		msg := C.GoString(&result.error_msg[0])
-		return newCredentialError("file cache copy failed: %s", msg)
+	lifetime, method, err := m.cc.CopyCreds(m.cachePath)
+	if err != nil {
+		return err
 	}
 
 	// Verify the cache file was created with restrictive permissions.
@@ -171,31 +235,22 @@ func (m *FileCacheManager) EnsureCache() error {
 		}
 	}
 
-	// Track expiry. lifetime is in seconds.
 	now := time.Now()
-	lifetime := time.Duration(result.lifetime) * time.Second
 	m.expiry = now.Add(lifetime)
 	m.lastCopy = now
 	m.copied = true
 	m.forceRefresh = false
 
-	method := "gss"
-	if result.copy_method == 1 {
-		method = "krb5_direct"
-	}
 	slog.Info("credentials copied to file cache",
 		"cache_path", m.cachePath,
 		"method", method,
-		"lifetime_seconds", result.lifetime,
+		"lifetime", lifetime,
 		"expiry", m.expiry.Format(time.RFC3339))
 
 	// Set the process-default cache name so that subsequent GSS-API calls
 	// (gss_init_sec_context with GSS_C_NO_CREDENTIAL) use this FILE: cache.
-	ccname := C.CString("FILE:" + m.cachePath)
-	defer C.free(unsafe.Pointer(ccname))
-
-	if C.set_default_ccache_name(ccname) != 0 {
-		return newCredentialError("failed to set default credential cache name via gss_krb5_ccache_name")
+	if err := m.cc.SetDefaultCCacheName("FILE:" + m.cachePath); err != nil {
+		return err
 	}
 	m.ccacheNameSet = true
 
@@ -256,8 +311,8 @@ func (m *FileCacheManager) Close() error {
 	// so that any subsequent (unlikely) GSS calls don't reference a
 	// deleted file.
 	if m.ccacheNameSet {
-		if C.set_default_ccache_name(nil) != 0 {
-			slog.Warn("failed to reset default credential cache name")
+		if err := m.cc.SetDefaultCCacheName(""); err != nil {
+			slog.Warn("failed to reset default credential cache name", "error", err)
 		}
 	}
 
@@ -268,13 +323,11 @@ func (m *FileCacheManager) Close() error {
 		slog.Warn("failed to zero cache file", "path", m.cachePath, "error", err)
 	}
 
-	// Destroy the cache: unlink + free krb5 resources (C).
+	// Destroy the cache: unlink + free krb5 resources.
 	if m.copied {
-		cpath := C.CString(m.cachePath)
-		if C.destroy_file_cache(cpath) != 0 {
-			slog.Warn("failed to destroy file cache", "path", m.cachePath)
+		if err := m.cc.DestroyCache(m.cachePath); err != nil {
+			slog.Warn("failed to destroy file cache", "path", m.cachePath, "error", err)
 		}
-		C.free(unsafe.Pointer(cpath))
 	}
 
 	// Remove the temp directory (should be empty after cache destruction,
