@@ -118,11 +118,28 @@ type FileCacheManager struct {
 	mu            sync.Mutex // protects closed flag for idempotent Close()
 }
 
+// userTempDir returns the per-user temporary directory on macOS.
+// It prefers $TMPDIR (set by launchd for user sessions), falling back to
+// confstr(_CS_DARWIN_USER_TEMP_DIR) which works even in LaunchDaemon
+// contexts where $TMPDIR is not set by launchd. This avoids falling back
+// to /tmp, which may be restricted on corporate-managed devices.
+func userTempDir() string {
+	if dir := os.Getenv("TMPDIR"); dir != "" {
+		return dir
+	}
+	cdir := C.darwin_user_temp_dir()
+	if cdir != nil {
+		defer C.free(unsafe.Pointer(cdir))
+		return C.GoString(cdir)
+	}
+	return os.TempDir()
+}
+
 // cleanStaleCaches removes leftover spnego-proxy-* temp directories from
 // previous runs that were not cleaned up (e.g., due to SIGKILL or crash).
 // This is best-effort; errors are logged but not returned.
 func cleanStaleCaches() {
-	pattern := filepath.Join(os.TempDir(), "spnego-proxy-*")
+	pattern := filepath.Join(userTempDir(), "spnego-proxy-*")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
 		return
@@ -148,7 +165,7 @@ func NewFileCacheManager() (*FileCacheManager, error) {
 	// Clean up any stale cache directories from crashed previous runs.
 	cleanStaleCaches()
 
-	tmpDir, err := os.MkdirTemp("", "spnego-proxy-")
+	tmpDir, err := os.MkdirTemp(userTempDir(), "spnego-proxy-")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}

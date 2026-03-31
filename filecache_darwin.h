@@ -6,6 +6,8 @@
 #define FILECACHE_DARWIN_H
 
 #include <stdint.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 // Error message buffer size for filecache_result.
 #define FILECACHE_ERROR_MSG_SIZE 512
@@ -43,6 +45,26 @@ filecache_result copy_creds_to_file_cache(const char *dest_path);
 // Pass NULL to reset to the system default.
 // Returns 0 on success, non-zero on failure.
 int set_default_ccache_name(const char *name);
+
+// darwin_user_temp_dir returns the per-user temporary directory via
+// confstr(_CS_DARWIN_USER_TEMP_DIR). This works even in LaunchDaemon
+// contexts where $TMPDIR is not set. Returns NULL on failure; the caller
+// must free the returned string.
+static inline char *darwin_user_temp_dir(void) {
+  size_t len = confstr(_CS_DARWIN_USER_TEMP_DIR, NULL, 0);
+  if (len == 0) {
+    return NULL;
+  }
+  char *buf = malloc(len);
+  if (buf == NULL) {
+    return NULL;
+  }
+  if (confstr(_CS_DARWIN_USER_TEMP_DIR, buf, len) == 0) {
+    free(buf);
+    return NULL;
+  }
+  return buf;
+}
 
 // destroy_file_cache removes and deallocates the FILE: credential cache
 // at the given path using krb5_cc_destroy. The path must refer to a
