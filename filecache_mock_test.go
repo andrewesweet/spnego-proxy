@@ -327,7 +327,7 @@ func TestEnsureCacheExpiryCalculation(t *testing.T) {
 // Close tests with mock
 // ---------------------------------------------------------------------------
 
-func TestCloseCallsSetCCNameResetWhenSet(t *testing.T) {
+func TestCloseAfterEnsureCache(t *testing.T) {
 	mock := &mockCredentialCache{
 		copyCredsLifetime: 30 * time.Minute,
 		copyCredsMethod:   copyMethodGSS,
@@ -335,7 +335,6 @@ func TestCloseCallsSetCCNameResetWhenSet(t *testing.T) {
 	}
 	m := newTestFileCacheManager(t, mock)
 
-	// EnsureCache sets ccacheNameSet = true.
 	if err := m.EnsureCache(); err != nil {
 		t.Fatalf("EnsureCache: %v", err)
 	}
@@ -344,46 +343,15 @@ func TestCloseCallsSetCCNameResetWhenSet(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// Should have: first call = "FILE:<path>" from EnsureCache,
-	// second call = "" from Close reset.
+	// SetDefaultCCacheName: first from EnsureCache, second (reset) from Close.
 	if len(mock.setCCNameCalls) != 2 {
 		t.Fatalf("SetDefaultCCacheName called %d times, want 2", len(mock.setCCNameCalls))
 	}
 	if mock.setCCNameCalls[1] != "" {
 		t.Errorf("Close reset call = %q, want empty string", mock.setCCNameCalls[1])
 	}
-}
 
-func TestCloseSkipsCCNameResetWhenNotSet(t *testing.T) {
-	mock := &mockCredentialCache{}
-	m := newTestFileCacheManager(t, mock)
-
-	// Close without ever calling EnsureCache.
-	if err := m.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	if len(mock.setCCNameCalls) != 0 {
-		t.Errorf("SetDefaultCCacheName called %d times, want 0 (ccacheNameSet=false)", len(mock.setCCNameCalls))
-	}
-}
-
-func TestCloseCallsDestroyCacheWhenCopied(t *testing.T) {
-	mock := &mockCredentialCache{
-		copyCredsLifetime: 30 * time.Minute,
-		copyCredsMethod:   copyMethodGSS,
-		writeDummyFile:    true,
-	}
-	m := newTestFileCacheManager(t, mock)
-
-	if err := m.EnsureCache(); err != nil {
-		t.Fatalf("EnsureCache: %v", err)
-	}
-
-	if err := m.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
+	// DestroyCache should be called with the cache path.
 	if len(mock.destroyCacheCalls) != 1 {
 		t.Fatalf("DestroyCache called %d times, want 1", len(mock.destroyCacheCalls))
 	}
@@ -392,7 +360,7 @@ func TestCloseCallsDestroyCacheWhenCopied(t *testing.T) {
 	}
 }
 
-func TestCloseSkipsDestroyCacheWhenNotCopied(t *testing.T) {
+func TestCloseWithoutEnsureCache(t *testing.T) {
 	mock := &mockCredentialCache{}
 	m := newTestFileCacheManager(t, mock)
 
@@ -400,33 +368,15 @@ func TestCloseSkipsDestroyCacheWhenNotCopied(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
+	if len(mock.setCCNameCalls) != 0 {
+		t.Errorf("SetDefaultCCacheName called %d times, want 0 (ccacheNameSet=false)", len(mock.setCCNameCalls))
+	}
 	if len(mock.destroyCacheCalls) != 0 {
 		t.Errorf("DestroyCache called %d times, want 0 (copied=false)", len(mock.destroyCacheCalls))
 	}
 }
 
-func TestCloseSetCCNameErrorIsNonFatal(t *testing.T) {
-	mock := &mockCredentialCache{
-		copyCredsLifetime: 30 * time.Minute,
-		copyCredsMethod:   copyMethodGSS,
-		writeDummyFile:    true,
-	}
-	m := newTestFileCacheManager(t, mock)
-
-	if err := m.EnsureCache(); err != nil {
-		t.Fatalf("EnsureCache: %v", err)
-	}
-
-	// Make the reset call fail.
-	mock.setCCNameErr = errors.New("ccache_name reset failed")
-
-	// Close should still succeed (error is logged, not returned).
-	if err := m.Close(); err != nil {
-		t.Fatalf("Close should succeed despite SetDefaultCCacheName error: %v", err)
-	}
-}
-
-func TestCloseDestroyCacheErrorIsNonFatal(t *testing.T) {
+func TestCloseNonFatalErrors(t *testing.T) {
 	mock := &mockCredentialCache{
 		copyCredsLifetime: 30 * time.Minute,
 		copyCredsMethod:   copyMethodGSS,
@@ -439,9 +389,14 @@ func TestCloseDestroyCacheErrorIsNonFatal(t *testing.T) {
 		t.Fatalf("EnsureCache: %v", err)
 	}
 
-	// Close should still succeed.
+	// Make the reset call fail after EnsureCache succeeded.
+	mock.mu.Lock()
+	mock.setCCNameErr = errors.New("ccache_name reset failed")
+	mock.mu.Unlock()
+
+	// Close should still succeed despite both errors being non-fatal.
 	if err := m.Close(); err != nil {
-		t.Fatalf("Close should succeed despite DestroyCache error: %v", err)
+		t.Fatalf("Close should succeed despite non-fatal errors: %v", err)
 	}
 }
 

@@ -3,8 +3,6 @@
 package main
 
 import (
-	"bytes"
-	"encoding/base64"
 	"os"
 	"os/exec"
 	"testing"
@@ -145,15 +143,8 @@ func TestSSOCcacheNameOverridesDefault(t *testing.T) {
 		t.Fatalf("acquireTokenNoPreFlight: %v", err)
 	}
 
-	decoded, err := base64.StdEncoding.DecodeString(token)
-	if err != nil {
-		t.Fatalf("not valid base64: %v", err)
-	}
+	decoded := validateSPNEGOToken(t, token)
 	t.Logf("token acquired: %d bytes decoded", len(decoded))
-
-	if len(decoded) == 0 || decoded[0] != 0x60 {
-		t.Errorf("expected ASN.1 tag 0x60, got 0x%02x", decoded[0])
-	}
 }
 
 func TestSSOTokenHasSPNEGOStructure(t *testing.T) {
@@ -171,18 +162,8 @@ func TestSSOTokenHasSPNEGOStructure(t *testing.T) {
 		t.Fatalf("GetToken: %v", err)
 	}
 
-	decoded, err := base64.StdEncoding.DecodeString(token)
-	if err != nil {
-		t.Fatalf("not valid base64: %v", err)
-	}
+	decoded := validateSPNEGOToken(t, token)
 
-	// Validate structure: 0x60 tag, SPNEGO OID, reasonable size.
-	if len(decoded) == 0 || decoded[0] != 0x60 {
-		t.Errorf("expected ASN.1 tag 0x60, got 0x%02x", decoded[0])
-	}
-	if !bytes.Contains(decoded, spnegoOID) {
-		t.Error("token does not contain SPNEGO OID")
-	}
 	// SSO Extension tokens are typically ~4KB due to PAC data.
 	if len(decoded) < 500 {
 		t.Errorf("token unusually small: %d bytes (expected >500 for SSO token with PAC)", len(decoded))
@@ -206,7 +187,7 @@ func TestSSOGetTokenEndToEnd(t *testing.T) {
 			logSystemDiagnostics(t)
 			t.Fatalf("GetToken call %d: %v", i+1, err)
 		}
-		decoded, _ := base64.StdEncoding.DecodeString(token)
+		decoded := validateSPNEGOToken(t, token)
 		t.Logf("call %d: %d-byte SPNEGO token", i+1, len(decoded))
 	}
 }

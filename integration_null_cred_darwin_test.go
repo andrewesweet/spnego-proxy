@@ -48,13 +48,26 @@ func buildDylib(t *testing.T, srcName string) string {
 	return dylibPath
 }
 
-// runInnerTest re-execs the current test binary with DYLD_INSERT_LIBRARIES
-// set to the given dylib, plus the KDC environment. The inner invocation
-// is identified by the innerEnvVar being set to "1".
-func runInnerTest(t *testing.T, testName, dylibPath, innerEnvVar string, kdc *EphemeralKDC) {
+// runInterposeTest handles the outer/inner re-exec pattern for DYLD interpose
+// tests. The outer invocation starts an ephemeral KDC, builds the dylib, and
+// re-execs the test binary with DYLD_INSERT_LIBRARIES. The inner invocation
+// (identified by innerEnvVar=1) runs innerFn directly.
+func runInterposeTest(t *testing.T, innerEnvVar, srcName string, innerFn func(*testing.T)) {
 	t.Helper()
+	if os.Getenv("INTEGRATION") == "" {
+		t.Skip("set INTEGRATION=1 to run integration tests")
+	}
+	if os.Getenv(innerEnvVar) == "1" {
+		innerFn(t)
+		return
+	}
+
+	kdc := NewEphemeralKDC(t)
+	defer kdc.Close()
+	dylibPath := buildDylib(t, srcName)
+
 	cmd := exec.Command(os.Args[0], //nolint:gosec // G204: re-exec of own test binary
-		"-test.run=^"+testName+"$",
+		"-test.run=^"+t.Name()+"$",
 		"-test.v",
 		"-test.count=1",
 	)
@@ -79,18 +92,7 @@ func runInnerTest(t *testing.T, testName, dylibPath, innerEnvVar string, kdc *Ep
 // fallback works when gss_iter_creds_f returns a single NULL credential
 // handle, simulating the Apple SSO Extension behavior.
 func TestFileCacheInterposeNullCred(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run integration tests")
-	}
-	if os.Getenv("INTERPOSE_NULL_INNER") == "1" {
-		testNullCredInner(t)
-		return
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	dylibPath := buildDylib(t, "interpose_null_cred.c")
-	runInnerTest(t, "TestFileCacheInterposeNullCred", dylibPath, "INTERPOSE_NULL_INNER", kdc)
+	runInterposeTest(t, "INTERPOSE_NULL_INNER", "interpose_null_cred.c", testNullCredInner)
 }
 
 func testNullCredInner(t *testing.T) {
@@ -145,19 +147,7 @@ func testNullCredInner(t *testing.T) {
 // gss_iter_creds_f calls the callback multiple times with NULL handles,
 // simulating a multi-realm SSO Extension environment.
 func TestFileCacheInterposeMultiNullCred(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run integration tests")
-	}
-	if os.Getenv("INTERPOSE_MULTI_NULL_INNER") == "1" {
-		// Same validation as single-NULL — the fallback should still work.
-		testNullCredInner(t)
-		return
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	dylibPath := buildDylib(t, "interpose_multi_null_cred.c")
-	runInnerTest(t, "TestFileCacheInterposeMultiNullCred", dylibPath, "INTERPOSE_MULTI_NULL_INNER", kdc)
+	runInterposeTest(t, "INTERPOSE_MULTI_NULL_INNER", "interpose_multi_null_cred.c", testNullCredInner)
 }
 
 // --- Test 3: gss_krb5_copy_ccache always fails ---
@@ -166,18 +156,7 @@ func TestFileCacheInterposeMultiNullCred(t *testing.T) {
 // fallback path within the GSS callback. gss_krb5_copy_ccache is interposed
 // to always return GSS_S_FAILURE, forcing the manual initialize+copy path.
 func TestFileCacheInterposeCopyCcacheFail(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run integration tests")
-	}
-	if os.Getenv("INTERPOSE_COPY_FAIL_INNER") == "1" {
-		testCopyCcacheFailInner(t)
-		return
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	dylibPath := buildDylib(t, "interpose_copy_ccache_fail.c")
-	runInnerTest(t, "TestFileCacheInterposeCopyCcacheFail", dylibPath, "INTERPOSE_COPY_FAIL_INNER", kdc)
+	runInterposeTest(t, "INTERPOSE_COPY_FAIL_INNER", "interpose_copy_ccache_fail.c", testCopyCcacheFailInner)
 }
 
 func testCopyCcacheFailInner(t *testing.T) {
@@ -215,18 +194,7 @@ func testCopyCcacheFailInner(t *testing.T) {
 // direct-copy fallback populates the FILE: cache, gss_init_sec_context
 // can actually use it to acquire a SPNEGO token.
 func TestFileCacheInterposeNullCredEndToEnd(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run integration tests")
-	}
-	if os.Getenv("INTERPOSE_E2E_INNER") == "1" {
-		testNullCredEndToEndInner(t)
-		return
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	dylibPath := buildDylib(t, "interpose_null_cred.c")
-	runInnerTest(t, "TestFileCacheInterposeNullCredEndToEnd", dylibPath, "INTERPOSE_E2E_INNER", kdc)
+	runInterposeTest(t, "INTERPOSE_E2E_INNER", "interpose_null_cred.c", testNullCredEndToEndInner)
 }
 
 func testNullCredEndToEndInner(t *testing.T) {
@@ -255,18 +223,7 @@ func testNullCredEndToEndInner(t *testing.T) {
 // handles). After initial copy, expiring the cache should trigger a
 // successful re-copy via the same krb5 fallback.
 func TestFileCacheInterposeNullCredRefresh(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run integration tests")
-	}
-	if os.Getenv("INTERPOSE_REFRESH_INNER") == "1" {
-		testNullCredRefreshInner(t)
-		return
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	dylibPath := buildDylib(t, "interpose_null_cred.c")
-	runInnerTest(t, "TestFileCacheInterposeNullCredRefresh", dylibPath, "INTERPOSE_REFRESH_INNER", kdc)
+	runInterposeTest(t, "INTERPOSE_REFRESH_INNER", "interpose_null_cred.c", testNullCredRefreshInner)
 }
 
 func testNullCredRefreshInner(t *testing.T) {

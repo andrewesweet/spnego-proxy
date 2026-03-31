@@ -4,8 +4,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
-	"encoding/base64"
 	"io"
 	"net"
 	"net/http"
@@ -19,13 +17,7 @@ import (
 // path can acquire a valid SPNEGO token from an ephemeral MIT KDC. This is
 // the primary integration test for the darwin-only GSSTokenProvider.
 func TestGSSTokenProviderWithEphemeralKDC(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run GSS-API integration tests")
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	kdc.SetEnv(t)
+	kdc := setupIntegrationKDC(t)
 
 	provider, err := NewGSSTokenProvider("localhost", "", false)
 	if err != nil {
@@ -42,32 +34,20 @@ func TestGSSTokenProviderWithEphemeralKDC(t *testing.T) {
 		t.Fatalf("GetToken: %v", err)
 	}
 
-	// Validate the SPNEGO token structure.
-	decoded, err := base64.StdEncoding.DecodeString(token)
-	if err != nil {
-		t.Fatalf("token is not valid base64: %v", err)
-	}
-	if len(decoded) == 0 || decoded[0] != 0x60 {
-		t.Errorf("expected SPNEGO token (ASN.1 tag 0x60), got 0x%02x", decoded[0])
-	}
-	if !bytes.Contains(decoded, spnegoOID) {
-		t.Error("SPNEGO token does not contain the SPNEGO OID")
-	}
-
+	decoded := validateSPNEGOToken(t, token)
 	t.Logf("acquired valid SPNEGO token: %d bytes base64, %d bytes decoded", len(token), len(decoded))
+
+	// Use kdc to verify the CCachePath is set.
+	if kdc.CCachePath == "" {
+		t.Error("expected non-empty CCachePath from ephemeral KDC")
+	}
 }
 
 // TestGSSTokenProviderExplicitSPNWithKDC verifies token acquisition when the
 // SPN is passed explicitly in Kerberos principal format (HTTP/host), which
 // NewGSSTokenProvider normalizes to GSS-API hostbased format (HTTP@host).
 func TestGSSTokenProviderExplicitSPNWithKDC(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run GSS-API integration tests")
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	kdc.SetEnv(t)
+	setupIntegrationKDC(t)
 
 	provider, err := NewGSSTokenProvider("localhost", "HTTP/localhost", false)
 	if err != nil {
@@ -84,26 +64,14 @@ func TestGSSTokenProviderExplicitSPNWithKDC(t *testing.T) {
 		t.Fatalf("GetToken with explicit SPN: %v", err)
 	}
 
-	decoded, err := base64.StdEncoding.DecodeString(token)
-	if err != nil {
-		t.Fatalf("token is not valid base64: %v", err)
-	}
-	if len(decoded) == 0 || decoded[0] != 0x60 {
-		t.Errorf("expected SPNEGO token (ASN.1 tag 0x60), got 0x%02x", decoded[0])
-	}
+	validateSPNEGOToken(t, token)
 }
 
 // TestGSSTokenProviderHostWithPort verifies that SPN derivation correctly
 // strips the port from proxyHost when acquiring a real token. This exercises
-// the extractHost → "HTTP@localhost" derivation path with a port suffix.
+// the extractHost -> "HTTP@localhost" derivation path with a port suffix.
 func TestGSSTokenProviderHostWithPort(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run GSS-API integration tests")
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	kdc.SetEnv(t)
+	setupIntegrationKDC(t)
 
 	provider, err := NewGSSTokenProvider("localhost:8080", "", false)
 	if err != nil {
@@ -120,26 +88,14 @@ func TestGSSTokenProviderHostWithPort(t *testing.T) {
 		t.Fatalf("GetToken: %v", err)
 	}
 
-	decoded, err := base64.StdEncoding.DecodeString(token)
-	if err != nil {
-		t.Fatalf("token is not valid base64: %v", err)
-	}
-	if len(decoded) == 0 || decoded[0] != 0x60 {
-		t.Errorf("expected SPNEGO token (ASN.1 tag 0x60), got 0x%02x", decoded[0])
-	}
+	validateSPNEGOToken(t, token)
 }
 
 // TestGSSTokenProviderReacquire verifies that GetToken can be called
 // multiple times, producing a valid SPNEGO token each time. This catches
 // stale GSS context state or credential cache file-locking issues.
 func TestGSSTokenProviderReacquire(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run GSS-API integration tests")
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	kdc.SetEnv(t)
+	setupIntegrationKDC(t)
 
 	provider, err := NewGSSTokenProvider("localhost", "", false)
 	if err != nil {
@@ -153,13 +109,7 @@ func TestGSSTokenProviderReacquire(t *testing.T) {
 			t.Fatalf("GetToken call %d: %v", i+1, err)
 		}
 
-		decoded, err := base64.StdEncoding.DecodeString(token)
-		if err != nil {
-			t.Fatalf("call %d: token is not valid base64: %v", i+1, err)
-		}
-		if len(decoded) == 0 || decoded[0] != 0x60 {
-			t.Errorf("call %d: expected SPNEGO token (ASN.1 tag 0x60), got 0x%02x", i+1, decoded[0])
-		}
+		decoded := validateSPNEGOToken(t, token)
 		t.Logf("call %d: acquired %d-byte SPNEGO token", i+1, len(decoded))
 	}
 }
@@ -168,13 +118,7 @@ func TestGSSTokenProviderReacquire(t *testing.T) {
 // error when the credential cache has been removed (simulating expired or
 // missing Kerberos credentials).
 func TestGSSTokenProviderMissingCache(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run GSS-API integration tests")
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	kdc.SetEnv(t)
+	kdc := setupIntegrationKDC(t)
 
 	// Remove the credential cache to simulate expired/missing credentials.
 	if err := os.Remove(kdc.CCachePath); err != nil {
@@ -202,13 +146,7 @@ func TestGSSTokenProviderMissingCache(t *testing.T) {
 // TestGSSTokenProviderUnregisteredSPN verifies that GetToken returns an
 // error when the target service principal is not registered in the KDC.
 func TestGSSTokenProviderUnregisteredSPN(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run GSS-API integration tests")
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	kdc.SetEnv(t)
+	setupIntegrationKDC(t)
 
 	// Use an SPN that was never registered as a principal in the KDC.
 	provider, err := NewGSSTokenProvider("unknown.host.example", "", false)
@@ -225,17 +163,11 @@ func TestGSSTokenProviderUnregisteredSPN(t *testing.T) {
 }
 
 // TestGSSProxyChainWithEphemeralKDC verifies the full proxy chain: ephemeral
-// KDC → GSSTokenProvider → handleClient → upstream receives a valid SPNEGO
+// KDC -> GSSTokenProvider -> handleClient -> upstream receives a valid SPNEGO
 // token in the Proxy-Authorization header. This is the E2E integration test
 // analogous to TestProxyChainWithRealToken in gokrb5_integration_test.go.
 func TestGSSProxyChainWithEphemeralKDC(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run GSS-API integration tests")
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	kdc.SetEnv(t)
+	setupIntegrationKDC(t)
 
 	provider, err := NewGSSTokenProvider("localhost", "", false)
 	if err != nil {
@@ -325,16 +257,7 @@ func TestGSSProxyChainWithEphemeralKDC(t *testing.T) {
 			t.Fatalf("expected Proxy-Authorization starting with 'Negotiate ', got %q", auth)
 		}
 		tokenPart := strings.TrimPrefix(auth, "Negotiate ")
-		decoded, err := base64.StdEncoding.DecodeString(tokenPart)
-		if err != nil {
-			t.Fatalf("token in header is not valid base64: %v", err)
-		}
-		if len(decoded) == 0 || decoded[0] != 0x60 {
-			t.Errorf("expected SPNEGO token to start with 0x60, got 0x%02x", decoded[0])
-		}
-		if !bytes.Contains(decoded, spnegoOID) {
-			t.Error("SPNEGO token in header does not contain the SPNEGO OID")
-		}
+		decoded := validateSPNEGOToken(t, tokenPart)
 		t.Logf("upstream received valid SPNEGO Proxy-Authorization: %d bytes", len(decoded))
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream to receive request")

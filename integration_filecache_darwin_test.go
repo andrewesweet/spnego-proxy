@@ -20,12 +20,24 @@ import (
 
 // --- Helpers ---
 
-// newFileCacheTestProvider creates a GSSTokenProvider with file-cache enabled,
-// backed by the given ephemeral KDC. It registers cleanup via t.Cleanup.
-func newFileCacheTestProvider(t *testing.T, kdc *EphemeralKDC) *GSSTokenProvider {
+// setupIntegrationKDC skips the test if INTEGRATION is not set, creates an
+// ephemeral KDC, registers cleanup, and configures the Kerberos environment.
+func setupIntegrationKDC(t *testing.T) *EphemeralKDC {
 	t.Helper()
+	if os.Getenv("INTEGRATION") == "" {
+		t.Skip("set INTEGRATION=1 to run integration tests")
+	}
+	kdc := NewEphemeralKDC(t)
+	t.Cleanup(kdc.Close)
 	kdc.SetEnv(t)
+	return kdc
+}
 
+// newFileCacheTestProvider creates a GSSTokenProvider with file-cache enabled.
+// The caller must have already configured the Kerberos environment (e.g. via
+// setupIntegrationKDC). It registers cleanup via t.Cleanup.
+func newFileCacheTestProvider(t *testing.T) *GSSTokenProvider {
+	t.Helper()
 	provider, err := NewGSSTokenProvider("localhost", "", true)
 	if err != nil {
 		t.Fatalf("NewGSSTokenProvider (file-cache): %v", err)
@@ -70,13 +82,7 @@ func validateSPNEGOToken(t *testing.T, token string) []byte {
 // --- Ephemeral KDC Integration Tests (INTEGRATION=1) ---
 
 func TestFileCacheCopyProducesValidFileCache(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run integration tests")
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	kdc.SetEnv(t)
+	setupIntegrationKDC(t)
 
 	m, err := NewFileCacheManager()
 	if err != nil {
@@ -107,13 +113,8 @@ func TestFileCacheCopyProducesValidFileCache(t *testing.T) {
 }
 
 func TestFileCacheTokenAcquisitionWithNoPreflightFunction(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run integration tests")
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	provider := newFileCacheTestProvider(t, kdc)
+	setupIntegrationKDC(t)
+	provider := newFileCacheTestProvider(t)
 
 	token, err := provider.GetToken()
 	if err != nil {
@@ -125,13 +126,8 @@ func TestFileCacheTokenAcquisitionWithNoPreflightFunction(t *testing.T) {
 }
 
 func TestFileCacheGSSTokenProviderEndToEnd(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run integration tests")
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	provider := newFileCacheTestProvider(t, kdc)
+	setupIntegrationKDC(t)
+	provider := newFileCacheTestProvider(t)
 
 	// Acquire token multiple times to verify reuse and refresh logic.
 	for i := range 3 {
@@ -145,13 +141,8 @@ func TestFileCacheGSSTokenProviderEndToEnd(t *testing.T) {
 }
 
 func TestFileCacheReacquireAfterCacheDeletion(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run integration tests")
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	provider := newFileCacheTestProvider(t, kdc)
+	setupIntegrationKDC(t)
+	provider := newFileCacheTestProvider(t)
 
 	// First acquisition should succeed.
 	if _, err := provider.GetToken(); err != nil {
@@ -171,13 +162,8 @@ func TestFileCacheReacquireAfterCacheDeletion(t *testing.T) {
 }
 
 func TestFileCacheExpiryTriggersRecopy(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run integration tests")
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	provider := newFileCacheTestProvider(t, kdc)
+	setupIntegrationKDC(t)
+	provider := newFileCacheTestProvider(t)
 
 	// First acquisition populates the cache.
 	if _, err := provider.GetToken(); err != nil {
@@ -202,13 +188,7 @@ func TestFileCacheExpiryTriggersRecopy(t *testing.T) {
 }
 
 func TestFileCacheIterCredsFindsCredential(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run integration tests")
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	kdc.SetEnv(t)
+	setupIntegrationKDC(t)
 
 	m, err := NewFileCacheManager()
 	if err != nil {
@@ -258,13 +238,7 @@ func TestFileCacheIterCredsWithNoCredentials(t *testing.T) {
 }
 
 func TestFileCacheCcacheNameRedirectsTokenAcquisition(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run integration tests")
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	kdc.SetEnv(t)
+	setupIntegrationKDC(t)
 
 	// Copy credentials to a file cache.
 	m, err := NewFileCacheManager()
@@ -322,13 +296,8 @@ func TestFileCacheErrorWhenNoCredentialsExist(t *testing.T) {
 }
 
 func TestFileCacheCorruptCacheFileRecovery(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run integration tests")
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	provider := newFileCacheTestProvider(t, kdc)
+	setupIntegrationKDC(t)
+	provider := newFileCacheTestProvider(t)
 
 	// First acquisition should succeed.
 	if _, err := provider.GetToken(); err != nil {
@@ -350,13 +319,8 @@ func TestFileCacheCorruptCacheFileRecovery(t *testing.T) {
 }
 
 func TestFileCacheConcurrentGetToken(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run integration tests")
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	provider := newFileCacheTestProvider(t, kdc)
+	setupIntegrationKDC(t)
+	provider := newFileCacheTestProvider(t)
 
 	const goroutines = 20
 	var wg sync.WaitGroup
@@ -389,13 +353,8 @@ func TestFileCacheConcurrentGetToken(t *testing.T) {
 }
 
 func TestFileCacheProxyChainWithEphemeralKDC(t *testing.T) {
-	if os.Getenv("INTEGRATION") == "" {
-		t.Skip("set INTEGRATION=1 to run integration tests")
-	}
-
-	kdc := NewEphemeralKDC(t)
-	defer kdc.Close()
-	provider := newFileCacheTestProvider(t, kdc)
+	setupIntegrationKDC(t)
+	provider := newFileCacheTestProvider(t)
 
 	// Start a fake upstream proxy that captures the Proxy-Authorization and Via headers.
 	gotAuth := make(chan string, 1)
