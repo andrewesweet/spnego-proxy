@@ -2,54 +2,29 @@ package main
 
 import "testing"
 
-func TestVersionStringDevel(t *testing.T) {
-	origVersion, origCommit := version, commit
-	t.Cleanup(func() { version, commit = origVersion, origCommit })
-
-	version = ""
-	commit = ""
-	got := versionString()
-	want := "spnego-proxy version (devel)"
-	if got != want {
-		t.Errorf("versionString() = %q, want %q", got, want)
+func TestVersionString(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		commit  string
+		want    string
+	}{
+		{"devel", "", "", "spnego-proxy version (devel)"},
+		{"version only", "v0.1.0", "", "spnego-proxy version v0.1.0"},
+		{"full", "v0.1.0", "abc1234def5678", "spnego-proxy version v0.1.0 (commit abc1234)"},
+		{"short commit", "v0.1.0", "abc", "spnego-proxy version v0.1.0 (commit abc)"},
 	}
-}
 
-func TestVersionStringWithVersion(t *testing.T) {
-	origVersion, origCommit := version, commit
-	t.Cleanup(func() { version, commit = origVersion, origCommit })
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origVersion, origCommit := version, commit
+			t.Cleanup(func() { version, commit = origVersion, origCommit })
 
-	version = "v0.1.0"
-	commit = ""
-	got := versionString()
-	want := "spnego-proxy version v0.1.0"
-	if got != want {
-		t.Errorf("versionString() = %q, want %q", got, want)
-	}
-}
-
-func TestVersionStringFull(t *testing.T) {
-	origVersion, origCommit := version, commit
-	t.Cleanup(func() { version, commit = origVersion, origCommit })
-
-	version = "v0.1.0"
-	commit = "abc1234def5678"
-	got := versionString()
-	want := "spnego-proxy version v0.1.0 (commit abc1234)"
-	if got != want {
-		t.Errorf("versionString() = %q, want %q", got, want)
-	}
-}
-
-func TestVersionStringShortCommit(t *testing.T) {
-	origVersion, origCommit := version, commit
-	t.Cleanup(func() { version, commit = origVersion, origCommit })
-
-	version = "v0.1.0"
-	commit = "abc"
-	got := versionString()
-	want := "spnego-proxy version v0.1.0 (commit abc)"
-	if got != want {
-		t.Errorf("versionString() = %q, want %q", got, want)
+			version = tt.version
+			commit = tt.commit
+			if got := versionString(); got != tt.want {
+				t.Errorf("versionString() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
