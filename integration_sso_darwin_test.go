@@ -60,8 +60,7 @@ func TestSSOIterCredsFindsAPICache(t *testing.T) {
 
 	m := newTestFCM(t)
 
-	err = m.EnsureCache()
-	if err != nil {
+	if err := m.EnsureCache(); err != nil {
 		logSystemDiagnostics(t)
 		t.Fatalf("EnsureCache: %v", err)
 	}

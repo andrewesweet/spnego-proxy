@@ -213,7 +213,7 @@ func TestFileCacheIterCredsWithNoCredentials(t *testing.T) {
 
 	m := newTestFCM(t)
 
-	err = m.EnsureCache()
+	err := m.EnsureCache()
 	if err == nil {
 		t.Fatal("expected error with no credentials, got nil")
 	}
