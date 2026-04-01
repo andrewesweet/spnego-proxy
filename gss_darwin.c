@@ -58,7 +58,7 @@ gss_token_result acquire_spnego_token(const char *spn) {
 
   // Kerberos 5 mechanism OID: 1.2.840.113554.1.2.2
   gss_OID_desc krb5_oid_desc = {9,
-                                 (void *)"\x2a\x86\x48\x86\xf7\x12\x01\x02\x02"};
+                                (void *)"\x2a\x86\x48\x86\xf7\x12\x01\x02\x02"};
 
   // Import server name
   name_buf.value = (void *)spn;
