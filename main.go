@@ -722,6 +722,26 @@ func idleCopy(dst net.Conn, src io.Reader, srcConn net.Conn, timeout time.Durati
 	}
 }
 
+// isExpectedCloseError reports whether err is a normal connection-teardown
+// error that does not warrant ERROR-level logging. EOF, broken pipe,
+// connection reset, and use-of-closed-connection are all routine in proxy
+// forwarding — one side simply closed first.
+func isExpectedCloseError(err error) bool {
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		if se, ok := opErr.Err.(*os.SyscallError); ok {
+			switch se.Err {
+			case syscall.ECONNRESET, syscall.EPIPE:
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // forwardHalf copies data from src to dst, calling CloseWrite on dst when
 // done. It logs the start, completion, and any errors. Callers use
 // wg.Go to launch forwardHalf so the WaitGroup is managed automatically.
@@ -738,7 +758,11 @@ func forwardHalf(dst net.Conn, src io.Reader, srcConn net.Conn, fromAddr, toAddr
 		_, err = io.Copy(dst, src)
 	}
 	if err != nil {
-		slog.Error("forward error", "error", err, "from", fromAddr, "to", toAddr)
+		if isExpectedCloseError(err) {
+			slog.Debug("forward closed", "error", err, "from", fromAddr, "to", toAddr)
+		} else {
+			slog.Error("forward error", "error", err, "from", fromAddr, "to", toAddr)
+		}
 	}
 }
 
@@ -1061,7 +1085,11 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 		defer func() { _ = resp.Body.Close() }()
 
 		if err := resp.Write(conn); err != nil {
-			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+			if isExpectedCloseError(err) {
+				slog.Debug("forward closed", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+			} else {
+				slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+			}
 			return
 		}
 	})
@@ -1089,7 +1117,11 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 		// Connection is cleaned up by deferred conn.Close() in
 		// handleClient (D5).
 		if err := resp.Write(conn); err != nil {
-			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+			if isExpectedCloseError(err) {
+				slog.Debug("forward closed", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+			} else {
+				slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+			}
 		}
 		slog.Debug("upstream rejected CONNECT", "status", resp.StatusCode, "client_addr", clientAddr)
 		return
@@ -1100,7 +1132,11 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 	// headers that cause Bun/undici clients to close the connection before
 	// the TLS handshake through the tunnel can begin.
 	if err := writeConnectOK(conn, resp); err != nil {
-		slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+		if isExpectedCloseError(err) {
+			slog.Debug("forward closed", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+		} else {
+			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+		}
 		return
 	}
 
