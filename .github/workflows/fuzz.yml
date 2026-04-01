@@ -1,0 +1,71 @@
+name: Fuzz Testing
+
+on:
+  schedule:
+    - cron: '0 3 * * 1' # Weekly Monday 3am UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-cross-platform:
+    name: Fuzz (cross-platform)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - FuzzNormalizeSPN
+          - FuzzExtractHost
+          - FuzzSplitCSV
+          - FuzzConnectPortAllowed
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: .go-version
+
+      - name: Run fuzz target
+        env:
+          CGO_ENABLED: "0"
+        run: go test -fuzz '^${{ matrix.target }}$' -fuzztime 60s .
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: testdata/fuzz/**/crash-*
+
+  fuzz-darwin:
+    name: Fuzz (darwin)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - FuzzZeroFileContents
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: .go-version
+
+      - name: Run fuzz target
+        env:
+          CGO_ENABLED: "1"
+        run: go test -fuzz '^${{ matrix.target }}$' -fuzztime 60s .
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: testdata/fuzz/**/crash-*

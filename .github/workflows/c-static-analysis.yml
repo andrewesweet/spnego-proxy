@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Run clang-format
-        run: clang-format --dry-run --Werror gss_darwin.c gss_darwin.h
+        run: clang-format --dry-run --Werror gss_darwin.c gss_darwin.h filecache_darwin.c filecache_darwin.h
 
   clang-tidy:
     name: clang-tidy
@@ -69,6 +69,11 @@ jobs:
 
       - name: Run cppcheck
         run: |
+          # Only gss_darwin.c is analyzed here. filecache_darwin.c uses
+          # framework-style includes (<GSS/GSS.h>, <Kerberos/krb5.h>) that
+          # cppcheck cannot resolve without compiler-level framework search
+          # paths. clang-tidy (which uses the real compiler) covers all C
+          # files including filecache_darwin.c.
           cppcheck \
             --enable=all \
             --error-exitcode=1 \

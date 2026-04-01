@@ -34,9 +34,35 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
+
+// dialTimeoutDialer returns a net.Dialer that is guaranteed to produce a
+// Timeout() error regardless of the network environment. It starts a local
+// TCP listener (to have a valid address) and uses the Control callback to
+// block longer than the configured timeout, ensuring the dial times out
+// rather than being immediately refused. The listener is closed when the
+// test ends.
+func dialTimeoutDialer(t *testing.T, timeout time.Duration) (addr string, dialer *net.Dialer) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for timeout target: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	return ln.Addr().String(), &net.Dialer{
+		Timeout: timeout,
+		Control: func(_, _ string, _ syscall.RawConn) error {
+			// Sleep longer than the dial timeout so the dialer's context
+			// deadline fires first, producing a genuine timeout error.
+			time.Sleep(timeout + 200*time.Millisecond)
+			return nil
+		},
+	}
+}
 
 // assertProxyStatus is a focused helper that asserts both the HTTP status
 // code and the exact Proxy-Status header value for an error response.
@@ -311,17 +337,16 @@ func TestA3_RFC9209_ProxyStatusOnConnectionTerminated(t *testing.T) {
 // proxy is unreachable and the dial times out, the proxy returns 504 with the
 // RFC 9209 Proxy-Status error token "connection_timeout".
 func TestL2_RFC9110_GatewayTimeoutOnDialTimeout(t *testing.T) {
-	// RFC 5737 TEST-NET-1: guaranteed unreachable documentation address.
-	const unreachable = "192.0.2.1:1"
+	const testDialTimeout = 50 * time.Millisecond
+	addr, dialer := dialTimeoutDialer(t, testDialTimeout)
 
 	client, server := net.Pipe()
 	t.Cleanup(func() { _ = client.Close() })
 
 	provider := &stubTokenProvider{token: "tok"}
-	const testDialTimeout = 50 * time.Millisecond
-	cfg := defaultTestConfig(unreachable, provider)
+	cfg := defaultTestConfig(addr, provider)
 	cfg.DialTimeout = testDialTimeout
-	cfg.UpstreamTLS.Dialer = &net.Dialer{Timeout: testDialTimeout}
+	cfg.UpstreamTLS.Dialer = dialer
 
 	done := make(chan struct{})
 	go func() {
@@ -422,47 +447,43 @@ func TestL1_RFC9112_BadGatewayOnConnectionRefused(t *testing.T) {
 // error responses synthesised by the proxy carry "HTTP/1.1" in the status line.
 func TestJ1_RFC9112_HTTP11AdvertisedInProxyGeneratedResponses(t *testing.T) {
 	tests := []struct {
-		name        string
-		setupFunc   func(t *testing.T) string
-		wantStatus  int
-		dialTimeout time.Duration
+		name       string
+		setupFunc  func(t *testing.T) (addr string, dialer *net.Dialer)
+		wantStatus int
 	}{
 		{
 			name: "504 GatewayTimeout",
-			setupFunc: func(_ *testing.T) string {
-				// RFC 5737 TEST-NET-1: unreachable, forces dial timeout.
-				return "192.0.2.1:1"
+			setupFunc: func(t *testing.T) (string, *net.Dialer) {
+				return dialTimeoutDialer(t, 50*time.Millisecond)
 			},
-			wantStatus:  http.StatusGatewayTimeout,
-			dialTimeout: 50 * time.Millisecond,
+			wantStatus: http.StatusGatewayTimeout,
 		},
 		{
 			name: "502 BadGateway_ConnectionRefused",
-			setupFunc: func(t *testing.T) string {
+			setupFunc: func(t *testing.T) (string, *net.Dialer) {
 				ln, err := net.Listen("tcp", "127.0.0.1:0")
 				if err != nil {
 					t.Fatalf("listen: %v", err)
 				}
 				addr := ln.Addr().String()
 				_ = ln.Close()
-				return addr
+				return addr, &net.Dialer{Timeout: 5 * time.Second}
 			},
-			wantStatus:  http.StatusBadGateway,
-			dialTimeout: 5 * time.Second,
+			wantStatus: http.StatusBadGateway,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			upstreamAddr := tc.setupFunc(t)
+			upstreamAddr, dialer := tc.setupFunc(t)
 
 			client, server := net.Pipe()
 			t.Cleanup(func() { _ = client.Close() })
 
 			provider := &stubTokenProvider{token: "tok"}
 			cfg := defaultTestConfig(upstreamAddr, provider)
-			cfg.DialTimeout = tc.dialTimeout
-			cfg.UpstreamTLS.Dialer = &net.Dialer{Timeout: tc.dialTimeout}
+			cfg.DialTimeout = dialer.Timeout
+			cfg.UpstreamTLS.Dialer = dialer
 
 			done := make(chan struct{})
 			go func() {

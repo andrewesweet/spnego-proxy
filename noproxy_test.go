@@ -50,9 +50,29 @@ func TestNoProxyMatcher_Hostname(t *testing.T) {
 	}
 }
 
+// assertWildcardMatches runs match assertions for wildcard pattern tests,
+// verifying both match/no-match results and that the returned pattern matches wantPat.
+func assertWildcardMatches(t *testing.T, m *NoProxyMatcher, wantPat string, tests []struct {
+	host string
+	want bool
+}) {
+	t.Helper()
+	for _, tc := range tests {
+		t.Run(tc.host, func(t *testing.T) {
+			matched, pat := m.Match(tc.host)
+			if matched != tc.want {
+				t.Errorf("Match(%q) = %v (pat=%q), want %v", tc.host, matched, pat, tc.want)
+			}
+			if tc.want && pat != wantPat {
+				t.Errorf("Match(%q) pattern = %q, want %q", tc.host, pat, wantPat)
+			}
+		})
+	}
+}
+
 func TestNoProxyMatcher_Wildcard_StarDot(t *testing.T) {
 	m := NewNoProxyMatcher("*.corp.com")
-	tests := []struct {
+	assertWildcardMatches(t, m, "*.corp.com", []struct {
 		host string
 		want bool
 	}{
@@ -65,23 +85,12 @@ func TestNoProxyMatcher_Wildcard_StarDot(t *testing.T) {
 		{"notcorp.com", false},
 		{"corp.com.evil.com", false},
 		{"othercorp.com", false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.host, func(t *testing.T) {
-			matched, pat := m.Match(tc.host)
-			if matched != tc.want {
-				t.Errorf("Match(%q) = %v (pat=%q), want %v", tc.host, matched, pat, tc.want)
-			}
-			if tc.want && pat != "*.corp.com" {
-				t.Errorf("Match(%q) pattern = %q, want %q", tc.host, pat, "*.corp.com")
-			}
-		})
-	}
+	})
 }
 
 func TestNoProxyMatcher_Wildcard_LeadingDot(t *testing.T) {
 	m := NewNoProxyMatcher(".corp.com")
-	tests := []struct {
+	assertWildcardMatches(t, m, ".corp.com", []struct {
 		host string
 		want bool
 	}{
@@ -92,18 +101,7 @@ func TestNoProxyMatcher_Wildcard_LeadingDot(t *testing.T) {
 		{"corp.com:8080", true},
 		{"notcorp.com", false},
 		{"othercorp.com", false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.host, func(t *testing.T) {
-			matched, pat := m.Match(tc.host)
-			if matched != tc.want {
-				t.Errorf("Match(%q) = %v (pat=%q), want %v", tc.host, matched, pat, tc.want)
-			}
-			if tc.want && pat != ".corp.com" {
-				t.Errorf("Match(%q) pattern = %q, want %q", tc.host, pat, ".corp.com")
-			}
-		})
-	}
+	})
 }
 
 func TestNoProxyMatcher_IP(t *testing.T) {

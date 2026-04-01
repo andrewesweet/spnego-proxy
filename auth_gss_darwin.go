@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"sync"
 	"unsafe"
 )
 
@@ -24,7 +23,6 @@ import (
 // credential cache, including the macOS Keychain-based API: cache type.
 type GSSTokenProvider struct {
 	spn string // e.g., "HTTP@proxy.host.com"
-	mu  sync.Mutex
 }
 
 // NewGSSTokenProvider creates a token provider that uses the macOS GSS-API framework.
@@ -36,14 +34,12 @@ func NewGSSTokenProvider(proxyHost, explicitSPN string) (*GSSTokenProvider, erro
 	} else {
 		spn = normalizeSPN(spn, '@', '/')
 	}
+
 	slog.Info("using macOS GSS-API", "spn", spn)
 	return &GSSTokenProvider{spn: spn}, nil
 }
 
 func (g *GSSTokenProvider) GetToken() (string, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
 	cspn := C.CString(g.spn)
 	defer C.free(unsafe.Pointer(cspn))
 
@@ -56,12 +52,33 @@ func (g *GSSTokenProvider) GetToken() (string, error) {
 		} else {
 			hint = " (try 'klist' to check credentials or 'kinit' to refresh)"
 		}
-		return "", &CredentialError{authError{msg: fmt.Sprintf("GSS-API error: %s%s", msg, hint)}}
+		return "", newCredentialError("GSS-API error: %s%s", msg, hint)
 	}
 	if result.data == nil || result.length == 0 {
 		return "", &NegotiationError{authError{msg: "GSS-API returned empty token"}}
 	}
-	defer C.free_token_data(result.data)
+	defer C.free(result.data)
+
+	tokenBytes := C.GoBytes(result.data, C.int(result.length))
+	return base64.StdEncoding.EncodeToString(tokenBytes), nil
+}
+
+// acquireTokenNoPreFlight calls the C function that skips the gss_acquire_cred
+// pre-flight and uses GSS_C_NO_CREDENTIAL with relaxed error checking. This is
+// used by FileCacheTokenProvider after populating the FILE: cache.
+func (g *GSSTokenProvider) acquireTokenNoPreFlight() (string, error) {
+	cspn := C.CString(g.spn)
+	defer C.free(unsafe.Pointer(cspn))
+
+	result := C.acquire_spnego_token_no_preflight(cspn)
+	if result.error_code != 0 {
+		msg := C.GoString(&result.error_msg[0])
+		return "", newCredentialError("GSS-API error (no-preflight): %s", msg)
+	}
+	if result.data == nil || result.length == 0 {
+		return "", &NegotiationError{authError{msg: "GSS-API returned empty token (no-preflight)"}}
+	}
+	defer C.free(result.data)
 
 	tokenBytes := C.GoBytes(result.data, C.int(result.length))
 	return base64.StdEncoding.EncodeToString(tokenBytes), nil
@@ -74,7 +91,11 @@ func (g *GSSTokenProvider) Close() error {
 // newNativeTokenProvider on darwin uses the GSS-API framework.
 // It probes credentials at startup so the user gets an early warning
 // if kinit is needed, but a probe failure is not fatal.
-func newNativeTokenProvider(proxy, spn string) (TokenProvider, error) {
+func newNativeTokenProvider(proxy, spn string, fileCacheEnabled bool) (TokenProvider, error) {
+	if fileCacheEnabled {
+		return newFileCacheTokenProvider(proxy, spn)
+	}
+
 	g, err := NewGSSTokenProvider(proxy, spn)
 	if err != nil {
 		return nil, err

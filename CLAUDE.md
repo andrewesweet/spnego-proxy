@@ -111,7 +111,18 @@ Go 1.25. Use modern Go idioms (wg.Go, SplitSeq, t.Context).
 
 ## Testing
 
-    go test -v -count=1 ./...
+    go test -v -race -count=1 ./...
+
+## Fuzz Testing
+
+    go test -fuzz FuzzNormalizeSPN -fuzztime 30s .
+    go test -fuzz FuzzExtractHost -fuzztime 30s .
+    go test -fuzz FuzzSplitCSV -fuzztime 30s .
+    go test -fuzz FuzzConnectPortAllowed -fuzztime 30s .
+
+On macOS with CGO_ENABLED=1:
+
+    go test -fuzz FuzzZeroFileContents -fuzztime 30s .
 
 ## Linting
 

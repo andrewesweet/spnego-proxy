@@ -1,0 +1,418 @@
+// clang-format off
+//go:build darwin
+// clang-format on
+
+#include "filecache_darwin.h"
+
+#include <GSS/GSS.h>
+#include <GSS/gssapi_krb5.h>
+#include <Kerberos/krb5.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+// gss_krb5_copy_ccache is deprecated in favor of gss_export_cred, but
+// gss_export_cred serializes to a buffer rather than writing directly to a
+// krb5_ccache. Since we need a FILE: ccache on disk (for gss_init_sec_context
+// via gss_krb5_ccache_name), gss_krb5_copy_ccache is the correct API.
+// Similarly, krb5_cc_close and krb5_cc_destroy are deprecated but have no
+// GSS-API replacements for FILE: cache management.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
+// Kerberos 5 mechanism OID: 1.2.840.113554.1.2.2
+static const gss_OID_desc krb5_mech_oid_desc = {
+    9, (void *)"\x2a\x86\x48\x86\xf7\x12\x01\x02\x02"};
+
+// open_file_ccache initializes a krb5 context and resolves a FILE: credential
+// cache at the given path. On success, the caller must close/destroy the cache
+// and free the context. Returns 0 on success, -1 on failure (with error
+// message written to errbuf).
+static int open_file_ccache(const char *path, krb5_context *ctx_out,
+                            krb5_ccache *cc_out, char *errbuf, size_t errlen) {
+  krb5_error_code ret = krb5_init_context(ctx_out);
+  if (ret != 0) {
+    snprintf(errbuf, errlen, "krb5_init_context failed: %d", (int)ret);
+    return -1;
+  }
+
+  char ccname[1024];
+  int n = snprintf(ccname, sizeof(ccname), "FILE:%s", path);
+  if (n < 0 || (size_t)n >= sizeof(ccname)) {
+    snprintf(errbuf, errlen, "cache path too long");
+    krb5_free_context(*ctx_out);
+    *ctx_out = NULL;
+    return -1;
+  }
+
+  ret = krb5_cc_resolve(*ctx_out, ccname, cc_out);
+  if (ret != 0) {
+    snprintf(errbuf, errlen, "krb5_cc_resolve failed: %d", (int)ret);
+    krb5_free_context(*ctx_out);
+    *ctx_out = NULL;
+    return -1;
+  }
+
+  return 0;
+}
+
+// iter_ctx is passed through gss_iter_creds_f to the callback. It carries the
+// destination krb5_ccache and accumulates the result of the credential copy.
+typedef struct {
+  krb5_context krb5_ctx;
+  krb5_ccache dest_cc;
+  uint32_t lifetime;  // remaining lifetime of the copied credential
+  int copied;         // 1 if at least one copy succeeded
+  int saw_null_cred;  // 1 if a NULL gss_cred_id_t was received
+  int error_code;
+  char error_msg[512];
+} iter_ctx;
+
+// try_initialize_and_copy attempts to initialize the destination cache with
+// the principal from the source credential and then copy. This is the fallback
+// path if gss_krb5_copy_ccache requires an already-initialized destination.
+static int try_initialize_and_copy(iter_ctx *ctx, gss_cred_id_t cred) {
+  OM_uint32 major, minor;
+  gss_name_t name = GSS_C_NO_NAME;
+  gss_buffer_desc name_buf = GSS_C_EMPTY_BUFFER;
+
+  // Get the credential's principal name.
+  major = gss_inquire_cred(&minor, cred, &name, NULL, NULL, NULL);
+  if (GSS_ERROR(major)) {
+    return -1;
+  }
+
+  // Convert gss_name_t to string for krb5_parse_name.
+  major = gss_display_name(&minor, name, &name_buf, NULL);
+  gss_release_name(&minor, &name);
+  if (GSS_ERROR(major)) {
+    return -1;
+  }
+
+  // Parse the principal string into a krb5_principal.
+  char *principal_str = strndup((const char *)name_buf.value, name_buf.length);
+  gss_release_buffer(&minor, &name_buf);
+  if (principal_str == NULL) {
+    return -1;
+  }
+
+  krb5_principal princ = NULL;
+  krb5_error_code ret = krb5_parse_name(ctx->krb5_ctx, principal_str, &princ);
+  free(principal_str);
+  if (ret != 0) {
+    return -1;
+  }
+
+  // Initialize the destination cache with the principal.
+  ret = krb5_cc_initialize(ctx->krb5_ctx, ctx->dest_cc, princ);
+  krb5_free_principal(ctx->krb5_ctx, princ);
+  if (ret != 0) {
+    return -1;
+  }
+
+  // Retry the copy now that the cache is initialized.
+  major = gss_krb5_copy_ccache(&minor, cred, ctx->dest_cc);
+  if (GSS_ERROR(major)) {
+    return -1;
+  }
+
+  return 0;
+}
+
+// cred_iter_callback is invoked by gss_iter_creds_f for each credential
+// matching the requested mechanism. The gss_cred_id_t is ONLY valid for the
+// duration of this callback — it must not be retained.
+static void cred_iter_callback(void *userctx, gss_OID mech,
+                               gss_cred_id_t cred) {
+  (void)mech;
+  iter_ctx *ctx = (iter_ctx *)userctx;
+
+  // Apple's GSS.framework may pass NULL credential handles for SSO
+  // Extension-managed credentials. The framework can enumerate the
+  // credential but cannot provide a handle to an unbundled process.
+  // Record this so the caller can try the krb5 direct-copy fallback.
+  if (cred == GSS_C_NO_CREDENTIAL) {
+    ctx->saw_null_cred = 1;
+    return;
+  }
+
+  OM_uint32 major, minor;
+  OM_uint32 lifetime = 0;
+
+  // Query the credential's remaining lifetime.
+  major = gss_inquire_cred(&minor, cred, NULL, &lifetime, NULL, NULL);
+  if (GSS_ERROR(major) || lifetime == 0) {
+    return;  // Skip expired or unqueryable credentials.
+  }
+
+  // Take the first valid credential. Attempting to overwrite a prior good
+  // copy with a longer-lived credential risks corrupting the cache if the
+  // second copy fails mid-write. In practice, most systems have a single TGT.
+  if (ctx->copied) {
+    return;
+  }
+
+  // Attempt the copy. gss_krb5_copy_ccache may internally call
+  // krb5_cc_initialize on the destination. If it does not (Apple's Heimdal
+  // fork), the call will fail and we fall back to manual initialization.
+  major = gss_krb5_copy_ccache(&minor, cred, ctx->dest_cc);
+  if (GSS_ERROR(major)) {
+    // Fallback: manually initialize the destination and retry.
+    if (try_initialize_and_copy(ctx, cred) != 0) {
+      ctx->error_code = 1;
+      snprintf(ctx->error_msg, sizeof(ctx->error_msg),
+               "gss_krb5_copy_ccache failed (major=0x%x minor=0x%x)",
+               (unsigned)major, (unsigned)minor);
+      return;
+    }
+  }
+
+  // Cap GSS_C_INDEFINITE to avoid overflow in Go time calculations.
+  if (lifetime == GSS_C_INDEFINITE) {
+    lifetime = 3600;  // Cap at 1 hour.
+  }
+
+  ctx->lifetime = lifetime;
+  ctx->copied = 1;
+  ctx->error_code = 0;
+  ctx->error_msg[0] = '\0';
+}
+
+// is_tgt returns 1 if the credential's server principal is a TGT
+// (krbtgt/REALM@REALM or krbtgt/OTHER_REALM@REALM). Only TGTs are needed
+// in the FILE: cache; service tickets are not copied to limit credential
+// exposure.
+//
+// Uses krb5_unparse_name for portability — the Heimdal-specific
+// krb5_principal_get_comp_string is not in Apple's public Kerberos headers.
+static int is_tgt(krb5_context krb5_ctx, krb5_principal server) {
+  if (server == NULL) {
+    return 0;
+  }
+  char *name = NULL;
+  krb5_error_code ret = krb5_unparse_name(krb5_ctx, server, &name);
+  if (ret != 0 || name == NULL) {
+    return 0;
+  }
+  // TGT principals look like "krbtgt/REALM@REALM" or
+  // "krbtgt/OTHER@REALM". Check for the "krbtgt/" prefix.
+  int result = (strncmp(name, "krbtgt/", 7) == 0);
+  free(name);
+  return result;
+}
+
+// try_krb5_direct_copy copies TGT credentials from the system's default krb5
+// credential cache to the destination FILE: cache using krb5 APIs directly.
+// This is the fallback path for Apple SSO Extension environments where
+// gss_iter_creds_f yields NULL credential handles — the GSS-API can
+// enumerate credentials but not provide handles to unbundled processes,
+// while the krb5 layer can still read the underlying cache.
+//
+// Only TGT credentials (krbtgt/*) are copied to minimize credential
+// exposure. Service tickets are not needed — gss_init_sec_context will
+// obtain them from the KDC using the TGT.
+//
+// On success, returns 0 and writes the shortest remaining TGT lifetime
+// (in seconds) to *lifetime_out. On failure, returns -1 and writes a
+// diagnostic to errbuf.
+static int try_krb5_direct_copy(krb5_context krb5_ctx, krb5_ccache dest_cc,
+                                uint32_t *lifetime_out, char *errbuf,
+                                size_t errlen) {
+  krb5_ccache src_cc = NULL;
+  krb5_error_code ret;
+
+  // Open the system's default credential cache (typically the API: cache
+  // managed by the SSO Extension).
+  ret = krb5_cc_default(krb5_ctx, &src_cc);
+  if (ret != 0) {
+    snprintf(errbuf, errlen, "krb5_cc_default failed: %d", (int)ret);
+    return -1;
+  }
+
+  // Get the cache principal for initialization.
+  krb5_principal princ = NULL;
+  ret = krb5_cc_get_principal(krb5_ctx, src_cc, &princ);
+  if (ret != 0) {
+    snprintf(errbuf, errlen, "krb5_cc_get_principal failed: %d", (int)ret);
+    krb5_cc_close(krb5_ctx, src_cc);
+    return -1;
+  }
+
+  // Initialize the destination FILE: cache with the same principal.
+  ret = krb5_cc_initialize(krb5_ctx, dest_cc, princ);
+  krb5_free_principal(krb5_ctx, princ);
+  if (ret != 0) {
+    snprintf(errbuf, errlen, "krb5_cc_initialize failed: %d", (int)ret);
+    krb5_cc_close(krb5_ctx, src_cc);
+    return -1;
+  }
+
+  // Copy TGT credentials from source to destination.
+  krb5_cc_cursor cursor;
+  ret = krb5_cc_start_seq_get(krb5_ctx, src_cc, &cursor);
+  if (ret != 0) {
+    snprintf(errbuf, errlen, "krb5_cc_start_seq_get failed: %d", (int)ret);
+    krb5_cc_close(krb5_ctx, src_cc);
+    return -1;
+  }
+
+  krb5_creds cred;
+  int copied = 0;
+  int store_errors = 0;
+  // krb5_timestamp is int32_t in Heimdal; safe until Y2038.
+  krb5_timestamp now = (krb5_timestamp)time(NULL);
+  krb5_timestamp min_remaining = 0;
+
+  while (krb5_cc_next_cred(krb5_ctx, src_cc, &cursor, &cred) == 0) {
+    // Only copy TGTs to limit credential exposure.
+    if (!is_tgt(krb5_ctx, cred.server)) {
+      krb5_free_cred_contents(krb5_ctx, &cred);
+      continue;
+    }
+
+    // Skip expired credentials.
+    if (cred.times.endtime <= now) {
+      krb5_free_cred_contents(krb5_ctx, &cred);
+      continue;
+    }
+
+    ret = krb5_cc_store_cred(krb5_ctx, dest_cc, &cred);
+    if (ret == 0) {
+      copied++;
+      krb5_timestamp remaining = cred.times.endtime - now;
+      if (min_remaining == 0 || remaining < min_remaining) {
+        min_remaining = remaining;
+      }
+    } else {
+      store_errors++;
+    }
+    krb5_free_cred_contents(krb5_ctx, &cred);
+  }
+  krb5_cc_end_seq_get(krb5_ctx, src_cc, &cursor);
+  krb5_cc_close(krb5_ctx, src_cc);
+
+  if (copied == 0) {
+    if (store_errors > 0) {
+      snprintf(errbuf, errlen, "failed to store %d TGT(s) in destination cache",
+               store_errors);
+    } else {
+      snprintf(errbuf, errlen,
+               "no valid TGTs in default cache (empty or all expired)");
+    }
+    return -1;
+  }
+
+  *lifetime_out = (uint32_t)min_remaining;
+  return 0;
+}
+
+filecache_result copy_creds_to_file_cache(const char *dest_path) {
+  filecache_result result;
+  memset(&result, 0, sizeof(result));
+
+  krb5_context krb5_ctx = NULL;
+  krb5_ccache dest_cc = NULL;
+  if (open_file_ccache(dest_path, &krb5_ctx, &dest_cc, result.error_msg,
+                       sizeof(result.error_msg)) != 0) {
+    result.error_code = 1;
+    return result;
+  }
+
+  // Prepare the iteration context.
+  iter_ctx ctx;
+  memset(&ctx, 0, sizeof(ctx));
+  ctx.krb5_ctx = krb5_ctx;
+  ctx.dest_cc = dest_cc;
+
+  // Enumerate all Kerberos credentials. The callback runs synchronously for
+  // each credential. We pass the krb5 mechanism OID to filter to Kerberos 5
+  // credentials only.
+  OM_uint32 minor;
+  gss_iter_creds_f(&minor, 0, (gss_OID)&krb5_mech_oid_desc, &ctx,
+                   cred_iter_callback);
+
+  // If the GSS iterator did not copy a credential, fall back to copying
+  // directly from the system default krb5 cache. This handles:
+  //   - Apple SSO Extension: gss_iter_creds_f yields NULL handles
+  //   - Future Apple changes: non-NULL but unusable handles
+  //   - Any other GSS enumeration failure
+  if (!ctx.copied) {
+    uint32_t lifetime = 0;
+    char errbuf[512];
+    if (try_krb5_direct_copy(krb5_ctx, dest_cc, &lifetime, errbuf,
+                             sizeof(errbuf)) == 0) {
+      ctx.copied = 1;
+      ctx.lifetime = lifetime;
+      ctx.error_msg[0] = '\0';
+      result.copy_method = FILECACHE_COPY_METHOD_KRB5_DIRECT;
+    } else {
+      // Include both GSS and krb5 context in the error message.
+      if (ctx.saw_null_cred) {
+        snprintf(ctx.error_msg, sizeof(ctx.error_msg),
+                 "GSS iterator returned NULL credential handles; "
+                 "krb5 fallback: %s",
+                 errbuf);
+      } else {
+        snprintf(ctx.error_msg, sizeof(ctx.error_msg),
+                 "GSS iterator found no credentials; "
+                 "krb5 fallback: %s",
+                 errbuf);
+      }
+    }
+  }
+
+  // Close the krb5 cache handle (does not destroy the file).
+  krb5_cc_close(krb5_ctx, dest_cc);
+  krb5_free_context(krb5_ctx);
+
+  if (!ctx.copied) {
+    result.error_code = 1;
+    if (ctx.error_msg[0] != '\0') {
+      // Propagate the copy error.
+      memcpy(result.error_msg, ctx.error_msg, sizeof(result.error_msg));
+    } else {
+      snprintf(result.error_msg, sizeof(result.error_msg),
+               "no Kerberos credentials found (check 'klist -l')");
+    }
+    return result;
+  }
+
+  result.lifetime = ctx.lifetime;
+  return result;
+}
+
+int set_default_ccache_name(const char *name) {
+  OM_uint32 minor;
+  // Pass NULL for old_name to avoid thread-safety issues with the static
+  // pointer that old_name returns.
+  OM_uint32 major = gss_krb5_ccache_name(&minor, name, NULL);
+  return GSS_ERROR(major) ? -1 : 0;
+}
+
+int destroy_file_cache(const char *path) {
+  // Use krb5_cc_destroy to unlink the file and free krb5 resources.
+  // The caller is responsible for zeroing the file contents before calling
+  // this function (defense-in-depth).
+  krb5_context krb5_ctx = NULL;
+  krb5_ccache cc = NULL;
+  char errbuf[256];
+  if (open_file_ccache(path, &krb5_ctx, &cc, errbuf, sizeof(errbuf)) != 0) {
+    unlink(path);
+    return -1;
+  }
+
+  // krb5_cc_destroy unlinks the file. Deprecated but no GSS replacement.
+  krb5_error_code ret = krb5_cc_destroy(krb5_ctx, cc);
+  // cc is freed by krb5_cc_destroy; do not call krb5_cc_close.
+  krb5_free_context(krb5_ctx);
+
+  if (ret != 0) {
+    unlink(path);
+    return -1;
+  }
+  return 0;
+}
+
+#pragma clang diagnostic pop

@@ -4,10 +4,14 @@ linters:
   default: standard
   enable:
     - bodyclose
+    - dupl
     - errorlint
     - gosec
     - misspell
     - revive
+  settings:
+    dupl:
+      threshold: 70
 
 formatters:
   enable:

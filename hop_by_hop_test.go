@@ -244,15 +244,16 @@ func TestE2_RFC9112_ValidContentLengthInResponsePassesThrough(t *testing.T) {
 // E1 — RFC 9112 §6.1: Response-side TE + CL conflict → CL removed
 // ---------------------------------------------------------------------------
 
-func TestE1_RFC9112_ResponseTEAndCLConflictRemovesCL(t *testing.T) {
-	// A raw upstream sends a response with both Transfer-Encoding: chunked
-	// and Content-Length. The proxy must strip Content-Length before
-	// relaying to the client per RFC 9112 §6.1.
+// rawUpstreamProxyRoundTrip creates a raw TCP upstream that sends rawResponse
+// verbatim, proxies a request through a ProxyUnderTest, and returns the response.
+func rawUpstreamProxyRoundTrip(t *testing.T, rawResponse, requestURI string) *http.Response {
+	t.Helper()
+
 	rawUpstream, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer func() { _ = rawUpstream.Close() }()
+	t.Cleanup(func() { _ = rawUpstream.Close() })
 
 	var wg sync.WaitGroup
 	wg.Go(func() {
@@ -261,29 +262,21 @@ func TestE1_RFC9112_ResponseTEAndCLConflictRemovesCL(t *testing.T) {
 			return
 		}
 		defer func() { _ = conn.Close() }()
-		reader := bufio.NewReader(conn)
-		_, _ = http.ReadRequest(reader)
-		// Both Transfer-Encoding and Content-Length — the proxy must
-		// strip Content-Length and use chunked framing.
-		resp := "HTTP/1.1 200 OK\r\n" +
-			"Transfer-Encoding: chunked\r\n" +
-			"Content-Length: 5\r\n" +
-			"\r\n" +
-			"5\r\nhello\r\n0\r\n\r\n"
-		_, _ = conn.Write([]byte(resp))
+		_, _ = http.ReadRequest(bufio.NewReader(conn))
+		_, _ = conn.Write([]byte(rawResponse))
 	})
 	t.Cleanup(wg.Wait)
 
 	proxy := NewProxyUnderTest(t, rawUpstream.Addr().String())
-	defer proxy.Close()
+	t.Cleanup(proxy.Close)
 
 	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
-	defer func() { _ = conn.Close() }()
+	t.Cleanup(func() { _ = conn.Close() })
 
-	req, _ := http.NewRequest("GET", "http://example.com/e1-resp", nil)
+	req, _ := http.NewRequest("GET", requestURI, nil)
 	if err := req.WriteProxy(conn); err != nil {
 		t.Fatalf("write request: %v", err)
 	}
@@ -292,7 +285,23 @@ func TestE1_RFC9112_ResponseTEAndCLConflictRemovesCL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	return resp
+}
+
+func TestE1_RFC9112_ResponseTEAndCLConflictRemovesCL(t *testing.T) {
+	// A raw upstream sends a response with both Transfer-Encoding: chunked
+	// and Content-Length. The proxy must strip Content-Length before
+	// relaying to the client per RFC 9112 §6.1.
+	resp := rawUpstreamProxyRoundTrip(t, //nolint:bodyclose // closed via t.Cleanup in helper
+		"HTTP/1.1 200 OK\r\n"+
+			"Transfer-Encoding: chunked\r\n"+
+			"Content-Length: 5\r\n"+
+			"\r\n"+
+			"5\r\nhello\r\n0\r\n\r\n",
+		"http://example.com/e1-resp",
+	)
 
 	assertStatusCode(t, resp, http.StatusOK)
 	assertHeaderAbsent(t, resp.Header, "Content-Length")
@@ -489,50 +498,14 @@ func TestE2_RFC9112_MultipleDifferingCLInResponse(t *testing.T) {
 	// strings.Contains "Content-Length" check in the ReadResponse
 	// error path) rather than silently raw-relaying the smuggling
 	// attempt.
-	rawUpstream, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer func() { _ = rawUpstream.Close() }()
-
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		conn, err := rawUpstream.Accept()
-		if err != nil {
-			return
-		}
-		defer func() { _ = conn.Close() }()
-		reader := bufio.NewReader(conn)
-		_, _ = http.ReadRequest(reader)
-		// Two differing Content-Length headers — a smuggling attempt.
-		resp := "HTTP/1.1 200 OK\r\n" +
-			"Content-Length: 5\r\n" +
-			"Content-Length: 10\r\n" +
-			"\r\n" +
-			"hello"
-		_, _ = conn.Write([]byte(resp))
-	})
-	t.Cleanup(wg.Wait)
-
-	proxy := NewProxyUnderTest(t, rawUpstream.Addr().String())
-	defer proxy.Close()
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	req, _ := http.NewRequest("GET", "http://example.com/e2-dup", nil)
-	if err := req.WriteProxy(conn); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	resp := rawUpstreamProxyRoundTrip(t, //nolint:bodyclose // closed via t.Cleanup in helper
+		"HTTP/1.1 200 OK\r\n"+
+			"Content-Length: 5\r\n"+
+			"Content-Length: 10\r\n"+
+			"\r\n"+
+			"hello",
+		"http://example.com/e2-dup",
+	)
 
 	assertStatusCode(t, resp, http.StatusBadGateway)
 	if ps := resp.Header.Get("Proxy-Status"); !strings.Contains(ps, "http_protocol_error") {
