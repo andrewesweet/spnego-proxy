@@ -831,7 +831,11 @@ func handleDirectHTTP(conn net.Conn, req *http.Request, reqReader *bufio.Reader,
 
 	// Write request in origin form (not proxy form).
 	if err := req.Write(targetConn); err != nil {
-		slog.Error("noproxy write request failed", "error", err, "target", target, "client_addr", clientAddr)
+		if isExpectedCloseError(err) {
+			slog.Debug("noproxy write request closed", "error", err, "target", target, "client_addr", clientAddr)
+		} else {
+			slog.Error("noproxy write request failed", "error", err, "target", target, "client_addr", clientAddr)
+		}
 		writeHTTPError(conn, errConnectionTerminated)
 		return
 	}
@@ -846,13 +850,21 @@ func handleDirectHTTP(conn net.Conn, req *http.Request, reqReader *bufio.Reader,
 		upstreamReader := bufio.NewReader(targetConn)
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
-			slog.Error("noproxy read response failed", "error", err, "target", target, "client_addr", clientAddr)
+			if isExpectedCloseError(err) {
+				slog.Debug("noproxy read response closed", "error", err, "target", target, "client_addr", clientAddr)
+			} else {
+				slog.Error("noproxy read response failed", "error", err, "target", target, "client_addr", clientAddr)
+			}
 			return
 		}
 		defer func() { _ = resp.Body.Close() }()
 		injectVia(resp.Header, resp.Proto, cfg.Pseudonym)
 		if err := resp.Write(conn); err != nil {
-			slog.Error("noproxy forward response failed", "error", err, "target", target, "client_addr", clientAddr)
+			if isExpectedCloseError(err) {
+				slog.Debug("noproxy forward response closed", "error", err, "target", target, "client_addr", clientAddr)
+			} else {
+				slog.Error("noproxy forward response failed", "error", err, "target", target, "client_addr", clientAddr)
+			}
 			return
 		}
 		slog.Debug("noproxy HTTP response forwarding done", "target", target, "client_addr", clientAddr)
@@ -880,7 +892,11 @@ func handleDirectConnect(conn net.Conn, req *http.Request, reqReader *bufio.Read
 	}
 	injectVia(resp.Header, req.Proto, cfg.Pseudonym)
 	if err := writeConnectOK(conn, resp); err != nil {
-		slog.Error("noproxy CONNECT response write failed", "error", err, "target", target, "client_addr", clientAddr)
+		if isExpectedCloseError(err) {
+			slog.Debug("noproxy CONNECT response write closed", "error", err, "target", target, "client_addr", clientAddr)
+		} else {
+			slog.Error("noproxy CONNECT response write failed", "error", err, "target", target, "client_addr", clientAddr)
+		}
 		return
 	}
 
@@ -939,7 +955,9 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	req, err := http.ReadRequest(reqReader)
 	_ = conn.SetReadDeadline(time.Time{}) // clear after read
 	if err != nil {
-		if !errors.Is(err, io.EOF) {
+		if isExpectedCloseError(err) {
+			slog.Debug("client connection closed before request", "error", err, "client_addr", clientAddr)
+		} else {
 			slog.Error("failed to read request", "error", err, "error_type", errHTTPRequestError.errorType, "client_addr", clientAddr)
 			writeHTTPError(conn, errHTTPRequestError)
 		}
