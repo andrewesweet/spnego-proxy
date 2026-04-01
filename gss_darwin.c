@@ -56,6 +56,10 @@ gss_token_result acquire_spnego_token(const char *spn) {
   gss_OID_desc spnego_oid_desc = {6, (void *)"\x2b\x06\x01\x05\x05\x02"};
   gss_OID spnego_oid = &spnego_oid_desc;
 
+  // Kerberos 5 mechanism OID: 1.2.840.113554.1.2.2
+  gss_OID_desc krb5_oid_desc = {9,
+                                (void *)"\x2a\x86\x48\x86\xf7\x12\x01\x02\x02"};
+
   // Import server name
   name_buf.value = (void *)spn;
   name_buf.length = strlen(spn);
@@ -71,8 +75,13 @@ gss_token_result acquire_spnego_token(const char *spn) {
   // initialization. Without this, a missing credential cache (e.g. expired
   // macOS API: cache) produces the misleading "unsupported mechanism" error
   // from gss_init_sec_context. Acquiring explicitly gives a clear diagnostic.
-  gss_OID_set_desc spnego_oid_set_desc = {1, &spnego_oid_desc};
-  major = gss_acquire_cred(&minor, GSS_C_NO_NAME, 0, &spnego_oid_set_desc,
+  // Use KRB5 (not SPNEGO) for the pre-flight check. On Intune-managed Macs,
+  // the Apple Kerberos SSO Extension intercepts SPNEGO gss_acquire_cred calls
+  // and returns GSS_S_NO_CRED from its API: credential caches. Using the KRB5
+  // OID bypasses the SSO extension interception while still producing a valid
+  // credential for gss_init_sec_context under the SPNEGO mechanism.
+  gss_OID_set_desc krb5_oid_set_desc = {1, &krb5_oid_desc};
+  major = gss_acquire_cred(&minor, GSS_C_NO_NAME, 0, &krb5_oid_set_desc,
                            GSS_C_INITIATE, &cred, NULL, NULL);
   if (GSS_ERROR(major)) {
     result.error_code = 1;
