@@ -722,6 +722,20 @@ func idleCopy(dst net.Conn, src io.Reader, srcConn net.Conn, timeout time.Durati
 	}
 }
 
+// isExpectedCloseError reports whether err is a normal connection-teardown
+// error that does not warrant ERROR-level logging. EOF, broken pipe,
+// connection reset, and use-of-closed-connection are all routine in proxy
+// forwarding — one side simply closed first.
+func isExpectedCloseError(err error) bool {
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	return false
+}
+
 // forwardHalf copies data from src to dst, calling CloseWrite on dst when
 // done. It logs the start, completion, and any errors. Callers use
 // wg.Go to launch forwardHalf so the WaitGroup is managed automatically.
@@ -738,7 +752,11 @@ func forwardHalf(dst net.Conn, src io.Reader, srcConn net.Conn, fromAddr, toAddr
 		_, err = io.Copy(dst, src)
 	}
 	if err != nil {
-		slog.Error("forward error", "error", err, "from", fromAddr, "to", toAddr)
+		if isExpectedCloseError(err) {
+			slog.Debug("forward closed", "error", err, "from", fromAddr, "to", toAddr)
+		} else {
+			slog.Error("forward error", "error", err, "from", fromAddr, "to", toAddr)
+		}
 	}
 }
 
@@ -807,7 +825,11 @@ func handleDirectHTTP(conn net.Conn, req *http.Request, reqReader *bufio.Reader,
 
 	// Write request in origin form (not proxy form).
 	if err := req.Write(targetConn); err != nil {
-		slog.Error("noproxy write request failed", "error", err, "target", target, "client_addr", clientAddr)
+		if isExpectedCloseError(err) {
+			slog.Debug("noproxy write request closed", "error", err, "target", target, "client_addr", clientAddr)
+		} else {
+			slog.Error("noproxy write request failed", "error", err, "target", target, "client_addr", clientAddr)
+		}
 		writeHTTPError(conn, errConnectionTerminated)
 		return
 	}
@@ -822,13 +844,21 @@ func handleDirectHTTP(conn net.Conn, req *http.Request, reqReader *bufio.Reader,
 		upstreamReader := bufio.NewReader(targetConn)
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
-			slog.Error("noproxy read response failed", "error", err, "target", target, "client_addr", clientAddr)
+			if isExpectedCloseError(err) {
+				slog.Debug("noproxy read response closed", "error", err, "target", target, "client_addr", clientAddr)
+			} else {
+				slog.Error("noproxy read response failed", "error", err, "target", target, "client_addr", clientAddr)
+			}
 			return
 		}
 		defer func() { _ = resp.Body.Close() }()
 		injectVia(resp.Header, resp.Proto, cfg.Pseudonym)
 		if err := resp.Write(conn); err != nil {
-			slog.Error("noproxy forward response failed", "error", err, "target", target, "client_addr", clientAddr)
+			if isExpectedCloseError(err) {
+				slog.Debug("noproxy forward response closed", "error", err, "target", target, "client_addr", clientAddr)
+			} else {
+				slog.Error("noproxy forward response failed", "error", err, "target", target, "client_addr", clientAddr)
+			}
 			return
 		}
 		slog.Debug("noproxy HTTP response forwarding done", "target", target, "client_addr", clientAddr)
@@ -856,7 +886,11 @@ func handleDirectConnect(conn net.Conn, req *http.Request, reqReader *bufio.Read
 	}
 	injectVia(resp.Header, req.Proto, cfg.Pseudonym)
 	if err := writeConnectOK(conn, resp); err != nil {
-		slog.Error("noproxy CONNECT response write failed", "error", err, "target", target, "client_addr", clientAddr)
+		if isExpectedCloseError(err) {
+			slog.Debug("noproxy CONNECT response write closed", "error", err, "target", target, "client_addr", clientAddr)
+		} else {
+			slog.Error("noproxy CONNECT response write failed", "error", err, "target", target, "client_addr", clientAddr)
+		}
 		return
 	}
 
@@ -915,7 +949,9 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 	req, err := http.ReadRequest(reqReader)
 	_ = conn.SetReadDeadline(time.Time{}) // clear after read
 	if err != nil {
-		if !errors.Is(err, io.EOF) {
+		if isExpectedCloseError(err) {
+			slog.Debug("client connection closed before request", "error", err, "client_addr", clientAddr)
+		} else {
 			slog.Error("failed to read request", "error", err, "error_type", errHTTPRequestError.errorType, "client_addr", clientAddr)
 			writeHTTPError(conn, errHTTPRequestError)
 		}
@@ -1061,7 +1097,11 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 		defer func() { _ = resp.Body.Close() }()
 
 		if err := resp.Write(conn); err != nil {
-			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+			if isExpectedCloseError(err) {
+				slog.Debug("forward closed", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+			} else {
+				slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+			}
 			return
 		}
 	})
@@ -1089,7 +1129,11 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 		// Connection is cleaned up by deferred conn.Close() in
 		// handleClient (D5).
 		if err := resp.Write(conn); err != nil {
-			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+			if isExpectedCloseError(err) {
+				slog.Debug("forward closed", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+			} else {
+				slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+			}
 		}
 		slog.Debug("upstream rejected CONNECT", "status", resp.StatusCode, "client_addr", clientAddr)
 		return
@@ -1100,7 +1144,11 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 	// headers that cause Bun/undici clients to close the connection before
 	// the TLS handshake through the tunnel can begin.
 	if err := writeConnectOK(conn, resp); err != nil {
-		slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+		if isExpectedCloseError(err) {
+			slog.Debug("forward closed", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+		} else {
+			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
+		}
 		return
 	}
 
