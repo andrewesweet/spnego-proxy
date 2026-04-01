@@ -730,14 +730,8 @@ func isExpectedCloseError(err error) bool {
 	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 		return true
 	}
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		if se, ok := opErr.Err.(*os.SyscallError); ok {
-			switch se.Err {
-			case syscall.ECONNRESET, syscall.EPIPE:
-				return true
-			}
-		}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return true
 	}
 	return false
 }
