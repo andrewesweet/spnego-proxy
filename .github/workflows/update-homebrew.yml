@@ -3,6 +3,18 @@ name: Update Homebrew Formula
 on:
   release:
     types: [published]
+  workflow_call:
+    inputs:
+      tag_name:
+        required: true
+        type: string
+      prerelease:
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      HOMEBREW_DEPLOY_KEY:
+        required: true
 
 permissions: {}
 
@@ -12,14 +24,14 @@ concurrency:
 
 jobs:
   update-formula:
-    if: "!github.event.release.prerelease"
+    if: ${{ !(inputs.prerelease || github.event.release.prerelease) }}
     runs-on: ubuntu-latest
     permissions: {}
     steps:
       - name: Compute source tarball SHA256
         id: sha256
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ inputs.tag_name || github.event.release.tag_name }}
           REPO: ${{ github.repository }}
         run: |
           url="https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz"

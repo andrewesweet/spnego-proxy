@@ -29,6 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      prerelease: ${{ steps.semver.outputs.prerelease }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -101,3 +103,12 @@ jobs:
           gh release edit "${{ github.ref_name }}" \
             --repo "${{ github.repository }}" \
             --draft=false
+
+  homebrew:
+    needs: release
+    uses: ./.github/workflows/update-homebrew.yml
+    with:
+      tag_name: ${{ github.ref_name }}
+      prerelease: ${{ needs.release.outputs.prerelease == 'true' }}
+    secrets:
+      HOMEBREW_DEPLOY_KEY: ${{ secrets.HOMEBREW_DEPLOY_KEY }}
