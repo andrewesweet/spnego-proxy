@@ -1,9 +1,8 @@
-# Phase 2 Empirical Findings: google-auth Credential Validation Behavior
+# Phase 2 Empirical Findings: Tool Credential Validation Behavior
 
 **Date:** 2026-04-05
-**Status:** Complete — resolves the N1 gate from v2 review
-**Scope:** Python `google-auth` 2.49.1 (the library underlying `gcloud`,
-Google Cloud SDKs for Python, and Vertex AI clients)
+**Status:** Complete for google-auth, pip, npm, gh — resolves the N1 gate
+**Scope:** Python `google-auth` 2.49.1, `pip` 24.0, `npm` 10.9.7, `gh` 2.60.1
 
 ## Purpose
 
@@ -178,25 +177,127 @@ The design simplifies accordingly:
 - **id_token verification:** substitute JWKS at
   `www.googleapis.com/oauth2/v1/certs` with proxy-signed cert
 
-## Remaining Empirical Work
+## Experiment 4 — pip
 
-This spike covered Python `google-auth`. The following are NOT yet tested
-empirically and should be before full Phase 3c commitment:
+**Setup:** `pip install --index-url http://user:<fake-token>@127.0.0.1:PORT/simple/`
+against a local HTTP server. Five token formats tested (opaque, 1-char,
+plain text, base64, random).
 
-1. **gcloud CLI itself** (Go binary) — likely shares transport semantics
-   with google-auth-python since gcloud reads the same ADC file format,
-   but the verification paths could differ
-2. **Node.js `google-auth-library`** — popular via Vertex AI JS clients
-3. **Java `google-auth-library-java`** — used by many enterprise workloads
-4. **`gh` with fake PAT** — expected trivial (PAT is opaque), but confirm
-   `gh auth status` behavior with a fake token
-5. **`npm` v9+ token format validation** — the specific concern from N1
-6. **`pip` with `--index-url` containing a fake PAT**
+**Observed behavior:** Every test produced exactly one HTTP GET to
+`/simple/<package>/` with `Authorization: Basic <base64>` containing the
+fake token. Zero local validation, zero pre-flight verification calls.
 
-**Recommendation:** proceed to Phase 3a (TLS interception core) in parallel
-with tests 1–6, which can run against the prototype as it matures. None of
-these tests is likely to invalidate the core model; they'd refine which
-tools need special-case handling.
+**Verdict:** pip sends whatever credential string it is given. Plain opaque
+strings work. The v2 N1 claim does not apply to pip.
+
+## Experiment 5 — npm
+
+**Setup:** `npm whoami` and `npm view` against a local HTTP server
+impersonating an npm registry, with `_authToken` set to various fake
+values in a tmpfile `.npmrc`. Five token formats tested.
+
+**Observed behavior:**
+- npm 10.9.7 never rejected a token based on format — all tests proceeded
+  to the HTTP call
+- npm only sends `_authToken` on auth-requiring operations (not on
+  unscoped reads); `whoami` and publishes include it
+- For `whoami`, the local server's response body was accepted without
+  additional validation
+
+**Verdict:** The v2 N1 claim that "npm v9+ validates the format of
+registry tokens" is empirically false for npm 10.x. Plain opaque strings
+work.
+
+## Experiment 6 — gh
+
+**Setup:** `gh auth status` with various `GH_TOKEN` values against real
+`api.github.com`. Also `gh api user` with a fake token.
+
+**Observed behavior:**
+
+```
+$ GH_TOKEN=fake gh api user
+{ "message": "Bad credentials", "status": "401" }
+gh: Bad credentials (HTTP 401)
+```
+
+Every fake PAT (empty, 3-char, 40-char, `ghp_`-prefixed, `github_pat_`-prefixed)
+produced the same result: an HTTP call to `api.github.com/user` and a
+rejection based on the **server's 401 response**, not a local format check.
+
+**Verdict:** gh performs NO local format validation. It trusts whatever the
+`/user` endpoint says. This is the **exact case the credential shim layer
+is designed for**: the MITM proxy must intercept `GET /user` (and
+`/rate_limit`) and return a synthetic success response.
+
+**Required shim response for gh:**
+```json
+{
+  "login": "container-agent",
+  "id": 1,
+  "type": "User",
+  "node_id": "U_agent"
+}
+```
+
+Plus the following response headers:
+- `X-OAuth-Scopes: repo, read:org`  (or whatever the real PAT has)
+- `X-RateLimit-Limit: 5000`
+- `X-RateLimit-Remaining: 4999`
+- `X-RateLimit-Reset: <far-future epoch>`
+
+With this shim in place, `gh auth status` succeeds. Subsequent `gh api ...`
+calls go to their real endpoints and the proxy swaps the sentinel PAT
+for the real one on outbound.
+
+## Summary of Phase 2
+
+| Tool | Local format validation? | Verification network call? | Shim required? |
+|------|-------------------------|---------------------------|----------------|
+| google-auth (authorized_user) | No | No | No (token refresh is the exchange point) |
+| google-auth (service_account) | No (accepts any key) | No | No (assertion endpoint is the exchange point) |
+| google-auth (id_token.verify) | Signature check | Yes (JWKS) | Yes (substitute JWKS response) |
+| pip | No | No | No |
+| npm | No | No (not eager) | No |
+| gh | No | Yes (`/user`) | **Yes — shim /user and /rate_limit** |
+
+**Three patterns observed:**
+
+1. **Pass-through tools** (pip, npm): send whatever credential they have,
+   trust the server. Proxy needs only outbound header rewrite.
+2. **Exchange-based tools** (google-auth): perform a token-exchange dance,
+   trust whatever comes back. Proxy intercepts the exchange and returns
+   a fake token that it will later recognize on outbound.
+3. **Eager-verification tools** (gh): make a verification call on startup
+   or `auth status`. Proxy must synthesize the verification response.
+
+All three patterns are tractable. None invalidates the MITM model.
+
+## N1 Verdict (Updated)
+
+The v2 review said the sentinel model breaks for locally-validating tools.
+Empirically, NONE of the tested tools (google-auth, pip, npm, gh) perform
+local JWT validation against a real issuer key. The one verification path
+that does (`id_token.verify_oauth2_token`) is defeated by the proxy's
+control of the JWKS endpoint.
+
+**Phase 3c can proceed with plain opaque sentinel strings.** No signed JWT
+construction is required for any of the tested tools.
+
+## Remaining Empirical Work (Deferred to Parallel Phase 2 Work)
+
+Not yet tested but NOT blocking Phase 3a start:
+
+1. **gcloud CLI Go binary** — likely same semantics as google-auth-python
+   (same ADC file format); confirm with a real gcloud in a test env
+2. **Node.js `google-auth-library`** — Vertex AI JS clients
+3. **Java `google-auth-library-java`** — enterprise workloads
+4. **jira-cli** — PAT format and verification behavior
+5. **Docker registry auth** — whether `docker login` / `docker pull` does
+   local format validation
+
+None of these is likely to invalidate the core model. They refine which
+tools need special-case shim handling.
 
 ## Experiment Scripts
 
