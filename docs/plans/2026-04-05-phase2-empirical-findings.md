@@ -275,6 +275,76 @@ control of the JWKS endpoint.
 **Phase 3c can proceed with plain opaque sentinel strings.** No signed JWT
 construction is required for any of the tested tools.
 
+## Container Tool Auth Audit (2026-04-06)
+
+An audit of the target container image toolset identified tools requiring
+authenticated network traffic. Updated tool auth matrix:
+
+| Tool | Credential | Endpoint(s) | Proxy handling |
+|------|-----------|-------------|----------------|
+| git / lazygit / prek | PAT or SSH key | github.com | MITM header injection or SSH agent forwarding |
+| gcloud CLI | OAuth ADC | googleapis.com | Tested — token exchange interception |
+| OpenCode (Copilot) | OAuth bearer | api.githubcopilot.com | Inject `Authorization: Bearer` on outbound |
+| OpenCode (Vertex AI) | OAuth ADC | aiplatform.googleapis.com | Same as gcloud — tested |
+| critique | None (delegates to OpenCode via ACP) | critique.work (no auth) | Passthrough |
+| mise / codeql | GitHub PAT | api.github.com | Same injection as git |
+| kubectl / k9s / kubectx | kubeconfig bearer | k8s API server | Inject bearer token per cluster |
+| uv | PyPI token (publish only) | pypi.org / private index | Only if publishing or private index |
+
+Tools confirmed to have NO auth-requiring network traffic: bash, curl,
+openssh-client, ca-certificates, build-base, python, go, nodejs, bun,
+procps, ruff, ty, golangci-lint, gofumpt, shellcheck, shfmt, tflint,
+actionlint, zizmor, tmux, starship, btop, lnav, fzf, zoxide, bat, delta,
+fd, ripgrep, glow, tree, jq, yq, httpie (user-driven, no default auth),
+neovim, pandoc, lazydocker.
+
+### OpenCode with GitHub Copilot — Revisit Required
+
+OpenCode authenticates to GitHub Copilot via the **OAuth device code flow**
+(RFC 8628):
+
+1. `POST https://github.com/login/device/code` (unauthenticated)
+2. User visits `github.com/login/device` in a browser and enters the code
+3. `POST https://github.com/login/oauth/access_token` polling until granted
+4. Token stored in `~/.local/share/opencode/auth.json`
+5. Runtime API calls to `https://api.githubcopilot.com` with
+   `Authorization: Bearer <token>`
+
+This presents a design question with multiple options to evaluate later:
+
+- **Option A: Host-side pre-population.** User performs device flow on the
+  host; `auth.json` is bind-mounted read-only into the container. The proxy
+  injects the bearer token on outbound `api.githubcopilot.com` traffic.
+  Container never sees the raw token on disk (the bind-mount contains a
+  sentinel; the proxy swaps it). Cleanest isolation but requires host-side
+  tooling to manage the token lifecycle.
+
+- **Option B: Passthrough OAuth, then MITM runtime calls.** The proxy
+  passes through `github.com/login/device/*` and
+  `github.com/login/oauth/*` unauthenticated (these are public OAuth
+  endpoints). The container performs the device flow interactively. Once
+  the token lands in `auth.json`, all subsequent
+  `api.githubcopilot.com` traffic is intercepted and the proxy injects
+  credentials. Simpler setup but the raw token is in the container
+  (in memory and on disk) — weaker isolation.
+
+- **Option C: Proxy-mediated device flow.** The proxy intercepts the
+  device-code polling and performs the OAuth exchange on the host side,
+  returning a sentinel token to the container. Most complex but strongest
+  isolation.
+
+Decision deferred to Phase 3c/3d work when the credential provider
+abstraction and per-container identity are in place.
+
+### Critique
+
+Critique (github.com/remorses/critique) is a terminal diff viewer that
+delegates all AI work to a subprocess agent (OpenCode or Claude Code) via
+the Agent Client Protocol (ACP) over stdin/stdout ndjson. It has zero
+auth surface of its own — inherits whatever the spawned agent has. Its
+only outbound HTTP call is uploading rendered diffs to `critique.work`
+(no auth required).
+
 ## Remaining Empirical Work (Deferred to Parallel Phase 2 Work)
 
 Not yet tested but NOT blocking Phase 3a start:
@@ -286,6 +356,9 @@ Not yet tested but NOT blocking Phase 3a start:
 4. **jira-cli** — PAT format and verification behavior
 5. **Docker registry auth** — whether `docker login` / `docker pull` does
    local format validation
+6. **OpenCode Copilot device flow** — empirically test the OAuth device
+   code flow through a MITM proxy to confirm which endpoints need
+   passthrough vs. interception
 
 None of these is likely to invalidate the core model. Given that the shim
 layer has been eliminated, these tests are purely informational — confirming
