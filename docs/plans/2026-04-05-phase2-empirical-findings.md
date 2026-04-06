@@ -225,30 +225,15 @@ Every fake PAT (empty, 3-char, 40-char, `ghp_`-prefixed, `github_pat_`-prefixed)
 produced the same result: an HTTP call to `api.github.com/user` and a
 rejection based on the **server's 401 response**, not a local format check.
 
-**Verdict:** gh performs NO local format validation. It trusts whatever the
-`/user` endpoint says. This is the **exact case the credential shim layer
-is designed for**: the MITM proxy must intercept `GET /user` (and
-`/rate_limit`) and return a synthetic success response.
+**Verdict:** gh performs NO local format validation. It verifies credentials
+via a network call to `GET /user`.
 
-**Required shim response for gh:**
-```json
-{
-  "login": "container-agent",
-  "id": 1,
-  "type": "User",
-  "node_id": "U_agent"
-}
-```
-
-Plus the following response headers:
-- `X-OAuth-Scopes: repo, read:org`  (or whatever the real PAT has)
-- `X-RateLimit-Limit: 5000`
-- `X-RateLimit-Remaining: 4999`
-- `X-RateLimit-Reset: <far-future epoch>`
-
-With this shim in place, `gh auth status` succeeds. Subsequent `gh api ...`
-calls go to their real endpoints and the proxy swaps the sentinel PAT
-for the real one on outbound.
+**Correction (2026-04-06):** A shim is NOT required for gh. The `/user`
+verification call is just another outbound HTTPS request to `api.github.com`.
+The MITM proxy injects the real PAT into the `Authorization` header on this
+call exactly as it does for any other API call. GitHub's real `/user` endpoint
+returns a real 200 response with the real user profile. gh is satisfied.
+No synthetic response needed.
 
 ## Summary of Phase 2
 
@@ -256,22 +241,28 @@ for the real one on outbound.
 |------|-------------------------|---------------------------|----------------|
 | google-auth (authorized_user) | No | No | No (token refresh is the exchange point) |
 | google-auth (service_account) | No (accepts any key) | No | No (assertion endpoint is the exchange point) |
-| google-auth (id_token.verify) | Signature check | Yes (JWKS) | Yes (substitute JWKS response) |
+| google-auth (id_token.verify) | Signature check | Yes (JWKS) | No — JWKS fetch is under proxy control |
 | pip | No | No | No |
 | npm | No | No (not eager) | No |
-| gh | No | Yes (`/user`) | **Yes — shim /user and /rate_limit** |
+| gh | No | Yes (`/user`) | **No** — proxy injects real PAT, real GitHub responds |
 
-**Three patterns observed:**
+**Two patterns observed** (corrected from three — shim layer is not needed):
 
-1. **Pass-through tools** (pip, npm): send whatever credential they have,
-   trust the server. Proxy needs only outbound header rewrite.
+1. **Pass-through tools** (pip, npm, gh): send whatever credential they
+   have, trust the server. Proxy injects the real credential on outbound,
+   real server responds. gh's `/user` verification call is just another
+   pass-through request — no shim required.
 2. **Exchange-based tools** (google-auth): perform a token-exchange dance,
-   trust whatever comes back. Proxy intercepts the exchange and returns
-   a fake token that it will later recognize on outbound.
-3. **Eager-verification tools** (gh): make a verification call on startup
-   or `auth status`. Proxy must synthesize the verification response.
+   trust whatever comes back. Proxy intercepts the exchange at the token
+   endpoint and returns a proxy-controlled sentinel that it will later
+   recognize and swap for the real credential on outbound API calls.
 
-All three patterns are tractable. None invalidates the MITM model.
+**No tool needs a shim in the base case.** The shim layer (Phase 3f) is
+eliminated from the plan unless a future tool is discovered that verifies
+credentials against an endpoint the proxy cannot reach. The only case
+where synthetic responses are needed is the google-auth id_token JWKS
+path, which is handled by intercepting `www.googleapis.com/oauth2/v1/certs`
+— an outbound request like any other, not a "shim."
 
 ## N1 Verdict (Updated)
 
@@ -296,8 +287,10 @@ Not yet tested but NOT blocking Phase 3a start:
 5. **Docker registry auth** — whether `docker login` / `docker pull` does
    local format validation
 
-None of these is likely to invalidate the core model. They refine which
-tools need special-case shim handling.
+None of these is likely to invalidate the core model. Given that the shim
+layer has been eliminated, these tests are purely informational — confirming
+that each tool's verification calls (if any) are ordinary outbound requests
+that the proxy handles transparently.
 
 ## Experiment Scripts
 
