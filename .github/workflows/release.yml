@@ -78,12 +78,12 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # softprops/action-gh-release is used intentionally for its native
+      # handling of multi-file asset uploads, draft/prerelease flags, and
+      # release notes. Replacing it with a `gh release` script would
+      # re-implement that behavior with no security benefit, since the
+      # action runs pinned to a commit SHA.
       - name: Create draft release with assets
-        # softprops/action-gh-release is used intentionally for its native
-        # handling of multi-file asset uploads, draft/prerelease flags, and
-        # release notes. Replacing it with a `gh release` script would
-        # re-implement that behavior with no security benefit, since the
-        # action runs pinned to a commit SHA.
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1 # zizmor: ignore[superfluous-actions]
         with:
           tag_name: ${{ github.ref_name }}
