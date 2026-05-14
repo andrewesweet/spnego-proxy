@@ -231,6 +231,17 @@ func TestI1I2_ConnectionClosedAfterResponse(t *testing.T) {
 				"\r\n",
 		},
 		{
+			// RFC 9112 §9.3: "A proxy server MUST NOT maintain a
+			// persistent connection with an HTTP/1.0 client." The
+			// legacy "Connection: Keep-Alive" token from the
+			// HTTP/1.0 era does not override this MUST NOT.
+			name: "HTTP/1.0 with Connection: Keep-Alive still closed (I1)",
+			raw: "GET http://example.com/ HTTP/1.0\r\n" +
+				"Host: example.com\r\n" +
+				"Connection: Keep-Alive\r\n" +
+				"\r\n",
+		},
+		{
 			name: "Connection: close honored (I2)",
 			raw: "GET http://example.com/ HTTP/1.1\r\n" +
 				"Host: example.com\r\n" +

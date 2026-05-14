@@ -1370,3 +1370,140 @@ func TestHandleClientKeepAlivePostBody(t *testing.T) {
 		t.Errorf("req[1] = %s %q, want POST %q", got[1].method, got[1].body, body2)
 	}
 }
+
+// TestI2_RFC9112_RequestConnectionCloseTerminatesKeepAliveLoop verifies that
+// a client request carrying Connection: close terminates the keep-alive
+// loop immediately, so a pipelined second request is NOT processed.
+//
+// RFC 9112 §9.6: "A server that receives a 'close' connection option MUST
+// initiate closure of the connection after it sends the final response to
+// the request that contained the 'close'. The server MUST NOT process any
+// further requests on that connection."
+func TestI2_RFC9112_RequestConnectionCloseTerminatesKeepAliveLoop(t *testing.T) {
+	upstreamAddr, upstreamReqs := keepAliveUpstream(t, 2, func(_ int, _ *http.Request) string {
+		return "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+	})
+
+	provider := &stubTokenProvider{token: "tok"}
+	cfg := defaultTestConfig(upstreamAddr, provider)
+	addr, done := acceptOneAndHandle(t, cfg)
+
+	client, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	// First request signals close. Second is pipelined behind it.
+	// The proxy MUST process only the first request.
+	pipeline := "GET http://a.example.com/ HTTP/1.1\r\nHost: a.example.com\r\nConnection: close\r\n\r\n" +
+		"GET http://b.example.com/ HTTP/1.1\r\nHost: b.example.com\r\n\r\n"
+	if _, err := io.WriteString(client, pipeline); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	reader := bufio.NewReader(client)
+	resp1, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("resp1: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp1.Body)
+	_ = resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Errorf("resp1 status %d, want 200", resp1.StatusCode)
+	}
+
+	// No second response should follow: the close on the first request
+	// must have terminated the loop before iter 2 was read.
+	if resp2, err := http.ReadResponse(reader, nil); err == nil {
+		_ = resp2.Body.Close()
+		t.Errorf("expected no second response when client sent Connection: close, got status %d", resp2.StatusCode)
+	}
+
+	_ = client.Close()
+	waitForDone(t, done)
+
+	close(upstreamReqs)
+	count := 0
+	for range upstreamReqs {
+		count++
+	}
+	if count != 1 {
+		t.Errorf("upstream received %d requests, want 1 (Connection: close on request must stop loop)", count)
+	}
+}
+
+// TestRFC4559_ConnectionBoundAuthSingleTokenAcquisition is the RFC-tagged
+// conformance test for SPNEGO connection-bound authentication.
+//
+// RFC 4559 §5: "Continuation of authentication context is required only
+// when no Authorization header is sent." Once a TCP connection between the
+// proxy and the upstream is authenticated with Negotiate, subsequent
+// requests on that same connection do not need to repeat the SPNEGO
+// exchange and MUST NOT carry a stale or smuggled Proxy-Authorization
+// header.
+//
+// Asserts:
+//   - The proxy acquires a SPNEGO token exactly once per upstream connection.
+//   - Proxy-Authorization is set on the first forwarded request only.
+//   - Any client-supplied Proxy-Authorization on subsequent requests is
+//     stripped by sanitizeHopByHop and does not reach the upstream.
+func TestRFC4559_ConnectionBoundAuthSingleTokenAcquisition(t *testing.T) {
+	upstreamAddr, upstreamReqs := keepAliveUpstream(t, 3, func(_ int, _ *http.Request) string {
+		return "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+	})
+
+	provider := &stubTokenProvider{token: "tok"}
+	cfg := defaultTestConfig(upstreamAddr, provider)
+	addr, done := acceptOneAndHandle(t, cfg)
+
+	client, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	pipeline := "GET http://a.example.com/ HTTP/1.1\r\nHost: a.example.com\r\n\r\n" +
+		"GET http://b.example.com/ HTTP/1.1\r\nHost: b.example.com\r\nProxy-Authorization: Negotiate smuggled-token\r\n\r\n" +
+		"GET http://c.example.com/ HTTP/1.1\r\nHost: c.example.com\r\n\r\n"
+	if _, err := io.WriteString(client, pipeline); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	reader := bufio.NewReader(client)
+	for i := 0; i < 3; i++ {
+		resp, err := http.ReadResponse(reader, nil)
+		if err != nil {
+			t.Fatalf("resp[%d]: %v", i, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("resp[%d] status %d, want 200", i, resp.StatusCode)
+		}
+	}
+	_ = client.Close()
+	waitForDone(t, done)
+
+	close(upstreamReqs)
+	var reqs []*http.Request
+	for r := range upstreamReqs {
+		reqs = append(reqs, r)
+	}
+	if len(reqs) != 3 {
+		t.Fatalf("upstream received %d requests, want 3", len(reqs))
+	}
+
+	if pa := reqs[0].Header.Get("Proxy-Authorization"); pa != "Negotiate tok" {
+		t.Errorf("req[0] Proxy-Authorization = %q, want %q", pa, "Negotiate tok")
+	}
+	for i := 1; i < len(reqs); i++ {
+		if pa := reqs[i].Header.Get("Proxy-Authorization"); pa != "" {
+			t.Errorf("req[%d] Proxy-Authorization = %q, want empty (RFC 4559 §5 connection-bound; smuggled tokens MUST be stripped)", i, pa)
+		}
+	}
+
+	if n := provider.calls.Load(); n != 1 {
+		t.Errorf("GetToken called %d times, want exactly 1 (RFC 4559 §5)", n)
+	}
+}
