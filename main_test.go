@@ -1073,8 +1073,8 @@ func TestHandleDirectHTTPRejectsHostMismatch(t *testing.T) {
 	if resp2.StatusCode != http.StatusBadRequest {
 		t.Fatalf("resp2 status %d, want 400 (host mismatch); body=%q", resp2.StatusCode, body)
 	}
-	if !strings.Contains(string(body), "different host") {
-		t.Errorf("resp2 body does not mention host mismatch: %q", body)
+	if !strings.Contains(string(body), "incompatible") {
+		t.Errorf("resp2 body does not mention mismatch: %q", body)
 	}
 
 	_ = client.Close()
