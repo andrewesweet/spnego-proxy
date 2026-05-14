@@ -17,6 +17,8 @@ jobs:
         arch: ['amd64', 'arm64']
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
@@ -37,7 +39,7 @@ jobs:
           CC: ${{ matrix.arch == 'amd64' && 'clang -arch x86_64' || 'clang -arch arm64' }}
         run: >-
           go build -v -trimpath
-          -ldflags "-s -w -X main.version=${{ github.ref_name }} -X main.commit=${{ github.sha }}"
+          -ldflags "-s -w -X main.version=${GITHUB_REF_NAME} -X main.commit=${{ github.sha }}"
           -o spnego-proxy-darwin-${{ matrix.arch }} .
 
       - name: Verify binary architecture
@@ -53,7 +55,7 @@ jobs:
           mkdir -p staging
           cp spnego-proxy-darwin-${{ matrix.arch }} staging/spnego-proxy
           cp LICENSE README.md staging/
-          tar -czf spnego-proxy_${{ github.ref_name }}_darwin_${{ matrix.arch }}.tar.gz -C staging .
+          tar -czf "spnego-proxy_${GITHUB_REF_NAME}_darwin_${{ matrix.arch }}.tar.gz" -C staging .
 
       - name: Attest build provenance
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
@@ -98,6 +100,8 @@ jobs:
         arch: ['amd64', 'arm64']
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
@@ -117,7 +121,7 @@ jobs:
           CGO_ENABLED: "0"
         run: >-
           go build -v -trimpath
-          -ldflags "-s -w -X main.version=${{ github.ref_name }} -X main.commit=${{ github.sha }}"
+          -ldflags "-s -w -X main.version=${GITHUB_REF_NAME} -X main.commit=${{ github.sha }}"
           -o spnego-proxy-linux-${{ matrix.arch }} .
 
       - name: Verify binary
@@ -128,7 +132,7 @@ jobs:
           mkdir -p staging
           cp spnego-proxy-linux-${{ matrix.arch }} staging/spnego-proxy
           cp LICENSE README.md staging/
-          tar -czf spnego-proxy_${{ github.ref_name }}_linux_${{ matrix.arch }}.tar.gz -C staging .
+          tar -czf "spnego-proxy_${GITHUB_REF_NAME}_linux_${{ matrix.arch }}.tar.gz" -C staging .
 
       - name: Attest build provenance
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0

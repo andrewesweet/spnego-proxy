@@ -1,6 +1,10 @@
 name: Conventional PR Title
 
 on:
+  # zizmor: ignore[dangerous-triggers] pull_request_target is required so the
+  # workflow can read the PR title even when the PR comes from a fork. The
+  # workflow never checks out or executes PR head code; it only inspects
+  # github.event.pull_request.title via the `pull-requests: read` permission.
   pull_request_target:
     types: [opened, reopened, edited]
 
