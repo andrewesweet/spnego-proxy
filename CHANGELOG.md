@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [1.2.5] - 2026-05-14
+
+
+### Security
+- Re-validate pipelined requests to prevent smuggling
+
 ## [1.2.4] - 2026-04-02
 
 
@@ -104,6 +110,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Default -connect-ports to 443 instead of allowing all ports
 - Return 502 instead of raw relay when upstream response is unparseable
 - Zero password bytes after Kerberos client initialization
+[1.2.5]: https://github.com/andrewesweet/spnego-proxy/compare/v1.2.4...v1.2.5
 [1.2.4]: https://github.com/andrewesweet/spnego-proxy/compare/v1.2.3...v1.2.4
 [1.2.3]: https://github.com/andrewesweet/spnego-proxy/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/andrewesweet/spnego-proxy/compare/v1.2.1...v1.2.2
