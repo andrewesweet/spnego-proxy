@@ -183,10 +183,10 @@
 - **CAPEC**: CAPEC-33
 - **Location**: main.go (P-002, P-007)
 - **Trust Boundary**: TB-001
-- **Description**: The proxy implements TE/CL conflict resolution per RFC 9112. This is the correct defense, but novel smuggling variants could potentially bypass it.
-- **Threat Refs**: T-T-P-002-001, T-T-P-007-001
+- **Description**: The proxy implements TE/CL conflict resolution per RFC 9112 and (as of v1.2.5) re-validates every pipelined request on a persistent connection so bytes sent behind a validated first request cannot be raw-copied onto the SPNEGO-authenticated upstream connection. These are the correct defenses, but novel smuggling variants could potentially bypass them.
+- **Threat Refs**: T-T-P-002-001, T-T-P-002-002, T-T-P-007-001
 - **Finding Refs**: F-P1-005
-- **Validation**: Theoretical (Mitigated) -- code implements RFC 9112 defenses; no known bypass found
+- **Validation**: Theoretical (Mitigated) -- code implements RFC 9112 §6.1 (TE/CL) and §11.2 (per-request re-parse) defenses; no known bypass. Pipelined-bytes vector closed in v1.2.5 (PR #216, fix #215).
 - **Mitigation**: MIT-008 (Harden request smuggling defenses with monitoring)
 
 ---

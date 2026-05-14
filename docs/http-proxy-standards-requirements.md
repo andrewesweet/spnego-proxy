@@ -609,6 +609,26 @@ Syntax constraints:
 **Level**: MUST
 **Details**: Covered by E1 and E2. This is cross-referenced here for completeness. The proxy must rigorously handle message framing to prevent request smuggling.
 
+#### K4. Per-request validation on persistent connections
+
+> "A proxy MUST NOT forward a request without first determining whether the request is well-formed and whether its framing is unambiguous."
+>
+> — RFC 9112, §11.2 (in spirit; framing rules in §6 apply per request)
+
+**Level**: MUST
+**Details**: When a client sends HTTP requests on a persistent connection (HTTP/1.1 keep-alive), the proxy MUST parse and validate every request independently. Bytes pipelined behind a validated first request MUST NOT be raw-copied onto an already-authenticated upstream connection; they MUST be re-parsed and run through the full hop-by-hop sanitisation and per-request policy pipeline (Via loop, connect-ports, Max-Forwards, forwarding-header injection).
+
+Implemented in `handleClient` (non-CONNECT branch) and `handleDirectHTTP` as of v1.2.5 (PR #216, fix #215). Hop-by-hop sanitisation runs every iteration so a smuggled `Proxy-Authorization` cannot ride an already-authenticated upstream connection (RFC 4559 §5 connection-bound auth context). `handleDirectHTTP` additionally binds the direct TCP connection to the first request's target host; pipelined requests for any other host are rejected with `errMismatchedTarget`.
+
+**Testing strategy**:
+
+- **PoC reproduction**: `TestHandleClientRejectsSmuggledRequest` — client pipelines a forbidden CONNECT behind a valid GET; assert upstream receives only the GET.
+- **Header stripping**: `TestRFC4559_ConnectionBoundAuthSingleTokenAcquisition` — pipelined request with attacker `Proxy-Authorization` is stripped; SPNEGO token acquired once.
+- **Host binding**: `TestHandleDirectHTTPRejectsHostMismatch`.
+- **CONNECT smuggle**: `TestHandleDirectHTTPRejectsSmuggledConnect`.
+- **Loop exit signals**: `TestHandleClientConnectionCloseTerminatesLoop`, `TestI2_RFC9112_RequestConnectionCloseTerminatesKeepAliveLoop`, `TestI1I2_ConnectionClosedAfterResponse`.
+- **Traceability**: RFC 9112 §11.2, RFC 4559 §5, RFC 9110 §11.7.1.
+
 #### K2. CONNECT Port Restriction
 
 > See D4 above.

@@ -80,7 +80,7 @@
 ## Positive Security Controls
 
 The codebase demonstrates strong security awareness:
-1. **Request smuggling defenses**: TE/CL conflict resolution per RFC 9112
+1. **Request smuggling defenses**: TE/CL conflict resolution per RFC 9112 §6.1, plus per-request re-validation of pipelined HTTP requests on persistent connections (v1.2.5) closing the buffered-bytes vector on the SPNEGO-authenticated upstream socket
 2. **Hop-by-hop sanitization**: Full RFC 9110 compliance
 3. **Loop detection**: Random pseudonym checked before hop-by-hop stripping
 4. **Circuit breaker**: Prevents account lockout cascading
