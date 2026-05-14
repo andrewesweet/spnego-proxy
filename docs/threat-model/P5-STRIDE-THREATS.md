@@ -37,6 +37,13 @@
 - **Priority**: P1
 - **Mitigated**: sanitizeHopByHop resolves TE/CL conflicts per RFC 9112
 
+### T-T-P-002-002: Request smuggling via pipelined bytes on persistent connection
+- **Element**: P-002 (HTTP Request Parser)
+- **STRIDE**: Tampering
+- **CWE**: CWE-444
+- **Priority**: P1
+- **Mitigated** (v1.2.5, PR #216, fix #215): handleClient and handleDirectHTTP run a keep-alive loop that re-parses every pipelined request through prepareForwardRequest. Bytes pipelined behind a validated first request are no longer raw-copied onto the SPNEGO-authenticated upstream connection; each subsequent request runs the full validation pipeline (Via loop, connect-ports, Max-Forwards, hop-by-hop sanitisation including Proxy-Authorization stripping). handleDirectHTTP additionally binds the direct TCP connection to the first request's target host.
+
 ### T-I-P-005-001: SPNEGO token exposed in cleartext
 - **Element**: P-005 (SPNEGO Token Injector)
 - **STRIDE**: Information Disclosure
@@ -92,7 +99,7 @@
 ## Key Observations
 
 1. **No P0 (Critical) threats**: The codebase has strong security controls that mitigate the most severe scenarios
-2. **Mitigated P1 threats**: Request smuggling (T-T-P-002-001) and response smuggling (T-T-P-007-001) are effectively mitigated by existing code
+2. **Mitigated P1 threats**: Request smuggling via TE/CL (T-T-P-002-001), pipelined-bytes smuggling on persistent connections (T-T-P-002-002, fixed v1.2.5), and response smuggling (T-T-P-007-001) are effectively mitigated by current code
 3. **Architectural P1 threats**: Lack of client auth and plaintext transport are design decisions, not bugs
 4. **Many P3 threats**: In-process data flows and repudiation threats are low-risk theoretical concerns
 5. **Circuit breaker is dual-edged**: Protects against account lockout but can be weaponized for DoS

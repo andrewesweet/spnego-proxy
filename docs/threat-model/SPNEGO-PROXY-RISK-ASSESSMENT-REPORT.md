@@ -65,7 +65,7 @@
 5. **Raw relay bypasses validation**: Unparseable upstream responses trigger a raw byte relay path that bypasses Content-Length validation, Via header injection, and auth header stripping (VR-004, CVSS 5.3).
 6. **CONNECT allows all ports by default**: Without explicit `-connect-ports` configuration, the proxy tunnels to any port on any host through the upstream (VR-005, CVSS 5.3).
 7. **No idle timeout on tunnels**: CONNECT tunnels persist indefinitely once established, enabling connection slot exhaustion (VR-006, CVSS 5.3).
-8. **Request smuggling defenses are effective but unmonitored**: TE/CL conflict resolution is correctly implemented per RFC 9112, but no logging detects smuggling attempts (VR-008, CVSS 5.9).
+8. **Request smuggling defenses are effective but unmonitored**: TE/CL conflict resolution per RFC 9112 §6.1, plus per-request re-validation of pipelined HTTP requests on persistent connections (v1.2.5, PR #216, closes pipelined-bytes vector), are correctly implemented; no logging detects smuggling attempts (VR-008, CVSS 5.9).
 9. **CGo boundary is bounds-checked but not fuzz-tested**: C code uses fixed-size buffers with `snprintf`, but no fuzz testing validates the Go-C boundary (VR-011, CVSS 5.0).
 10. **Security event logging lacks classification**: Structured JSON logging exists but security events are not distinguished from operational logs, limiting forensic capability (VR-012, CVSS 3.1).
 
@@ -478,10 +478,10 @@ printf 'CONNECT internal-host:22 HTTP/1.1\r\nHost: internal-host:22\r\n\r\n' | \
 - **Status**: Theoretical (Mitigated)
 - **STRIDE**: T
 - **CWE**: CWE-444 (HTTP Request/Response Smuggling)
-- **Source Threats**: T-T-P-002-001, T-T-P-007-001
+- **Source Threats**: T-T-P-002-001, T-T-P-002-002, T-T-P-007-001
 - **Location**: main.go (P-002, P-007), Trust Boundary TB-001
 
-**Detailed Analysis**: The proxy implements TE/CL conflict resolution per RFC 9112 in both request (sanitizeHopByHop) and response (readUpstreamResponse) paths. When both Transfer-Encoding and Content-Length are present, Content-Length is removed. This is the correct defense, but novel smuggling variants could potentially bypass it.
+**Detailed Analysis**: The proxy implements TE/CL conflict resolution per RFC 9112 in both request (sanitizeHopByHop) and response (readUpstreamResponse) paths. When both Transfer-Encoding and Content-Length are present, Content-Length is removed. As of v1.2.5 (PR #216, fix #215), the proxy also re-parses and re-validates every request on a persistent client connection through prepareForwardRequest before forwarding to the upstream, closing the pipelined-bytes vector where bytes sent behind a validated first request were previously raw-copied onto the SPNEGO-authenticated upstream socket. These are the correct defenses, but novel smuggling variants could potentially bypass them.
 
 **Root Cause**: HTTP desynchronization attacks evolve continuously. The current defenses are comprehensive but may not cover future variants.
 
