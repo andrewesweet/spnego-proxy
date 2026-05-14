@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1069,8 +1070,8 @@ func TestHandleDirectHTTPRejectsHostMismatch(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp2.Body)
 	_ = resp2.Body.Close()
-	if resp2.StatusCode != http.StatusBadGateway {
-		t.Fatalf("resp2 status %d, want 502 (host mismatch); body=%q", resp2.StatusCode, body)
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("resp2 status %d, want 400 (host mismatch); body=%q", resp2.StatusCode, body)
 	}
 	if !strings.Contains(string(body), "different host") {
 		t.Errorf("resp2 body does not mention host mismatch: %q", body)
@@ -1161,10 +1162,211 @@ func TestHandleDirectHTTPRejectsSmuggledConnect(t *testing.T) {
 		t.Fatalf("resp2: %v", err)
 	}
 	_ = resp2.Body.Close()
-	if resp2.StatusCode != http.StatusBadGateway {
-		t.Errorf("resp2 status %d, want 502 (smuggled CONNECT rejected on direct HTTP path)", resp2.StatusCode)
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Errorf("resp2 status %d, want 400 (smuggled CONNECT rejected on direct HTTP path)", resp2.StatusCode)
 	}
 
 	_ = client.Close()
 	waitForDone(t, done)
+}
+
+// TestHandleClientCONNECTAsSecondRequest covers the keep-alive transition
+// from plain HTTP to a CONNECT tunnel: a GET pipelined with an allowed
+// CONNECT must dispatch the CONNECT via forwardConnectViaUpstream on a
+// FRESH upstream connection (a tunnel cannot share a socket with prior
+// keep-alive HTTP traffic). Verifies that connect-ports is enforced on
+// the second request and that the SPNEGO token is acquired twice (once
+// for the keep-alive upstream, once for the fresh CONNECT dial).
+func TestHandleClientCONNECTAsSecondRequest(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = upstream.Close() })
+
+	gotMethods := make(chan string, 2)
+	go func() {
+		// Conn 1 — keep-alive HTTP forward: receive GET, respond 200.
+		conn1, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		go func() {
+			defer func() { _ = conn1.Close() }()
+			reader := bufio.NewReader(conn1)
+			req, err := http.ReadRequest(reader)
+			if err != nil {
+				return
+			}
+			_, _ = io.Copy(io.Discard, req.Body)
+			_ = req.Body.Close()
+			gotMethods <- req.Method
+			_, _ = conn1.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"))
+		}()
+		// Conn 2 — fresh dial for CONNECT: receive CONNECT, respond 200
+		// Connection Established, then drain tunnel bytes (none expected
+		// from the test client).
+		conn2, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		go func() {
+			defer func() { _ = conn2.Close() }()
+			reader := bufio.NewReader(conn2)
+			req, err := http.ReadRequest(reader)
+			if err != nil {
+				return
+			}
+			_ = req.Body.Close()
+			gotMethods <- req.Method
+			_, _ = conn2.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+			_, _ = io.Copy(io.Discard, reader)
+		}()
+	}()
+
+	provider := &stubTokenProvider{token: "tok"}
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
+	cfg.ConnectPorts = []string{"443"}
+	addr, done := acceptOneAndHandle(t, cfg)
+
+	client, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	pipeline := "GET http://innocent.example.com/ HTTP/1.1\r\nHost: innocent.example.com\r\n\r\n" +
+		"CONNECT target.example.com:443 HTTP/1.1\r\nHost: target.example.com:443\r\n\r\n"
+	if _, err := io.WriteString(client, pipeline); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	reader := bufio.NewReader(client)
+	resp1, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("resp1: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp1.Body)
+	_ = resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("resp1 status %d, want 200", resp1.StatusCode)
+	}
+
+	// CONNECT response is written via writeConnectOK as a raw status line
+	// (no Content-Length), so read it manually rather than via
+	// http.ReadResponse (which would try to drain a body).
+	statusLine, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read CONNECT status line: %v", err)
+	}
+	if !strings.Contains(statusLine, "200") {
+		t.Errorf("CONNECT status line = %q, want a 200 response", statusLine)
+	}
+
+	_ = client.Close()
+	waitForDone(t, done)
+
+	timeout := time.After(3 * time.Second)
+	var methods []string
+	for i := 0; i < 2; i++ {
+		select {
+		case m := <-gotMethods:
+			methods = append(methods, m)
+		case <-timeout:
+			t.Fatalf("timed out collecting upstream methods (got %v)", methods)
+		}
+	}
+	if len(methods) != 2 || methods[0] != "GET" || methods[1] != http.MethodConnect {
+		t.Errorf("upstream methods = %v, want [GET CONNECT]", methods)
+	}
+	if n := provider.calls.Load(); n != 2 {
+		t.Errorf("GetToken calls = %d, want 2 (keep-alive HTTP + fresh CONNECT)", n)
+	}
+}
+
+// TestHandleClientKeepAlivePostBody verifies that the keep-alive loop
+// correctly positions reqReader after consuming a request body, so a
+// pipelined second request with its own body is parsed cleanly.
+func TestHandleClientKeepAlivePostBody(t *testing.T) {
+	type recordedReq struct {
+		method string
+		body   []byte
+	}
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = upstream.Close() })
+
+	records := make(chan recordedReq, 2)
+	go func() {
+		conn, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		reader := bufio.NewReader(conn)
+		for i := 0; i < 2; i++ {
+			_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+			req, err := http.ReadRequest(reader)
+			if err != nil {
+				return
+			}
+			body, _ := io.ReadAll(req.Body)
+			_ = req.Body.Close()
+			records <- recordedReq{method: req.Method, body: body}
+			_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"))
+		}
+	}()
+
+	provider := &stubTokenProvider{token: "tok"}
+	cfg := defaultTestConfig(upstream.Addr().String(), provider)
+	addr, done := acceptOneAndHandle(t, cfg)
+
+	client, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	body1 := "first-request-body"
+	body2 := "second-pipelined-body"
+	pipeline := "POST http://a.example.com/1 HTTP/1.1\r\n" +
+		"Host: a.example.com\r\nContent-Length: " + strconv.Itoa(len(body1)) + "\r\n\r\n" + body1 +
+		"POST http://b.example.com/2 HTTP/1.1\r\n" +
+		"Host: b.example.com\r\nContent-Length: " + strconv.Itoa(len(body2)) + "\r\n\r\n" + body2
+	if _, err := io.WriteString(client, pipeline); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	reader := bufio.NewReader(client)
+	for i := 0; i < 2; i++ {
+		resp, err := http.ReadResponse(reader, nil)
+		if err != nil {
+			t.Fatalf("resp[%d]: %v", i, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("resp[%d] status %d, want 200", i, resp.StatusCode)
+		}
+	}
+
+	_ = client.Close()
+	waitForDone(t, done)
+
+	close(records)
+	var got []recordedReq
+	for r := range records {
+		got = append(got, r)
+	}
+	if len(got) != 2 {
+		t.Fatalf("upstream received %d requests, want 2", len(got))
+	}
+	if got[0].method != http.MethodPost || string(got[0].body) != body1 {
+		t.Errorf("req[0] = %s %q, want POST %q", got[0].method, got[0].body, body1)
+	}
+	if got[1].method != http.MethodPost || string(got[1].body) != body2 {
+		t.Errorf("req[1] = %s %q, want POST %q", got[1].method, got[1].body, body2)
+	}
 }

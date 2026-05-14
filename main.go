@@ -533,8 +533,8 @@ var (
 		action:     "Contact the proxy administrator to add your IP to the -allowed-ips list.",
 	}
 	errMismatchedTarget = &proxyError{
-		statusCode: http.StatusBadGateway,
-		errorType:  errorTypeHTTPProtocolError,
+		statusCode: http.StatusBadRequest,
+		errorType:  errorTypeHTTPRequestDenied,
 		message:    "Pipelined request targets a different host than the direct connection was opened to.",
 		action:     "Open a new connection to the proxy and retry.",
 	}
