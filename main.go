@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -11,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"golang.org/x/net/netutil"
 )
@@ -23,104 +23,60 @@ func init() {
 }
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:8080", "bind address")
-	proxy := flag.String("proxy", "", "proxy address")
-	spn := flag.String("spn", "", "service principal name; accepts service@host or service/host (default: derived from -proxy)")
-	debug := flag.Bool("debug", false, "turn on debugging")
-
-	dialTimeout := flag.Duration("dial-timeout", 30*time.Second, "timeout for connecting to upstream proxy")
-	readTimeout := flag.Duration("read-timeout", 30*time.Second, "timeout for reading client HTTP request")
-	drainTimeout := flag.Duration("drain-timeout", 30*time.Second, "timeout for draining in-flight connections on shutdown")
-	keepAlive := flag.Duration("keepalive", 30*time.Second, "TCP keepalive period for idle connection detection (0 to disable)")
-	idleTimeout := flag.Duration("idle-timeout", 5*time.Minute,
-		"idle timeout for CONNECT tunnels; connections with no data flow are closed after this duration (0 to disable)")
-	maxConns := flag.Int("max-conns", 512, "maximum number of concurrent connections (0 for unlimited)")
-	connectPortsFlag := flag.String("connect-ports", "443", "comma-separated list of ports allowed for CONNECT tunneling (default: 443; use "+connectPortWildcard+" for all)")
-	allowedIPs := flag.String("allowed-ips", "",
-		"comma-separated list of allowed client IPs or CIDR ranges (empty = allow all; recommended when binding to non-loopback)")
-	noProxyFlag := flag.String("noproxy", "",
-		"comma-separated list of hosts/domains/IPs/CIDRs to bypass upstream proxy (supports *.domain, .domain, CIDR, * for all; also reads NO_PROXY/no_proxy env vars)")
-	cbThreshold := flag.Uint("cb-threshold", uint(cbConsecutiveFailures),
-		"consecutive failures before circuit breaker opens")
-	cbTimeoutFlag := flag.Duration("cb-timeout", cbTimeout,
-		"circuit breaker cooldown duration")
-
-	forwardedFlag := flag.Bool("forwarded", false, "inject RFC 7239 Forwarded header with obfuscated client identifier")
-	xForwardedForFlag := flag.Bool("x-forwarded-for", false, "inject X-Forwarded-For, X-Forwarded-Proto, and X-Forwarded-Host headers")
-
-	upstreamTLS := flag.Bool("upstream-tls", false,
-		"use TLS for upstream proxy connection")
-	upstreamCA := flag.String("upstream-ca", "",
-		"path to CA certificate for upstream TLS verification")
-	upstreamTLSInsecure := flag.Bool("upstream-tls-insecure", false,
-		"skip TLS certificate verification for upstream (not recommended)")
-
-	// Flags for gokrb5 password-based auth (optional on macOS, required on other platforms)
-	cfgFile := flag.String("config", "", "kerberos config file")
-	user := flag.String("user", "", "kerberos user name")
-	realm := flag.String("realm", "", "kerberos realm")
-	passwordFile := flag.String("password-file", "", "password file path")
-	showVersion := flag.Bool("version", false, "print version information and exit")
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "%s\n\n", versionString())
-		fmt.Fprintf(os.Stderr, "Usage of %s:\n", "spnego-proxy")
-		flag.PrintDefaults()
+	c, fs, err := parseFlags(os.Args[1:])
+	if err != nil {
+		// Mirror the historical flag.ExitOnError exit codes: -h/-help
+		// exits 0, any other parse error exits 2. fs.Parse has already
+		// written the error and usage to stderr.
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0)
+		}
+		os.Exit(2)
 	}
-	flag.Parse()
 
-	if *showVersion {
+	if c.ShowVersion {
 		fmt.Println(versionString())
 		return
 	}
 
-	if *debug {
+	if c.Debug {
 		logLevel.Set(slog.LevelDebug)
 	}
 
-	if *addr == "" || *proxy == "" {
+	if c.Addr == "" || c.Proxy == "" {
 		slog.Error("-addr and -proxy are required")
-		flag.Usage()
+		fs.Usage()
 		os.Exit(1)
 	}
 
-	var provider TokenProvider
-	var err error
-
-	if *user != "" {
-		// Explicit user provided — use gokrb5 password-based auth on any platform
-		provider, err = NewGokrb5TokenProvider(*user, *realm, *cfgFile, *passwordFile, *proxy, *spn, *debug)
-	} else {
-		// Try platform-native GSS-API (macOS) or error on other platforms
-		provider, err = newNativeTokenProvider(*proxy, *spn)
-	}
+	provider, err := buildProvider(c)
 	if err != nil {
 		// codeql[go/clear-text-logging]
 		slog.Error("failed to create token provider", "error", err)
 		os.Exit(1)
 	}
-	provider = NewCircuitBreakerTokenProvider(provider, uint32(*cbThreshold), *cbTimeoutFlag) //nolint:gosec // CLI flag value; overflow not a concern
 
-	l, err := net.Listen("tcp", *addr)
+	l, err := net.Listen("tcp", c.Addr)
 	if err != nil {
-		slog.Error("failed to listen", "error", err, "addr", *addr)
+		slog.Error("failed to listen", "error", err, "addr", c.Addr)
 		os.Exit(1)
 	}
 	pseudonym := generateViaPseudonym()
 
-	connectPorts := splitCSV(*connectPortsFlag)
+	connectPorts := splitCSV(c.ConnectPorts)
 
-	allowList, err := parseAllowList(*allowedIPs)
+	allowList, err := parseAllowList(c.AllowedIPs)
 	if err != nil {
 		slog.Error("invalid -allowed-ips", "error", err)
 		os.Exit(1)
 	}
 
-	noProxyPatterns := resolveNoProxy(*noProxyFlag)
+	noProxyPatterns := resolveNoProxy(c.NoProxy)
 	var noProxy *NoProxyMatcher
 	if noProxyPatterns != "" {
 		noProxy = NewNoProxyMatcher(noProxyPatterns)
 		source := "flag"
-		if *noProxyFlag == "" {
+		if c.NoProxy == "" {
 			source = "env"
 		}
 		slog.Info("noproxy bypass configured", "patterns", noProxyPatterns, "source", source)
@@ -128,49 +84,49 @@ func main() {
 
 	// Build the upstream TLS config once at startup (avoids re-reading CA file per connection).
 	upstreamTLSCfg := UpstreamTLSConfig{
-		Enabled:            *upstreamTLS,
-		CAFile:             *upstreamCA,
-		InsecureSkipVerify: *upstreamTLSInsecure,
-		Dialer:             &net.Dialer{Timeout: *dialTimeout},
+		Enabled:            c.UpstreamTLS,
+		CAFile:             c.UpstreamCA,
+		InsecureSkipVerify: c.UpstreamTLSInsecure,
+		Dialer:             &net.Dialer{Timeout: c.DialTimeout},
 	}
 	if err := upstreamTLSCfg.buildTLSConfig(); err != nil {
 		slog.Error("failed to build upstream TLS config", "error", err)
 		os.Exit(1)
 	}
-	if *upstreamTLSInsecure {
+	if c.UpstreamTLSInsecure {
 		slog.Warn("upstream TLS certificate verification is disabled")
 	}
 
 	cfg := ProxyConfig{
-		Upstream:     *proxy,
+		Upstream:     c.Proxy,
 		Provider:     provider,
 		Pseudonym:    pseudonym,
-		DialTimeout:  *dialTimeout,
-		ReadTimeout:  *readTimeout,
-		KeepAlive:    *keepAlive,
-		IdleTimeout:  *idleTimeout,
+		DialTimeout:  c.DialTimeout,
+		ReadTimeout:  c.ReadTimeout,
+		KeepAlive:    c.KeepAlive,
+		IdleTimeout:  c.IdleTimeout,
 		ConnectPorts: connectPorts,
 		AllowedIPs:   allowList,
 		NoProxy:      noProxy,
 		Forwarding: ForwardingConfig{
-			ForwardedEnabled:     *forwardedFlag,
-			XForwardedForEnabled: *xForwardedForFlag,
+			ForwardedEnabled:     c.Forwarded,
+			XForwardedForEnabled: c.XForwardedFor,
 		},
 		UpstreamTLS: upstreamTLSCfg,
 	}
 
-	if *maxConns > 0 {
-		l = netutil.LimitListener(l, *maxConns)
+	if c.MaxConns > 0 {
+		l = netutil.LimitListener(l, c.MaxConns)
 	}
-	logArgs := []any{"addr", *addr, "proxy", *proxy, "via_pseudonym", pseudonym}
-	if *maxConns > 0 {
-		logArgs = append(logArgs, "max_conns", *maxConns)
+	logArgs := []any{"addr", c.Addr, "proxy", c.Proxy, "via_pseudonym", pseudonym}
+	if c.MaxConns > 0 {
+		logArgs = append(logArgs, "max_conns", c.MaxConns)
 	}
 	slog.Info("listening", logArgs...)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	serve(ctx, l, cfg, *drainTimeout)
+	serve(ctx, l, cfg, c.DrainTimeout)
 	_ = provider.Close()
 }
