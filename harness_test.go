@@ -413,6 +413,58 @@ func proxyRawRoundTripWithUpstream(t *testing.T, rawReq string, respFunc func(*h
 	return resp, upstream.Requests()
 }
 
+// rawCannedUpstreamRoundTrip stands up a raw TCP "upstream" that reads one
+// request and writes cannedResp verbatim (bypassing http.Response.Write so
+// malformed/adversarial bytes survive on the wire), fronts it with a
+// ProxyUnderTest, sends a single absolute-form GET through the proxy, and
+// returns the parsed client response. The caller owns resp.Body.
+//
+// It exists because NewMockUpstreamProxy serialises responses via
+// resp.Write, which sanitises headers and therefore cannot emit the
+// malformed framing these RFC 9112 §6.1/§11.1 conformance tests require.
+func rawCannedUpstreamRoundTrip(t *testing.T, urlPath, cannedResp string) *http.Response {
+	t.Helper()
+
+	rawUpstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = rawUpstream.Close() })
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		conn, aerr := rawUpstream.Accept()
+		if aerr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = http.ReadRequest(bufio.NewReader(conn))
+		_, _ = conn.Write([]byte(cannedResp))
+	})
+	t.Cleanup(wg.Wait)
+
+	proxy := NewProxyUnderTest(t, rawUpstream.Addr().String())
+	t.Cleanup(proxy.Close)
+
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	req, _ := http.NewRequest("GET", "http://example.com"+urlPath, nil)
+	if err := req.WriteProxy(conn); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	return resp
+}
+
 // waitForDone waits for a done channel to be closed, failing the test if it
 // does not close within 5 seconds. This replaces the repeated
 // select { case <-done: case <-time.After(5*time.Second): t.Fatal(...) }

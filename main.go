@@ -300,6 +300,82 @@ func sanitizeHopByHop(req *http.Request) {
 	}
 }
 
+// validateResponseHeaderBytes scans every upstream-emitted header field name
+// and value for octets that RFC 9110 §5.5 / RFC 9112 §11.1 forbid: bare CR,
+// bare LF, NUL, and other ASCII control characters (octets 0x00-0x08,
+// 0x0A-0x1F, excluding HTAB 0x09). The presence of any such octet inside a
+// post-parse value indicates either a malformed upstream emitter or a
+// response-splitting attempt; either way the proxy MUST NOT relay it.
+// Returns a non-nil *proxyError to reject the response with 502.
+//
+// Field names are validated against the RFC 9110 §5.1 tchar production so
+// that header lines with control characters in the name are also rejected.
+//
+// These checks duplicate golang.org/x/net/http/httpguts.ValidHeaderField*,
+// but that package transitively imports golang.org/x/net/idna →
+// golang.org/x/text, which is otherwise not a dependency. The ASCII byte
+// scans below are trivial, allocation-free, and keep the dependency
+// surface of this security-sensitive proxy minimal.
+//
+// Note: when an upstream emits a value containing a clean "\r\n" sequence
+// followed by another well-formed "Name: value" pair, Go's textproto parser
+// splits them into two distinct headers — this is indistinguishable from
+// an intentional dual-header response and cannot be detected here.
+func validateResponseHeaderBytes(resp *http.Response) *proxyError {
+	for name, values := range resp.Header {
+		if !isValidFieldName(name) {
+			return errMalformedResponseHeader
+		}
+		if slices.ContainsFunc(values, hasForbiddenFieldValueByte) {
+			return errMalformedResponseHeader
+		}
+	}
+	return nil
+}
+
+// isValidFieldName reports whether name contains only RFC 9110 §5.1 tchar
+// characters. Used to reject upstream response header names containing
+// control characters introduced via a response-splitting attempt.
+func isValidFieldName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z',
+			c >= 'A' && c <= 'Z',
+			c >= '0' && c <= '9':
+			continue
+		}
+		switch c {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.',
+			'^', '_', '`', '|', '~':
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// hasForbiddenFieldValueByte reports whether v contains any octet forbidden
+// in an HTTP field-value per RFC 9110 §5.5: NUL, CR, LF, and other ASCII
+// control characters (0x00-0x08, 0x0A-0x1F). HTAB (0x09) is permitted.
+// obs-text (0x80-0xFF) is also permitted because senders MAY emit it and
+// recipients SHOULD pass it through.
+func hasForbiddenFieldValueByte(v string) bool {
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if c == '\t' {
+			continue
+		}
+		if c < 0x20 || c == 0x7F {
+			return true
+		}
+	}
+	return false
+}
+
 // validateResponseContentLength checks the upstream response for invalid
 // Content-Length values per RFC 9112 §6.1. It returns a non-nil *proxyError
 // when the response must be rejected with 502.
@@ -340,6 +416,11 @@ func validateResponseContentLength(resp *http.Response) *proxyError {
 // detected by Go's ReadResponse or by validateResponseContentLength.
 var errContentLengthInvalid = errors.New("invalid Content-Length in upstream response")
 
+// errMalformedResponse is a sentinel error returned by readUpstreamResponse
+// when the upstream response contains a malformed header field name or
+// forbidden control octet in a header value (RFC 9110 §5.5 / RFC 9112 §11.1).
+var errMalformedResponse = errors.New("malformed upstream response header")
+
 // readUpstreamResponse reads and validates an upstream HTTP response. It
 // performs: ReadResponse, Content-Length error detection, content-length
 // validation, Transfer-Encoding / Content-Length conflict resolution, and
@@ -377,6 +458,15 @@ func readUpstreamResponse(upstreamReader *bufio.Reader, req *http.Request, pseud
 	if pe := validateResponseContentLength(resp); pe != nil {
 		_ = resp.Body.Close()
 		return nil, errContentLengthInvalid
+	}
+
+	// RFC 9110 §5.5 / RFC 9112 §11.1: reject responses whose header field
+	// names or values contain forbidden control octets (response-splitting
+	// defence-in-depth). Go's textproto parser already rejects most such
+	// content, but a bare CR mid-value or a NUL byte can survive parsing.
+	if pe := validateResponseHeaderBytes(resp); pe != nil {
+		_ = resp.Body.Close()
+		return nil, errMalformedResponse
 	}
 
 	// RFC 9112 §6.1: if both Transfer-Encoding and Content-Length
@@ -512,6 +602,12 @@ var (
 		statusCode: http.StatusBadGateway,
 		errorType:  errorTypeHTTPProtocolError,
 		message:    "The upstream proxy sent a response with an invalid Content-Length header.",
+		action:     "This may indicate a misconfigured upstream proxy or an attempt at response splitting. Contact the upstream proxy administrator.",
+	}
+	errMalformedResponseHeader = &proxyError{
+		statusCode: http.StatusBadGateway,
+		errorType:  errorTypeHTTPProtocolError,
+		message:    "The upstream proxy sent a response containing a header field with a malformed name or a forbidden control character in its value.",
 		action:     "This may indicate a misconfigured upstream proxy or an attempt at response splitting. Contact the upstream proxy administrator.",
 	}
 	errForbiddenPort = &proxyError{
@@ -672,8 +768,9 @@ func tokenErrorToProxyError(err error) *proxyError {
 }
 
 // handleUpstreamResponseError handles errors from readUpstreamResponse.
-// For invalid Content-Length it sends a 502 error to the client; for all
-// other errors it falls back to raw-relaying the upstream bytes.
+// For invalid Content-Length or malformed response headers it sends a 502
+// error to the client; for all other errors it falls back to raw-relaying
+// the upstream bytes.
 func handleUpstreamResponseError(conn, proxyConn net.Conn, err error, clientAddr string) {
 	if errors.Is(err, errContentLengthInvalid) {
 		slog.Error("invalid Content-Length in upstream response",
@@ -681,6 +778,14 @@ func handleUpstreamResponseError(conn, proxyConn net.Conn, err error, clientAddr
 			"client_addr", clientAddr,
 			"upstream_addr", proxyConn.RemoteAddr())
 		writeHTTPError(conn, errInvalidContentLength)
+		return
+	}
+	if errors.Is(err, errMalformedResponse) {
+		slog.Error("malformed upstream response header",
+			"error", err, "error_type", errMalformedResponseHeader.errorType,
+			"client_addr", clientAddr,
+			"upstream_addr", proxyConn.RemoteAddr())
+		writeHTTPError(conn, errMalformedResponseHeader)
 		return
 	}
 	slog.Warn("unparseable upstream response",

@@ -416,6 +416,79 @@ Defined error types relevant to spnego-proxy:
 - **White-box integration test**: Mock upstream sends a response with an obs-fold header (`Header: value\r\n continued`). Assert the proxy either normalizes it to `Header: value continued` or returns 502.
 - **Traceability**: RFC 9112 §5.2.
 
+#### E4. Non-chunked Transfer-Encoding on Inbound Request
+
+> "If a Transfer-Encoding header field is present in a request and the chunked transfer coding is not the final encoding, the message body length cannot be determined reliably; the server MUST respond with the 400 (Bad Request) status code and then close the connection."
+>
+> — RFC 9112, §6.1
+
+**Level**: MUST
+**Details**: A request whose `Transfer-Encoding` does not end in `chunked` (e.g. `gzip` alone, or `chunked, gzip`) has unknown framing. The proxy MUST reject it and MUST NOT forward.
+
+**Testing strategy**:
+
+- **White-box integration test** (`TestE3_RFC9112_NonChunkedTransferEncoding_Request` in `framing_conformance_test.go`): raw request lines with `Transfer-Encoding: gzip` and `Transfer-Encoding: chunked, gzip` → assert 400/502 response and zero forwarded requests at the upstream.
+- **Traceability**: RFC 9112 §6.1.
+
+#### E5. Request-side Content-Length Anomalies
+
+> "A recipient MUST anticipate the possibility of multiple Content-Length header fields ... If at least one such field is present, but with an invalid value, ... the recipient MUST treat the message as invalid."
+>
+> — RFC 9112, §6.1
+
+**Level**: MUST
+**Details**: Request-side `Content-Length` values that are negative, hex-prefixed, non-numeric, prefixed with `+`, OWS-only, or supplied as multiple differing values must all be rejected before the request is forwarded.
+
+**Testing strategy**:
+
+- **White-box integration test** (`TestE4_RFC9112_RequestContentLengthAnomalies`): matrix of malformed CL values via raw socket → assert 400/502 response and zero forwarded requests.
+- **Traceability**: RFC 9112 §6.1.
+
+#### E6. Forbidden Control Octets in Upstream Response Headers
+
+> "Field values containing CR, LF, or NUL characters are invalid and dangerous, due to the varying ways that implementations might parse and interpret those characters."
+>
+> — RFC 9110, §5.5
+
+**Level**: MUST
+**Details**: After parsing the upstream response, every field name must match the RFC 9110 §5.1 `tchar` production and every field value must contain only `field-vchar / SP / HTAB / obs-text` octets. Bare CR, bare LF, NUL, and other ASCII control characters (0x00–0x08, 0x0A–0x1F, 0x7F) in a value indicate a malformed emitter or a response-splitting attempt; the proxy MUST close the connection and return 502 `http_protocol_error`.
+
+**Defence-in-depth**: Go's `textproto` parser already splits on properly-framed CRLF, so a clean two-header payload like `X-Evil: foo\r\nInjected: 1\r\n` parses into two distinct, well-formed headers and is indistinguishable from an intentional dual-header response. This validator catches the variants that survive parsing: bare CR mid-value, NUL bytes, BEL, and other C0 controls.
+
+**Testing strategy**:
+
+- **White-box integration test** (`TestE5_RFC9110_ResponseHeaderControlOctetsRejected`): raw upstream emits headers with bare CR, NUL, and BEL inside values → assert 502 with `http_protocol_error` and no injected header on the client.
+- **Unit test** (`TestValidateResponseHeaderBytes_Unit`): table-driven coverage of acceptable values (clean ASCII, tab, obs-text UTF-8 bytes) and rejected values (bare CR/LF, NUL, BEL, DEL, malformed names).
+- **Traceability**: RFC 9110 §5.5, RFC 9112 §11.1.
+
+#### E7. Chunk-extension Forwarding Safety
+
+> "A recipient MUST be able to parse the chunked transfer coding ... A recipient MUST ignore unrecognized chunk extensions."
+>
+> — RFC 9112, §7.1.1
+
+**Level**: MUST
+**Details**: The proxy MUST relay a chunked request body whose chunks carry chunk-extensions without misframing the message. Extensions MAY be dropped on egress.
+
+**Testing strategy**:
+
+- **White-box integration test** (`TestE6_RFC9112_ChunkExtensionsForwardedSafely`): chunked POST with `5;ext=foo\r\nhello\r\n0\r\n\r\n` → upstream receives the intact body `hello`.
+- **Traceability**: RFC 9112 §7.1.1.
+
+#### E8. Chunked Trailer Consistency
+
+> "When a chunked message containing a non-empty trailer is received, the recipient MAY process the fields as if they were appended to the message's header section. ... A proxy MUST forward a non-empty trailer in a downstream message only if it advertised the trailer field names in the Trailer header field."
+>
+> — RFC 9112, §7.1.2
+
+**Level**: MUST
+**Details**: If the proxy advertises trailer fields via the `Trailer` response header, it MUST deliver them; if it strips trailers, it MUST also strip the `Trailer` advertisement so downstream recipients do not wait for trailers that will never arrive.
+
+**Testing strategy**:
+
+- **White-box integration test** (`TestE7_RFC9112_ChunkedResponseWithTrailerConsistent`): upstream emits a chunked response declaring `Trailer: X-Checksum` and supplies the trailer. Assert that whenever `Trailer` survives in the response headers, the corresponding trailer value is present in `resp.Trailer`.
+- **Traceability**: RFC 9112 §7.1.2.
+
 ---
 
 ### Group F: Expect / 100-Continue Handling
@@ -760,6 +833,11 @@ Per RFC 9113, §8.2.2: "intermediaries SHOULD also remove other connection-speci
 | E1 | TE/CL conflict resolution | MUST |
 | E2 | Invalid Content-Length → 502 | MUST |
 | E3 | obs-fold handling | MUST |
+| E4 | Non-chunked Transfer-Encoding on request → 400 | MUST |
+| E5 | Request-side Content-Length anomalies → 400 | MUST |
+| E6 | Control octets in upstream response headers → 502 | MUST |
+| E7 | Chunk-extensions forwarded without misframing | MUST |
+| E8 | Chunked trailer consistency | MUST |
 | F1 | Forward Expect: 100-continue | MUST |
 | F2 | Don't forward 100 to HTTP/1.0 clients | MUST NOT |
 | G1 | Max-Forwards for TRACE/OPTIONS | MUST |
