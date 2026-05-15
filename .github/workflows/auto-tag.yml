@@ -1,6 +1,10 @@
 name: Auto Tag
 
 on:
+  # zizmor: ignore[dangerous-triggers] workflow_run only fires after the
+  # "Build and Test" workflow succeeds on the master branch. The workflow does
+  # not check out or execute any code from pull requests, so the elevated
+  # privileges granted to workflow_run cannot be exploited by a fork PR.
   workflow_run:
     workflows: ["Build and Test"]
     types: [completed]
@@ -96,6 +100,9 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
       - name: Checkout
+        # zizmor: ignore[artipacked] credentials are persisted intentionally so the
+        # subsequent `git push origin HEAD:master --tags` step can authenticate
+        # using the GitHub App token.
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0

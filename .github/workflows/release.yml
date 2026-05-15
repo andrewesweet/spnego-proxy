@@ -35,6 +35,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Generate release notes from changelog
         id: changelog
@@ -55,10 +56,10 @@ jobs:
         working-directory: artifacts
         run: |
           shasum -a 256 \
-            spnego-proxy_${{ github.ref_name }}_darwin_amd64.tar.gz \
-            spnego-proxy_${{ github.ref_name }}_darwin_arm64.tar.gz \
-            spnego-proxy_${{ github.ref_name }}_linux_amd64.tar.gz \
-            spnego-proxy_${{ github.ref_name }}_linux_arm64.tar.gz \
+            "spnego-proxy_${GITHUB_REF_NAME}_darwin_amd64.tar.gz" \
+            "spnego-proxy_${GITHUB_REF_NAME}_darwin_arm64.tar.gz" \
+            "spnego-proxy_${GITHUB_REF_NAME}_linux_amd64.tar.gz" \
+            "spnego-proxy_${GITHUB_REF_NAME}_linux_arm64.tar.gz" \
             spnego-proxy-darwin-amd64.sbom.spdx.json \
             spnego-proxy-darwin-arm64.sbom.spdx.json \
             spnego-proxy-linux-amd64.sbom.spdx.json \
@@ -77,8 +78,13 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # softprops/action-gh-release is used intentionally for its native
+      # handling of multi-file asset uploads, draft/prerelease flags, and
+      # release notes. Replacing it with a `gh release` script would
+      # re-implement that behavior with no security benefit, since the
+      # action runs pinned to a commit SHA.
       - name: Create draft release with assets
-        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1 # zizmor: ignore[superfluous-actions]
         with:
           tag_name: ${{ github.ref_name }}
           draft: true
@@ -100,7 +106,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release edit "${{ github.ref_name }}" \
+          gh release edit "${GITHUB_REF_NAME}" \
             --repo "${{ github.repository }}" \
             --draft=false
 
