@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -172,36 +171,6 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	var wg sync.WaitGroup
-	go func() {
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-				}
-				slog.Error("accept error", "error", err)
-				continue
-			}
-			wg.Go(func() {
-				handleClient(conn, cfg)
-			})
-		}
-	}()
-
-	<-ctx.Done()
-	slog.Info("shutting down, draining connections...")
-	_ = l.Close()
-
-	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
-	select {
-	case <-done:
-		slog.Info("all connections drained")
-	case <-time.After(*drainTimeout):
-		slog.Warn("drain timeout exceeded, forcing exit")
-	}
+	serve(ctx, l, cfg, *drainTimeout)
 	_ = provider.Close()
 }
