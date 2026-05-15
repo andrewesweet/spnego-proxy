@@ -1,15 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"io"
-	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -137,47 +133,11 @@ func TestE5_RFC9110_ResponseHeaderControlOctetsRejected(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			rawUpstream, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatalf("listen: %v", err)
-			}
-			defer func() { _ = rawUpstream.Close() }()
-
-			var wg sync.WaitGroup
-			wg.Go(func() {
-				conn, aerr := rawUpstream.Accept()
-				if aerr != nil {
-					return
-				}
-				defer func() { _ = conn.Close() }()
-				reader := bufio.NewReader(conn)
-				_, _ = http.ReadRequest(reader)
-				resp := "HTTP/1.1 200 OK\r\n" +
-					tc.respHeaders +
-					"Content-Length: 0\r\n" +
-					"\r\n"
-				_, _ = conn.Write([]byte(resp))
-			})
-			t.Cleanup(wg.Wait)
-
-			proxy := NewProxyUnderTest(t, rawUpstream.Addr().String())
-			defer proxy.Close()
-
-			conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-			if err != nil {
-				t.Fatalf("dial proxy: %v", err)
-			}
-			defer func() { _ = conn.Close() }()
-
-			req, _ := http.NewRequest("GET", "http://example.com/e5", nil)
-			if err := req.WriteProxy(conn); err != nil {
-				t.Fatalf("write request: %v", err)
-			}
-
-			resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-			if err != nil {
-				t.Fatalf("read response: %v", err)
-			}
+			canned := "HTTP/1.1 200 OK\r\n" +
+				tc.respHeaders +
+				"Content-Length: 0\r\n" +
+				"\r\n"
+			resp := rawCannedUpstreamRoundTrip(t, "/e5", canned)
 			defer func() { _ = resp.Body.Close() }()
 
 			assertStatusCode(t, resp, http.StatusBadGateway)
@@ -237,18 +197,6 @@ func TestE5_RFC9110_RequestHeaderCRLFNotForwarded(t *testing.T) {
 func TestE6_RFC9112_ChunkExtensionsForwardedSafely(t *testing.T) {
 	const wantBody = "hello"
 
-	upstream := NewMockUpstreamProxy(t, nil)
-	defer upstream.Close()
-
-	proxy := NewProxyUnderTest(t, upstream.Addr())
-	defer proxy.Close()
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-
 	// Chunked POST with a chunk-extension on the data chunk.
 	raw := "POST http://example.com/e6 HTTP/1.1\r\n" +
 		"Host: example.com\r\n" +
@@ -257,18 +205,10 @@ func TestE6_RFC9112_ChunkExtensionsForwardedSafely(t *testing.T) {
 		"5;ext=foo\r\nhello\r\n" +
 		"0\r\n" +
 		"\r\n"
-	if _, err := conn.Write([]byte(raw)); err != nil {
-		t.Fatalf("write raw request: %v", err)
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
+	resp, reqs := proxyRawRoundTrip(t, raw)
 	defer func() { _ = resp.Body.Close() }()
 	assertStatusCode(t, resp, http.StatusOK)
 
-	reqs := upstream.Requests()
 	if len(reqs) != 1 {
 		t.Fatalf("upstream received %d requests, want 1", len(reqs))
 	}
@@ -328,55 +268,19 @@ func TestValidateResponseHeaderBytes_Unit(t *testing.T) {
 // terminator is reached, body is correctly delimited).
 
 func TestE7_RFC9112_ChunkedResponseWithTrailerConsistent(t *testing.T) {
-	rawUpstream, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer func() { _ = rawUpstream.Close() }()
-
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		conn, aerr := rawUpstream.Accept()
-		if aerr != nil {
-			return
-		}
-		defer func() { _ = conn.Close() }()
-		reader := bufio.NewReader(conn)
-		_, _ = http.ReadRequest(reader)
-		// Chunked response carrying a Trailer header + actual trailer
-		// field after the zero chunk.
-		resp := "HTTP/1.1 200 OK\r\n" +
-			"Transfer-Encoding: chunked\r\n" +
-			"Trailer: X-Checksum\r\n" +
-			"\r\n" +
-			"5\r\nhello\r\n" +
-			"0\r\n" +
-			"X-Checksum: abc123\r\n" +
-			"\r\n"
-		_, _ = conn.Write([]byte(resp))
-	})
-	t.Cleanup(wg.Wait)
-
-	proxy := NewProxyUnderTest(t, rawUpstream.Addr().String())
-	defer proxy.Close()
-
-	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	req, _ := http.NewRequest("GET", "http://example.com/e7", nil)
-	if err := req.WriteProxy(conn); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
+	// Chunked response carrying a Trailer header + actual trailer field
+	// after the zero chunk.
+	canned := "HTTP/1.1 200 OK\r\n" +
+		"Transfer-Encoding: chunked\r\n" +
+		"Trailer: X-Checksum\r\n" +
+		"\r\n" +
+		"5\r\nhello\r\n" +
+		"0\r\n" +
+		"X-Checksum: abc123\r\n" +
+		"\r\n"
 	// Read the full response, including body, so we can assert framing
 	// is intact (no truncation, no leftover trailer bytes on the wire).
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
+	resp := rawCannedUpstreamRoundTrip(t, "/e7", canned)
 	defer func() { _ = resp.Body.Close() }()
 	assertStatusCode(t, resp, http.StatusOK)
 

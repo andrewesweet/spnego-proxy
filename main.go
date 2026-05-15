@@ -311,6 +311,12 @@ func sanitizeHopByHop(req *http.Request) {
 // Field names are validated against the RFC 9110 §5.1 tchar production so
 // that header lines with control characters in the name are also rejected.
 //
+// These checks duplicate golang.org/x/net/http/httpguts.ValidHeaderField*,
+// but that package transitively imports golang.org/x/net/idna →
+// golang.org/x/text, which is otherwise not a dependency. The ASCII byte
+// scans below are trivial, allocation-free, and keep the dependency
+// surface of this security-sensitive proxy minimal.
+//
 // Note: when an upstream emits a value containing a clean "\r\n" sequence
 // followed by another well-formed "Name: value" pair, Go's textproto parser
 // splits them into two distinct headers — this is indistinguishable from
