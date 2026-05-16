@@ -1,4 +1,4 @@
-package main
+package proxy
 
 // protocol_edge_cases_test.go — acceptance tests for GitHub issue #127.
 //

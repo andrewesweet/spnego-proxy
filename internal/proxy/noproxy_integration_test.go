@@ -1,4 +1,4 @@
-package main
+package proxy
 
 // noproxy_integration_test.go — integration tests for noproxy bypass paths.
 //

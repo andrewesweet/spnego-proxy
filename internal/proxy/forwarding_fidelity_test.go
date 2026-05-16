@@ -1,4 +1,4 @@
-package main
+package proxy
 
 // forwarding_fidelity_test.go — acceptance tests for GitHub issue #125.
 //

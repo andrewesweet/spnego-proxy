@@ -1,4 +1,4 @@
-package main
+package proxy
 
 // proxy_status_test.go — acceptance tests for RFC 9209 Proxy-Status header
 // coverage across all remaining error scenarios, plus status-code and

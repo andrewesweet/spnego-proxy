@@ -1,4 +1,4 @@
-package main
+package proxy
 
 // connect_test.go — RFC compliance tests for CONNECT tunnel handling.
 //
