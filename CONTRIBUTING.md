@@ -158,10 +158,10 @@ by [clang-format](https://clang.llvm.org/docs/ClangFormat.html). The
 
 ```bash
 # Check for formatting issues
-clang-format --dry-run --Werror gss_darwin.c gss_darwin.h
+clang-format --dry-run --Werror internal/proxy/gss_darwin.c internal/proxy/gss_darwin.h
 
 # Fix formatting automatically
-clang-format -i gss_darwin.c gss_darwin.h
+clang-format -i internal/proxy/gss_darwin.c internal/proxy/gss_darwin.h
 ```
 
 ### Markdown formatting
@@ -201,7 +201,7 @@ SDK_PATH=$(xcrun --show-sdk-path)
 clang-tidy \
     -checks='-*,clang-analyzer-*,bugprone-*,-bugprone-easily-swappable-parameters,performance-*,portability-*' \
     -isystem "$SDK_PATH/usr/include" \
-    gss_darwin.c -- -DGSS_USE_APPLE_FRAMEWORK -framework GSS
+    internal/proxy/gss_darwin.c -- -DGSS_USE_APPLE_FRAMEWORK -framework GSS
 ```
 
 **cppcheck:**
@@ -212,7 +212,7 @@ cppcheck \
     --error-exitcode=1 \
     --suppress=missingIncludeSystem \
     --suppress=unusedFunction \
-    gss_darwin.c
+    internal/proxy/gss_darwin.c
 ```
 
 ### Workflow linting
