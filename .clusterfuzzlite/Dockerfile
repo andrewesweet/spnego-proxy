@@ -9,3 +9,7 @@ FROM gcr.io/oss-fuzz-base/base-builder-go@sha256:373fb2d9c584e046d58e3807435aa67
 
 COPY . $SRC/spnego-proxy
 WORKDIR $SRC/spnego-proxy
+
+# ClusterFuzzLite/OSS-Fuzz invokes $SRC/build.sh; the repo keeps it under
+# .clusterfuzzlite/, so stage it at the expected path.
+COPY .clusterfuzzlite/build.sh $SRC/build.sh
