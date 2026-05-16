@@ -124,7 +124,7 @@ See `CONTRIBUTING.md` § Fuzzing for the full human-oriented guide.
 Key details for AI context:
 
 - Native `go test -fuzz` targets; seed corpora in `f.Add`; crash reproducers
-  committed under `testdata/fuzz/<Target>/` and replayed free by `go test ./...`
+  committed under `internal/proxy/testdata/fuzz/<Target>/` and replayed free by `go test ./...`
 - **No new dependency** for an oracle. `golang.org/x/net/http/httpproxy` and
   `httpguts` transitively pull `golang.org/x/text` — never import them; write a
   clean-room stdlib reference. Confirm with `go mod tidy` (no diff)

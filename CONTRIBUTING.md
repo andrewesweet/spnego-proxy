@@ -83,14 +83,14 @@ They also skip if MIT krb5 is not installed.
 The proxy has native Go fuzz targets (`go test -fuzz`) covering the inputs an
 unprivileged client or a malicious origin controls. Seed corpora live in
 `f.Add` calls; discovered crash reproducers are committed under
-`testdata/fuzz/<Target>/` and replayed for free by the ordinary
+`internal/proxy/testdata/fuzz/<Target>/` and replayed for free by the ordinary
 `go test ./...` run (so a fixed bug stays fixed). The `Fuzz` workflow runs
 time-boxed discovery nightly.
 
 Run one target locally:
 
 ```bash
-go test -run '^$' -fuzz '^FuzzNoProxyMatch$' -fuzztime=60s .
+go test -run '^$' -fuzz '^FuzzNoProxyMatch$' -fuzztime=60s ./internal/proxy
 ```
 
 Replay only the committed corpus (no discovery), as CI does:
