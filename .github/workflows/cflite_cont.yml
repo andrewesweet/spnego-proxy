@@ -26,6 +26,9 @@ concurrency:
   group: cflite-storage
   cancel-in-progress: false
 
+env:
+  STORAGE_REPO: git@github.com:andrewesweet/spnego-proxy-fuzz-corpus.git
+
 jobs:
   continuous-build:
     name: build + seed corpus
@@ -51,7 +54,7 @@ jobs:
           language: go
           sanitizer: address
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          storage-repo: git@github.com:andrewesweet/spnego-proxy-fuzz-corpus.git
+          storage-repo: ${{ env.STORAGE_REPO }}
           storage-repo-branch: main
 
       - name: Clean up SSH key

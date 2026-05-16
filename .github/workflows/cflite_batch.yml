@@ -62,6 +62,9 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           language: go
           mode: batch
+          # On schedule, github.event.inputs.fuzz_seconds is '' (falsy), so the
+          # || fallback yields 3600. The input's declared default only pre-fills
+          # the manual-dispatch UI; it does not feed this expression.
           fuzz-seconds: ${{ github.event.inputs.fuzz_seconds || '3600' }}
           sanitizer: address
           storage-repo: ${{ env.STORAGE_REPO }}

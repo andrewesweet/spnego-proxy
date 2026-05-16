@@ -21,8 +21,8 @@ GO118_FUZZ_BUILD_VERSION=v0.0.0-20250520111509-a70c2aa677fa
 go install "github.com/AdamKorcz/go-118-fuzz-build@${GO118_FUZZ_BUILD_VERSION}"
 go get "github.com/AdamKorcz/go-118-fuzz-build/testing@${GO118_FUZZ_BUILD_VERSION}"
 
-# Fuzz targets live in package proxy at internal/proxy (extracted from
-# package main in PR #225 so ClusterFuzzLite can import them).
+# compile_native_go_fuzzer imports the target by path; package main is not
+# importable, so the targets live in the internal/proxy package.
 PKG=github.com/andrewesweet/spnego-proxy/internal/proxy
 
 compile_native_go_fuzzer "$PKG" FuzzNoProxyMatch            fuzz_no_proxy_match
@@ -35,6 +35,11 @@ compile_native_go_fuzzer "$PKG" FuzzHeaderByteValidators    fuzz_header_byte_val
 
 # Carry the committed Go regression seed into the ClusterFuzzLite corpus so a
 # fresh storage repo starts from the known FuzzNoProxyMatch reproducer.
-if [ -d internal/proxy/testdata/fuzz/FuzzNoProxyMatch ]; then
-  zip -j "$OUT/fuzz_no_proxy_match_seed_corpus.zip" internal/proxy/testdata/fuzz/FuzzNoProxyMatch/*
+# nullglob: an empty seed dir must yield zero args, not a literal glob under
+# `set -e` (which would fail zip and abort the build).
+shopt -s nullglob
+seeds=(internal/proxy/testdata/fuzz/FuzzNoProxyMatch/*)
+shopt -u nullglob
+if [ ${#seeds[@]} -gt 0 ]; then
+  zip -j "$OUT/fuzz_no_proxy_match_seed_corpus.zip" "${seeds[@]}"
 fi
