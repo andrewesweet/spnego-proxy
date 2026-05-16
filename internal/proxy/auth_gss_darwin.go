@@ -1,6 +1,6 @@
 //go:build darwin
 
-package main
+package proxy
 
 /*
 #cgo darwin CFLAGS: -DGSS_USE_APPLE_FRAMEWORK

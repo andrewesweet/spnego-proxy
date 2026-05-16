@@ -1,4 +1,4 @@
-package main
+package proxy
 
 // authError is a shared base for authentication-related errors. It carries a
 // human-readable message and an optional wrapped cause. Embedding authError
