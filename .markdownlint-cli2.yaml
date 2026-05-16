@@ -5,6 +5,7 @@ config:
 # The README is hand-written and linted normally.
 ignores:
   - "docs/plans/**"
+  - "docs/superpowers/**"
   - "docs/threat-model/P[0-9]-*.md"
   - "docs/threat-model/SPNEGO-PROXY-*.md"
   - "CHANGELOG.md"
