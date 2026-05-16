@@ -117,6 +117,25 @@ Go 1.25. Use modern Go idioms (wg.Go, SplitSeq, t.Context).
 
     golangci-lint run
 
+## Fuzzing
+
+See `CONTRIBUTING.md` § Fuzzing for the full human-oriented guide.
+
+Key details for AI context:
+
+- Native `go test -fuzz` targets; seed corpora in `f.Add`; crash reproducers
+  committed under `testdata/fuzz/<Target>/` and replayed free by `go test ./...`
+- **No new dependency** for an oracle. `golang.org/x/net/http/httpproxy` and
+  `httpguts` transitively pull `golang.org/x/text` — never import them; write a
+  clean-room stdlib reference. Confirm with `go mod tidy` (no diff)
+- Differential oracle must be sound (gate on parseability; assert only the
+  security direction; never mirror the production impl). Else ship crash-only
+- Targets hermetic, deterministic, `CGO_ENABLED=0`, entropy via
+  `[]byte`/`string`/scalars (OSS-Fuzz portable)
+- Real bug → `fix:` + commit reproducer as regression seed. Unsound oracle →
+  tighten predicate and delete the noise reproducer (never commit it)
+- Add every new `Fuzz*` name to the matrix in `.github/workflows/fuzz.yml`
+
 ## Release Process
 
 See `CONTRIBUTING.md` § Releasing for the full human-oriented guide.

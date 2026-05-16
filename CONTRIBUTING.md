@@ -78,6 +78,60 @@ The tests are gated by `//go:build darwin` and the `INTEGRATION` environment
 variable — they skip automatically on Linux and when `INTEGRATION` is unset.
 They also skip if MIT krb5 is not installed.
 
+### Fuzzing
+
+The proxy has native Go fuzz targets (`go test -fuzz`) covering the inputs an
+unprivileged client or a malicious origin controls. Seed corpora live in
+`f.Add` calls; discovered crash reproducers are committed under
+`testdata/fuzz/<Target>/` and replayed for free by the ordinary
+`go test ./...` run (so a fixed bug stays fixed). The `Fuzz` workflow runs
+time-boxed discovery nightly.
+
+Run one target locally:
+
+```bash
+go test -run '^$' -fuzz '^FuzzNoProxyMatch$' -fuzztime=60s .
+```
+
+Replay only the committed corpus (no discovery), as CI does:
+
+```bash
+go test -count=1 ./...
+```
+
+#### When to add a target
+
+Add a target when you introduce or change code that parses or makes a
+policy/framing decision on attacker-influenced input: request authority,
+headers, client address, or an upstream response. Do **not** fuzz the standard
+library directly (the Go team already does) — fuzz *our* logic, optionally
+*through* a stdlib parser used as part of the chain.
+
+#### Rules (these are load-bearing — they were each a trap)
+
+1. **No new dependency.** This is a security-sensitive proxy with a deliberately
+   small dependency set. A differential oracle must use only the standard
+   library or a package already in `go.mod`. In particular
+   `golang.org/x/net/http/httpproxy` and `golang.org/x/net/http/httpguts`
+   transitively pull `golang.org/x/text` — do **not** import them. Write a
+   clean-room reference instead. Verify with `go mod tidy` producing no diff.
+2. **Sound oracle, or crash-only.** A differential assertion must not flag
+   intended behaviour. Gate on parseability; assert only the
+   security-meaningful direction (e.g. "accepted ⇒ literally permitted", not a
+   re-derivation that re-implements the function); never bake the production
+   implementation's semantics into the reference. If you cannot construct a
+   sound oracle, ship the target as no-panic / invariant-only.
+3. **OSS-Fuzz portable.** Entropy only via `[]byte`/`string`/scalars in
+   `f.Fuzz`; targets must be hermetic and deterministic (no network, files,
+   clock, randomness, global state) and build with `CGO_ENABLED=0`. This keeps
+   ClusterFuzzLite / OSS-Fuzz a future drop-in with no target rewrite.
+4. **Reproducer hygiene.** If a target fails: a *real* bug → fix the production
+   code and commit the reproducer (it becomes a regression seed) with a `fix:`
+   commit; an *unsound oracle* → tighten the predicate and **delete** the noise
+   reproducer (do not commit it).
+5. **Register the target.** Add every new `Fuzz*` function name to the matrix
+   in `.github/workflows/fuzz.yml` so nightly discovery covers it.
+
 ## Formatting
 
 All code must be formatted before committing. CI will reject unformatted code.
