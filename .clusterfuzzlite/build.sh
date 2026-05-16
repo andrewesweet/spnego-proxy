@@ -15,8 +15,11 @@
 cd "$SRC/spnego-proxy"
 
 # Build-time-only shim (container copy of the module; not the committed repo).
-go install github.com/AdamKorcz/go-118-fuzz-build@latest
-go get github.com/AdamKorcz/go-118-fuzz-build/testing
+# Pinned for reproducible CFL builds (the module publishes no semver tags, only
+# pseudo-versions). Bump deliberately; keep both lines on the identical version.
+GO118_FUZZ_BUILD_VERSION=v0.0.0-20250520111509-a70c2aa677fa
+go install "github.com/AdamKorcz/go-118-fuzz-build@${GO118_FUZZ_BUILD_VERSION}"
+go get "github.com/AdamKorcz/go-118-fuzz-build/testing@${GO118_FUZZ_BUILD_VERSION}"
 
 # Fuzz targets live in package proxy at internal/proxy (extracted from
 # package main in PR #225 so ClusterFuzzLite can import them).

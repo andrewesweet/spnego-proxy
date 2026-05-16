@@ -13,6 +13,9 @@ on:
       - 'go.sum'
       - '.clusterfuzzlite/**'
       - '.github/workflows/cflite_cont.yml'
+  # On-demand: fast SSH-deploy-key / storage round-trip check (build + corpus
+  # sync only, no fuzzing) without waiting for a push to master.
+  workflow_dispatch:
 
 permissions:
   contents: read

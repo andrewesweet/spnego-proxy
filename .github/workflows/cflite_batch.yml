@@ -12,6 +12,11 @@ on:
   schedule:
     - cron: '0 3 * * *'
   workflow_dispatch:
+    inputs:
+      fuzz_seconds:
+        description: 'Batch fuzzing seconds (lower for fast on-demand storage / deploy-key checks)'
+        required: false
+        default: '3600'
 
 permissions:
   contents: read
@@ -57,7 +62,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           language: go
           mode: batch
-          fuzz-seconds: 3600
+          fuzz-seconds: ${{ github.event.inputs.fuzz_seconds || '3600' }}
           sanitizer: address
           storage-repo: ${{ env.STORAGE_REPO }}
           storage-repo-branch: main
