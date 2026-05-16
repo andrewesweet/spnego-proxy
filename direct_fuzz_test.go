@@ -11,7 +11,7 @@ import (
 // true-decisions. It deliberately differs from production (independent bracket
 // stripping; explicit netip normalisation of IP literals) so a collision bug
 // in production's canon — two genuinely different hosts treated as the same,
-// the response/request-smuggling vector at direct.go:104-110 — is caught.
+// the request-smuggling vector in handleDirectHTTP — is caught.
 func sameHostRef(h, defaultPort string) string {
 	h = strings.ToLower(strings.TrimSpace(h))
 	host, port, err := net.SplitHostPort(h)
@@ -30,7 +30,7 @@ func sameHostRef(h, defaultPort string) string {
 // FuzzSameHost guards the keep-alive connection binding in handleDirectHTTP:
 // sameHost falsely reporting two different hosts as equal lets a smuggled
 // pipelined request ride a direct connection bound to a different,
-// unauthorised host (direct.go:104-110).
+// unauthorised host (the keep-alive binding in handleDirectHTTP).
 //
 // Assertions:
 //   - never panics;

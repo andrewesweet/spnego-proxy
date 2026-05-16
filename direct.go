@@ -12,6 +12,17 @@ import (
 	"time"
 )
 
+// stripIPv6Brackets removes one surrounding "[]" pair from a bare bracketed
+// IPv6 literal that has no port (e.g. "[::1]" -> "::1"). It is a no-op for any
+// other input. Used on host-canonicalisation paths where net.SplitHostPort has
+// already failed (no port present).
+func stripIPv6Brackets(host string) string {
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		return host[1 : len(host)-1]
+	}
+	return host
+}
+
 // sameHost reports whether two HTTP Host values refer to the same
 // target. It canonicalises by lower-casing and applying defaultPort when a
 // host has no explicit port. Bracketed IPv6 addresses without a port (e.g.
@@ -24,11 +35,8 @@ func sameHost(a, b, defaultPort string) bool {
 		if err != nil {
 			host = h
 			port = defaultPort
-			// Bare bracketed IPv6 address with no port: strip brackets so
-			// net.JoinHostPort below re-adds them exactly once.
-			if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
-				host = host[1 : len(host)-1]
-			}
+			// Strip brackets so net.JoinHostPort below re-adds them once.
+			host = stripIPv6Brackets(host)
 		}
 		return net.JoinHostPort(host, port)
 	}

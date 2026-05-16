@@ -123,9 +123,7 @@ func ipAllowed(ip net.IP, allowList []*net.IPNet) bool {
 	}
 	// RFC 4291: an IPv4-mapped IPv6 address denotes the same host as the bare
 	// IPv4 address. Canonicalise to the 4-byte form so allowlist identity is
-	// consistent regardless of which form the client connected with. (Behaviour
-	// is unchanged — net.IPNet.Contains already aligns families via To4 — but
-	// making it explicit documents the contract and pins it under fuzzing.)
+	// consistent regardless of which form the client connected with.
 	if v4 := ip.To4(); v4 != nil {
 		ip = v4
 	}

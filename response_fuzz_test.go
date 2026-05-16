@@ -164,7 +164,7 @@ func FuzzHeaderByteValidators(f *testing.F) {
 		gotName := isValidFieldName(name)
 		wantName := name != ""
 		if wantName {
-			for i := 0; i < len(name); i++ {
+			for i := range len(name) {
 				if !isTcharByte(name[i]) {
 					wantName = false
 					break
@@ -177,7 +177,7 @@ func FuzzHeaderByteValidators(f *testing.F) {
 
 		gotVal := hasForbiddenFieldValueByte(value)
 		wantVal := false
-		for i := 0; i < len(value); i++ {
+		for i := range len(value) {
 			b := value[i]
 			if (b < 0x20 && b != '\t') || b == 0x7f {
 				wantVal = true

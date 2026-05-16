@@ -9,12 +9,12 @@ import (
 )
 
 // FuzzConnectPortChain mirrors the production CONNECT port-gate chain
-// (prepareForwardRequest, forward.go:40-49): the client-controlled authority
-// is split by net.SplitHostPort, defaulting to "443" on error, and the port is
-// checked against the configured allow set.
+// (prepareForwardRequest): the client-controlled authority is split by
+// net.SplitHostPort, defaulting to "443" on error, and the port is checked
+// against the configured allow set.
 //
 // The oracle is the security-direction implication only — connectPortAllowed
-// does a pure byte-wise string compare (config.go:135), so a numeric/uint16
+// does a pure byte-wise string compare, so a numeric/uint16
 // equivalence oracle would be unsound (it would false-positive on "0443",
 // "+443", etc., which the function correctly rejects). The sound, security-
 // relevant property is: an accepted port under a non-empty, non-wildcard allow
