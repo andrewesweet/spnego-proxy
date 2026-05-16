@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"net/http"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -70,6 +72,129 @@ func FuzzUpstreamResponseFraming(f *testing.F) {
 			t.Fatalf("framing divergence after round-trip (smuggling):\n"+
 				"  ContentLength %d -> %d\n  TransferEncoding %v -> %v\n  Close %v -> %v\n  input=%q",
 				cl1, cl2, te1, te2, close1, close2, data)
+		}
+	})
+}
+
+// FuzzContentLengthValues exercises validateResponseContentLength directly on
+// adversarial multi-value / comma-list Content-Length header sets. It is a
+// crash + tautology guard (the predicate re-derives the function's contract,
+// so it is intentionally not a differential): never panic, and acceptance
+// implies every non-empty comma part is a valid base-10 uint64 and all equal.
+func FuzzContentLengthValues(f *testing.F) {
+	f.Add("5")
+	f.Add("5, 5")
+	f.Add("5,6")
+	f.Add("+5")
+	f.Add("0x5")
+	f.Add("042")
+	f.Add(" 5 ")
+	f.Add("5,,5")
+	f.Add("")
+	f.Add("18446744073709551616")
+	f.Add("5\n5")
+	f.Add("5\n6")
+
+	f.Fuzz(func(t *testing.T, raw string) {
+		// '\n'-separated header values; each value may itself be a comma list.
+		values := strings.Split(raw, "\n")
+		resp := &http.Response{Header: http.Header{"Content-Length": values}}
+
+		accepted := validateResponseContentLength(resp) == nil
+		if !accepted {
+			return
+		}
+
+		var first uint64
+		var seen bool
+		for _, v := range values {
+			for part := range strings.SplitSeq(v, ",") {
+				part = strings.TrimSpace(part)
+				if part == "" {
+					continue
+				}
+				n, err := strconv.ParseUint(part, 10, 64)
+				if err != nil {
+					t.Fatalf("accepted but part %q is not a base-10 uint64: raw=%q", part, raw)
+				}
+				if !seen {
+					first, seen = n, true
+				} else if n != first {
+					t.Fatalf("accepted but parts disagree (%d != %d): raw=%q", n, first, raw)
+				}
+			}
+		}
+	})
+}
+
+// isTcharByte is an independent definition of the RFC 9110 §5.6.2 tchar
+// production, written differently from isValidFieldName so it is a genuine
+// oracle rather than a copy.
+func isTcharByte(c byte) bool {
+	if c >= '0' && c <= '9' {
+		return true
+	}
+	if c >= 'A' && c <= 'Z' {
+		return true
+	}
+	if c >= 'a' && c <= 'z' {
+		return true
+	}
+	return strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0
+}
+
+// FuzzHeaderByteValidators is a self-referential property target (no external
+// oracle — httpguts would add golang.org/x/text). It pins the two leaf
+// response-splitting validators to independent byte-class definitions and
+// checks that validateResponseHeaderBytes' boolean verdict is consistent with
+// them. Only the boolean is asserted (validateResponseHeaderBytes ranges a map
+// and the *blamed* header is non-deterministic; the nil/non-nil result is not).
+func FuzzHeaderByteValidators(f *testing.F) {
+	f.Add("Content-Type", "text/html")
+	f.Add("X\x01", "v")
+	f.Add("Set-Cookie", "a\rb")
+	f.Add("Set-Cookie", "a\x7fb")
+	f.Add("Set-Cookie", "a\tb")
+	f.Add("Set-Cookie", "\x80\xff")
+	f.Add("", "v")
+	f.Add("ok", "")
+	f.Add("a b", "v")
+
+	f.Fuzz(func(t *testing.T, name, value string) {
+		gotName := isValidFieldName(name)
+		wantName := name != ""
+		if wantName {
+			for i := 0; i < len(name); i++ {
+				if !isTcharByte(name[i]) {
+					wantName = false
+					break
+				}
+			}
+		}
+		if gotName != wantName {
+			t.Fatalf("isValidFieldName(%q)=%v, independent oracle=%v", name, gotName, wantName)
+		}
+
+		gotVal := hasForbiddenFieldValueByte(value)
+		wantVal := false
+		for i := 0; i < len(value); i++ {
+			b := value[i]
+			if (b < 0x20 && b != '\t') || b == 0x7f {
+				wantVal = true
+				break
+			}
+		}
+		if gotVal != wantVal {
+			t.Fatalf("hasForbiddenFieldValueByte(%q)=%v, independent oracle=%v", value, gotVal, wantVal)
+		}
+
+		// Boolean consistency of the aggregate validator for a single header.
+		resp := &http.Response{Header: http.Header{name: []string{value}}}
+		gotAgg := validateResponseHeaderBytes(resp) != nil
+		wantAgg := !gotName || gotVal
+		if gotAgg != wantAgg {
+			t.Fatalf("validateResponseHeaderBytes inconsistent: name=%q value=%q agg=%v want=%v",
+				name, value, gotAgg, wantAgg)
 		}
 	})
 }
