@@ -68,9 +68,9 @@ func parseFlags(args []string) (*cliConfig, *flag.FlagSet, error) {
 		"comma-separated list of allowed client IPs or CIDR ranges (empty = allow all; recommended when binding to non-loopback)")
 	fs.StringVar(&c.NoProxy, "noproxy", "",
 		"comma-separated list of hosts/domains/IPs/CIDRs to bypass upstream proxy (supports *.domain, .domain, CIDR, * for all; also reads NO_PROXY/no_proxy env vars)")
-	fs.UintVar(&c.CBThreshold, "cb-threshold", uint(proxy.CbConsecutiveFailures),
+	fs.UintVar(&c.CBThreshold, "cb-threshold", uint(proxy.CBConsecutiveFailures),
 		"consecutive failures before circuit breaker opens")
-	fs.DurationVar(&c.CBTimeout, "cb-timeout", proxy.CbTimeout,
+	fs.DurationVar(&c.CBTimeout, "cb-timeout", proxy.CBTimeout,
 		"circuit breaker cooldown duration")
 
 	fs.BoolVar(&c.Forwarded, "forwarded", false, "inject RFC 7239 Forwarded header with obfuscated client identifier")

@@ -291,7 +291,7 @@ func TestCircuitBreakerWithRealProvider(t *testing.T) {
 	// Phase 1: Verify successful token acquisition passes through.
 	provider, cleanup := startMockKDC(t, "testuser", "HTTP/proxy.test.realm.com")
 
-	cb := NewCircuitBreakerTokenProvider(provider, CbConsecutiveFailures, CbTimeout)
+	cb := NewCircuitBreakerTokenProvider(provider, CBConsecutiveFailures, CBTimeout)
 	token, err := cb.GetToken()
 	if err != nil {
 		cleanup()
@@ -327,10 +327,10 @@ func TestCircuitBreakerWithRealProvider(t *testing.T) {
 	}
 	defer func() { _ = failProvider.Close() }()
 
-	cb2 := NewCircuitBreakerTokenProvider(failProvider, CbConsecutiveFailures, CbTimeout)
+	cb2 := NewCircuitBreakerTokenProvider(failProvider, CBConsecutiveFailures, CBTimeout)
 
 	// Drive consecutive failures to trip the circuit breaker.
-	for i := range int(CbConsecutiveFailures) {
+	for i := range int(CBConsecutiveFailures) {
 		_, err := cb2.GetToken()
 		if err == nil {
 			t.Fatalf("expected error on call %d with closed KDC, got success", i+1)

@@ -77,7 +77,7 @@ func injectForwardingHeaders(req *http.Request, clientAddr string, fwdCfg Forwar
 	}
 }
 
-// generateViaPseudonym returns a unique pseudonym for this proxy instance,
+// GenerateViaPseudonym returns a unique pseudonym for this proxy instance,
 // used in the Via header to identify this specific process. The format is
 // "spnego-proxy-<8-hex-chars>", providing 2^32 unique identifiers — sufficient
 // for loop detection across chains of spnego-proxy instances.

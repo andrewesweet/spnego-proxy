@@ -118,7 +118,7 @@ func (m *NoProxyMatcher) Match(host string) (matched bool, pattern string) {
 	return false, ""
 }
 
-// resolveNoProxy returns the effective no-proxy value by applying the
+// ResolveNoProxy returns the effective no-proxy value by applying the
 // following precedence: explicit flag value > NO_PROXY env var > no_proxy
 // env var. An empty string is returned when none of the sources is set.
 func ResolveNoProxy(flagValue string) string {

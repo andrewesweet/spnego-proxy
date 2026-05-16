@@ -30,7 +30,7 @@ type UpstreamTLSConfig struct {
 	Dialer *net.Dialer
 }
 
-// buildTLSConfig constructs a *tls.Config from the fields of UpstreamTLSConfig
+// BuildTLSConfig constructs a *tls.Config from the fields of UpstreamTLSConfig
 // and stores it in TLSConfig. It is called once at startup (and in tests) so
 // that dialUpstream can clone the result without re-reading the CA file per connection.
 func (c *UpstreamTLSConfig) BuildTLSConfig() error {

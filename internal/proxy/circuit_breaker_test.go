@@ -14,7 +14,7 @@ import (
 // open the circuit. The inner stub must already have a non-nil err.
 func tripBreaker(t *testing.T, cb *CircuitBreakerTokenProvider) {
 	t.Helper()
-	for i := range int(CbConsecutiveFailures) {
+	for i := range int(CBConsecutiveFailures) {
 		_, err := cb.GetToken()
 		if err == nil {
 			t.Fatalf("expected error on call %d", i+1)
@@ -24,7 +24,7 @@ func tripBreaker(t *testing.T, cb *CircuitBreakerTokenProvider) {
 
 func TestCircuitBreakerPassesThrough(t *testing.T) {
 	inner := &stubTokenProvider{token: "tok123"}
-	cb := NewCircuitBreakerTokenProvider(inner, CbConsecutiveFailures, CbTimeout)
+	cb := NewCircuitBreakerTokenProvider(inner, CBConsecutiveFailures, CBTimeout)
 
 	token, err := cb.GetToken()
 	if err != nil {
@@ -40,11 +40,11 @@ func TestCircuitBreakerPassesThrough(t *testing.T) {
 
 func TestCircuitBreakerOpensAfterConsecutiveFailures(t *testing.T) {
 	inner := &stubTokenProvider{err: errors.New("kdc error")}
-	cb := NewCircuitBreakerTokenProvider(inner, CbConsecutiveFailures, CbTimeout)
+	cb := NewCircuitBreakerTokenProvider(inner, CBConsecutiveFailures, CBTimeout)
 
 	tripBreaker(t, cb)
-	if inner.calls.Load() != int64(CbConsecutiveFailures) {
-		t.Fatalf("expected %d inner calls, got %d", CbConsecutiveFailures, inner.calls.Load())
+	if inner.calls.Load() != int64(CBConsecutiveFailures) {
+		t.Fatalf("expected %d inner calls, got %d", CBConsecutiveFailures, inner.calls.Load())
 	}
 
 	// Next call should be rejected without calling inner
@@ -63,11 +63,11 @@ func TestCircuitBreakerOpensAfterConsecutiveFailures(t *testing.T) {
 
 func TestCircuitBreakerDoesNotTripOnIntermittentFailures(t *testing.T) {
 	inner := &stubTokenProvider{token: "tok"}
-	cb := NewCircuitBreakerTokenProvider(inner, CbConsecutiveFailures, CbTimeout)
+	cb := NewCircuitBreakerTokenProvider(inner, CBConsecutiveFailures, CBTimeout)
 
 	// Fail twice (below threshold), then succeed
 	inner.err = errors.New("transient")
-	for range int(CbConsecutiveFailures) - 1 {
+	for range int(CBConsecutiveFailures) - 1 {
 		_, _ = cb.GetToken()
 	}
 
@@ -95,7 +95,7 @@ func TestCircuitBreakerDoesNotTripOnIntermittentFailures(t *testing.T) {
 
 func TestCircuitBreakerClosesDelegatesToInner(t *testing.T) {
 	inner := &stubTokenProvider{token: "tok"}
-	cb := NewCircuitBreakerTokenProvider(inner, CbConsecutiveFailures, CbTimeout)
+	cb := NewCircuitBreakerTokenProvider(inner, CBConsecutiveFailures, CBTimeout)
 
 	if err := cb.Close(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -107,7 +107,7 @@ func TestCircuitBreakerClosesDelegatesToInner(t *testing.T) {
 
 func TestCircuitBreakerOpenRejectsWithoutCallingInner(t *testing.T) {
 	inner := &stubTokenProvider{err: errors.New("fail")}
-	cb := NewCircuitBreakerTokenProvider(inner, CbConsecutiveFailures, CbTimeout)
+	cb := NewCircuitBreakerTokenProvider(inner, CBConsecutiveFailures, CBTimeout)
 
 	tripBreaker(t, cb)
 
@@ -139,9 +139,9 @@ func TestCircuitBreakerHalfOpenRejectsConcurrentRequests(t *testing.T) {
 		MaxRequests: 1,
 		Timeout:     50 * time.Millisecond, // fast transition to half-open
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
-			return counts.ConsecutiveFailures >= CbConsecutiveFailures
+			return counts.ConsecutiveFailures >= CBConsecutiveFailures
 		},
-	}, CbConsecutiveFailures)
+	}, CBConsecutiveFailures)
 
 	tripBreaker(t, cb)
 

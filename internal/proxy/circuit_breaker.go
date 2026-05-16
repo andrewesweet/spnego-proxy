@@ -11,16 +11,16 @@ import (
 
 // Default circuit breaker settings.
 const (
-	// cbConsecutiveFailures is the number of consecutive GetToken failures
+	// CBConsecutiveFailures is the number of consecutive GetToken failures
 	// before the circuit opens. Three failures avoids tripping on a single
 	// transient error while still reacting quickly to broken credentials.
-	CbConsecutiveFailures = 3
+	CBConsecutiveFailures = 3
 
-	// cbTimeout is how long the circuit stays open before allowing a single
+	// CBTimeout is how long the circuit stays open before allowing a single
 	// probe request (half-open state). 30 seconds gives the operator time
 	// to notice logs and act (e.g. kinit) without holding the circuit open
 	// so long that recovery is delayed.
-	CbTimeout = 30 * time.Second
+	CBTimeout = 30 * time.Second
 )
 
 // CircuitBreakerTokenProvider wraps a TokenProvider with a circuit breaker

@@ -10,9 +10,11 @@ import (
 	"time"
 )
 
+// LogLevel is the dynamic log level for the proxy's slog handler; it
+// defaults to Info and can be raised to Debug via the -debug flag.
 var LogLevel = new(slog.LevelVar) // default Info
 
-// connectPortWildcard is the sentinel value meaning "allow all ports" in the
+// ConnectPortWildcard is the sentinel value meaning "allow all ports" in the
 // -connect-ports flag and connectPortAllowed logic.
 const ConnectPortWildcard = "*"
 
@@ -51,7 +53,7 @@ type ForwardingConfig struct {
 	XForwardedForEnabled bool
 }
 
-// ProxyConfig groups the non-connection parameters for handleClient.
+// Config groups the non-connection parameters for handleClient.
 type Config struct {
 	Upstream     string
 	Provider     TokenProvider
@@ -75,7 +77,7 @@ type TokenProvider interface {
 	Close() error
 }
 
-// splitCSV splits a comma-separated string into trimmed, non-empty tokens.
+// SplitCSV splits a comma-separated string into trimmed, non-empty tokens.
 func SplitCSV(s string) []string {
 	var out []string
 	for part := range strings.SplitSeq(s, ",") {
@@ -86,7 +88,7 @@ func SplitCSV(s string) []string {
 	return out
 }
 
-// parseAllowList parses a comma-separated string of IPs and CIDR ranges
+// ParseAllowList parses a comma-separated string of IPs and CIDR ranges
 // into a slice of *net.IPNet entries for use with ipAllowed.
 func ParseAllowList(s string) ([]*net.IPNet, error) {
 	if s == "" {
