@@ -84,8 +84,17 @@ The proxy has native Go fuzz targets (`go test -fuzz`) covering the inputs an
 unprivileged client or a malicious origin controls. Seed corpora live in
 `f.Add` calls; discovered crash reproducers are committed under
 `internal/proxy/testdata/fuzz/<Target>/` and replayed for free by the ordinary
-`go test ./...` run (so a fixed bug stays fixed). The `Fuzz` workflow runs
-time-boxed discovery nightly.
+`go test ./...` run (so a fixed bug stays fixed).
+
+The same targets are continuously fuzzed by **ClusterFuzzLite** on GitHub
+Actions: code-change fuzzing on every PR (`cflite_pr.yml`, fork-safe, no
+storage), corpus seeding on push to `master` (`cflite_cont.yml`), and a nightly
+batch → prune → coverage pipeline (`cflite_batch.yml`). Corpus, crashes, and
+the coverage report live in a **separate storage repo**
+(`andrewesweet/spnego-proxy-fuzz-corpus`); the workflows authenticate to it
+with the `FUZZ_CORPUS_DEPLOY_KEY` SSH deploy-key secret (same pattern as the
+Homebrew tap — never a PAT). Build integration lives in `.clusterfuzzlite/`
+(`project.yaml`, `Dockerfile`, `build.sh`).
 
 Run one target locally:
 
@@ -123,14 +132,18 @@ library directly (the Go team already does) — fuzz *our* logic, optionally
    sound oracle, ship the target as no-panic / invariant-only.
 3. **OSS-Fuzz portable.** Entropy only via `[]byte`/`string`/scalars in
    `f.Fuzz`; targets must be hermetic and deterministic (no network, files,
-   clock, randomness, global state) and build with `CGO_ENABLED=0`. This keeps
-   ClusterFuzzLite / OSS-Fuzz a future drop-in with no target rewrite.
+   clock, randomness, global state) and build with `CGO_ENABLED=0`. This is
+   what lets ClusterFuzzLite compile the native targets unchanged via
+   `compile_native_go_fuzzer`.
 4. **Reproducer hygiene.** If a target fails: a *real* bug → fix the production
    code and commit the reproducer (it becomes a regression seed) with a `fix:`
    commit; an *unsound oracle* → tighten the predicate and **delete** the noise
    reproducer (do not commit it).
-5. **Register the target.** Add every new `Fuzz*` function name to the matrix
-   in `.github/workflows/fuzz.yml` so nightly discovery covers it.
+5. **Register the target.** Add a `compile_native_go_fuzzer` line for every new
+   `Fuzz*` function in `.clusterfuzzlite/build.sh` so ClusterFuzzLite builds it.
+   The legacy nightly `Fuzz` workflow (`.github/workflows/fuzz.yml`) is retained
+   until the ClusterFuzzLite batch is validated against the storage repo, then
+   removed; while it exists, also add the name to its matrix.
 
 ## Formatting
 
