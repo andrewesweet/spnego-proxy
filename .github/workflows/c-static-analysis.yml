@@ -31,7 +31,7 @@ jobs:
           persist-credentials: false
 
       - name: Run clang-format
-        run: clang-format --dry-run --Werror gss_darwin.c gss_darwin.h
+        run: clang-format --dry-run --Werror internal/proxy/gss_darwin.c internal/proxy/gss_darwin.h
 
   clang-tidy:
     name: clang-tidy
@@ -81,4 +81,4 @@ jobs:
             --check-level=exhaustive \
             --suppress=missingIncludeSystem \
             --suppress=unusedFunction \
-            gss_darwin.c
+            internal/proxy/gss_darwin.c

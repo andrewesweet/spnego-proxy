@@ -1,0 +1,95 @@
+package proxy
+
+import (
+	"errors"
+	"fmt"
+	"log/slog"
+	"time"
+
+	gobreaker "github.com/sony/gobreaker/v2"
+)
+
+// Default circuit breaker settings.
+const (
+	// CBConsecutiveFailures is the number of consecutive GetToken failures
+	// before the circuit opens. Three failures avoids tripping on a single
+	// transient error while still reacting quickly to broken credentials.
+	CBConsecutiveFailures = 3
+
+	// CBTimeout is how long the circuit stays open before allowing a single
+	// probe request (half-open state). 30 seconds gives the operator time
+	// to notice logs and act (e.g. kinit) without holding the circuit open
+	// so long that recovery is delayed.
+	CBTimeout = 30 * time.Second
+)
+
+// CircuitBreakerTokenProvider wraps a TokenProvider with a circuit breaker
+// that prevents repeated calls to a failing credential backend. This avoids
+// account lockout from rapid authentication failures (e.g. stale Kerberos
+// tickets triggering KDC password-attempt counters).
+type CircuitBreakerTokenProvider struct {
+	inner     TokenProvider
+	cb        *gobreaker.CircuitBreaker[string]
+	threshold uint32
+}
+
+// NewCircuitBreakerTokenProvider wraps the given TokenProvider with a circuit
+// breaker. When threshold consecutive GetToken calls fail, the circuit opens
+// and immediately rejects further attempts for timeout. After the timeout, a
+// single probe request is allowed through (half-open); if it succeeds the
+// circuit closes, otherwise it reopens.
+func NewCircuitBreakerTokenProvider(inner TokenProvider, threshold uint32, timeout time.Duration) *CircuitBreakerTokenProvider {
+	settings := gobreaker.Settings{
+		Name:        "spnego-token",
+		MaxRequests: 1,
+		Timeout:     timeout,
+		ReadyToTrip: func(counts gobreaker.Counts) bool {
+			return counts.ConsecutiveFailures >= threshold
+		},
+		OnStateChange: func(name string, from gobreaker.State, to gobreaker.State) {
+			slog.Warn("circuit breaker state change", "name", name, "from", from.String(), "to", to.String())
+		},
+	}
+	cb := gobreaker.NewCircuitBreaker[string](settings)
+	return &CircuitBreakerTokenProvider{inner: inner, cb: cb, threshold: threshold}
+}
+
+// newCircuitBreakerTokenProvider is the internal constructor that accepts
+// explicit gobreaker.Settings, used by tests to override timeouts.
+func newCircuitBreakerTokenProvider(inner TokenProvider, settings gobreaker.Settings, threshold uint32) *CircuitBreakerTokenProvider {
+	cb := gobreaker.NewCircuitBreaker[string](settings)
+	return &CircuitBreakerTokenProvider{inner: inner, cb: cb, threshold: threshold}
+}
+
+// CircuitBreakerError indicates that the circuit breaker rejected a request.
+// The Unwrap method returns the underlying gobreaker sentinel so callers can
+// further distinguish open vs half-open states with errors.Is if needed.
+type CircuitBreakerError struct{ authError }
+
+// GetToken acquires a token from the wrapped provider, subject to circuit
+// breaker policy. Returns a *CircuitBreakerError when the circuit is open
+// or half-open, allowing callers to distinguish circuit breaker rejections
+// from other token acquisition failures using errors.As.
+func (p *CircuitBreakerTokenProvider) GetToken() (string, error) {
+	token, err := p.cb.Execute(func() (string, error) {
+		return p.inner.GetToken()
+	})
+	if err != nil {
+		var msg string
+		switch {
+		case errors.Is(err, gobreaker.ErrOpenState):
+			msg = fmt.Sprintf("circuit breaker open: token acquisition disabled after %d consecutive failures", p.threshold)
+		case errors.Is(err, gobreaker.ErrTooManyRequests):
+			msg = "circuit breaker half-open: probe in progress, rejecting concurrent request"
+		default:
+			return "", err
+		}
+		return "", &CircuitBreakerError{authError{msg: msg, cause: err}}
+	}
+	return token, nil
+}
+
+// Close delegates to the wrapped provider.
+func (p *CircuitBreakerTokenProvider) Close() error {
+	return p.inner.Close()
+}
