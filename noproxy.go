@@ -77,11 +77,10 @@ func (m *NoProxyMatcher) Match(host string) (matched bool, pattern string) {
 	// Strip port if present.
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
-	} else if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
-		// Bare bracketed IPv6 literal with no port (e.g. "[::1]"): strip the
-		// brackets so it parses as an IP for IP/CIDR rule matching, mirroring
-		// sameHost in direct.go.
-		host = host[1 : len(host)-1]
+	} else {
+		// Bare bracketed IPv6 literal with no port must lose its brackets to
+		// parse as an IP for IP/CIDR rule matching.
+		host = stripIPv6Brackets(host)
 	}
 	host = strings.ToLower(host)
 

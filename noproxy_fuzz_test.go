@@ -78,7 +78,7 @@ func differentiableHost(h string) bool {
 	if _, err := netip.ParseAddr(h); err == nil {
 		return true
 	}
-	for i := 0; i < len(h); i++ {
+	for i := range len(h) {
 		c := h[i]
 		switch {
 		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '.', c == '-':
