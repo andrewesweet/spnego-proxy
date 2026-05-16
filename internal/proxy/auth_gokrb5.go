@@ -112,6 +112,9 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 	}, nil
 }
 
+// GetToken acquires a SPNEGO credential and initializes a security context
+// via gokrb5, returning the base64-encoded SPNEGO token. It is safe for
+// concurrent use.
 func (p *Gokrb5TokenProvider) GetToken() (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -129,6 +132,8 @@ func (p *Gokrb5TokenProvider) GetToken() (string, error) {
 	return base64.StdEncoding.EncodeToString(b), nil
 }
 
+// Close destroys the underlying gokrb5 client, releasing its session and
+// cached credentials. It is idempotent and safe for concurrent use.
 func (p *Gokrb5TokenProvider) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()

@@ -8,7 +8,10 @@ type authError struct {
 	cause error
 }
 
+// Error returns the human-readable message for the authentication error.
 func (e *authError) Error() string { return e.msg }
+
+// Unwrap returns the wrapped cause, if any, for use with errors.Is/As.
 func (e *authError) Unwrap() error { return e.cause }
 
 // CredentialError indicates that token acquisition failed because Kerberos

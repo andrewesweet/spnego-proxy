@@ -40,6 +40,8 @@ func NewGSSTokenProvider(proxyHost, explicitSPN string) (*GSSTokenProvider, erro
 	return &GSSTokenProvider{spn: spn}, nil
 }
 
+// GetToken acquires a SPNEGO token via the macOS GSS-API framework and
+// returns it base64-encoded. It is safe for concurrent use.
 func (g *GSSTokenProvider) GetToken() (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -67,6 +69,8 @@ func (g *GSSTokenProvider) GetToken() (string, error) {
 	return base64.StdEncoding.EncodeToString(tokenBytes), nil
 }
 
+// Close releases any resources held by the provider. The GSS-API provider
+// holds no Go-side state, so this is a no-op that always returns nil.
 func (g *GSSTokenProvider) Close() error {
 	return nil
 }
