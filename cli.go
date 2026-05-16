@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/andrewesweet/spnego-proxy/internal/proxy"
 )
 
 // cliConfig holds every CLI flag value, decoupled from flag parsing so the
@@ -61,14 +63,14 @@ func parseFlags(args []string) (*cliConfig, *flag.FlagSet, error) {
 	fs.DurationVar(&c.IdleTimeout, "idle-timeout", 5*time.Minute,
 		"idle timeout for CONNECT tunnels; connections with no data flow are closed after this duration (0 to disable)")
 	fs.IntVar(&c.MaxConns, "max-conns", 512, "maximum number of concurrent connections (0 for unlimited)")
-	fs.StringVar(&c.ConnectPorts, "connect-ports", "443", "comma-separated list of ports allowed for CONNECT tunneling (default: 443; use "+connectPortWildcard+" for all)")
+	fs.StringVar(&c.ConnectPorts, "connect-ports", "443", "comma-separated list of ports allowed for CONNECT tunneling (default: 443; use "+proxy.ConnectPortWildcard+" for all)")
 	fs.StringVar(&c.AllowedIPs, "allowed-ips", "",
 		"comma-separated list of allowed client IPs or CIDR ranges (empty = allow all; recommended when binding to non-loopback)")
 	fs.StringVar(&c.NoProxy, "noproxy", "",
 		"comma-separated list of hosts/domains/IPs/CIDRs to bypass upstream proxy (supports *.domain, .domain, CIDR, * for all; also reads NO_PROXY/no_proxy env vars)")
-	fs.UintVar(&c.CBThreshold, "cb-threshold", uint(cbConsecutiveFailures),
+	fs.UintVar(&c.CBThreshold, "cb-threshold", uint(proxy.CbConsecutiveFailures),
 		"consecutive failures before circuit breaker opens")
-	fs.DurationVar(&c.CBTimeout, "cb-timeout", cbTimeout,
+	fs.DurationVar(&c.CBTimeout, "cb-timeout", proxy.CbTimeout,
 		"circuit breaker cooldown duration")
 
 	fs.BoolVar(&c.Forwarded, "forwarded", false, "inject RFC 7239 Forwarded header with obfuscated client identifier")
@@ -103,19 +105,19 @@ func parseFlags(args []string) (*cliConfig, *flag.FlagSet, error) {
 // config: gokrb5 password-based auth when -user is set, otherwise the
 // platform-native GSS-API provider. The result is wrapped in the circuit
 // breaker.
-func buildProvider(c *cliConfig) (TokenProvider, error) {
-	var provider TokenProvider
+func buildProvider(c *cliConfig) (proxy.TokenProvider, error) {
+	var provider proxy.TokenProvider
 	var err error
 
 	if c.User != "" {
 		// Explicit user provided — use gokrb5 password-based auth on any platform
-		provider, err = NewGokrb5TokenProvider(c.User, c.Realm, c.CfgFile, c.PasswordFile, c.Proxy, c.SPN, c.Debug)
+		provider, err = proxy.NewGokrb5TokenProvider(c.User, c.Realm, c.CfgFile, c.PasswordFile, c.Proxy, c.SPN, c.Debug)
 	} else {
 		// Try platform-native GSS-API (macOS) or error on other platforms
-		provider, err = newNativeTokenProvider(c.Proxy, c.SPN)
+		provider, err = proxy.NewNativeTokenProvider(c.Proxy, c.SPN)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return NewCircuitBreakerTokenProvider(provider, uint32(c.CBThreshold), c.CBTimeout), nil //nolint:gosec // CLI flag value; overflow not a concern
+	return proxy.NewCircuitBreakerTokenProvider(provider, uint32(c.CBThreshold), c.CBTimeout), nil //nolint:gosec // CLI flag value; overflow not a concern
 }

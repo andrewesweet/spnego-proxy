@@ -263,7 +263,7 @@ func TestNoProxyCONNECTBypassEstablishesDirectTunnel(t *testing.T) {
 	t.Cleanup(proxy.Close)
 
 	// Allow CONNECT on any port and match 127.0.0.1 for bypass.
-	proxy.SetConnectPorts([]string{connectPortWildcard})
+	proxy.SetConnectPorts([]string{ConnectPortWildcard})
 	proxy.SetNoProxy(NewNoProxyMatcher("127.0.0.1"))
 
 	client, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", proxy.Addr())
@@ -339,7 +339,7 @@ func TestNoProxyEnvVarIntegration(t *testing.T) {
 		t.Setenv("NO_PROXY", "env-value.com")
 		t.Setenv("no_proxy", "lower-env-value.com")
 
-		patterns := resolveNoProxy("flag-value.com")
+		patterns := ResolveNoProxy("flag-value.com")
 		m := NewNoProxyMatcher(patterns)
 
 		if matched, _ := m.Match("flag-value.com"); !matched {
@@ -357,7 +357,7 @@ func TestNoProxyEnvVarIntegration(t *testing.T) {
 		t.Setenv("NO_PROXY", "no-proxy-host.com")
 		t.Setenv("no_proxy", "lower-no-proxy-host.com")
 
-		patterns := resolveNoProxy("")
+		patterns := ResolveNoProxy("")
 		m := NewNoProxyMatcher(patterns)
 
 		if matched, _ := m.Match("no-proxy-host.com"); !matched {
@@ -373,7 +373,7 @@ func TestNoProxyEnvVarIntegration(t *testing.T) {
 		t.Setenv("NO_PROXY", "")
 		t.Setenv("no_proxy", "fallback-host.com")
 
-		patterns := resolveNoProxy("")
+		patterns := ResolveNoProxy("")
 		m := NewNoProxyMatcher(patterns)
 
 		if matched, _ := m.Match("fallback-host.com"); !matched {
@@ -385,7 +385,7 @@ func TestNoProxyEnvVarIntegration(t *testing.T) {
 		t.Setenv("NO_PROXY", "")
 		t.Setenv("no_proxy", "")
 
-		patterns := resolveNoProxy("")
+		patterns := ResolveNoProxy("")
 		m := NewNoProxyMatcher(patterns)
 
 		for _, host := range []string{"example.com", "127.0.0.1", "anything.internal"} {

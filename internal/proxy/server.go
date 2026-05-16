@@ -13,7 +13,7 @@ import (
 // up to drainTimeout for active handleClient goroutines to finish before
 // returning. The listener is assumed to already have any concurrency limit
 // (netutil.LimitListener) applied by the caller.
-func serve(ctx context.Context, l net.Listener, cfg ProxyConfig, drainTimeout time.Duration) {
+func Serve(ctx context.Context, l net.Listener, cfg Config, drainTimeout time.Duration) {
 	var wg sync.WaitGroup
 	go func() {
 		for {

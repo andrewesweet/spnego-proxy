@@ -10,11 +10,11 @@ import (
 	"time"
 )
 
-var logLevel = new(slog.LevelVar) // default Info
+var LogLevel = new(slog.LevelVar) // default Info
 
 // connectPortWildcard is the sentinel value meaning "allow all ports" in the
 // -connect-ports flag and connectPortAllowed logic.
-const connectPortWildcard = "*"
+const ConnectPortWildcard = "*"
 
 // copyBufPool pools 32 KiB buffers used by idleCopy to avoid a heap
 // allocation on every tunnel connection.
@@ -52,7 +52,7 @@ type ForwardingConfig struct {
 }
 
 // ProxyConfig groups the non-connection parameters for handleClient.
-type ProxyConfig struct {
+type Config struct {
 	Upstream     string
 	Provider     TokenProvider
 	Pseudonym    string
@@ -76,7 +76,7 @@ type TokenProvider interface {
 }
 
 // splitCSV splits a comma-separated string into trimmed, non-empty tokens.
-func splitCSV(s string) []string {
+func SplitCSV(s string) []string {
 	var out []string
 	for part := range strings.SplitSeq(s, ",") {
 		if part = strings.TrimSpace(part); part != "" {
@@ -88,12 +88,12 @@ func splitCSV(s string) []string {
 
 // parseAllowList parses a comma-separated string of IPs and CIDR ranges
 // into a slice of *net.IPNet entries for use with ipAllowed.
-func parseAllowList(s string) ([]*net.IPNet, error) {
+func ParseAllowList(s string) ([]*net.IPNet, error) {
 	if s == "" {
 		return nil, nil
 	}
 	var nets []*net.IPNet
-	for _, entry := range splitCSV(s) {
+	for _, entry := range SplitCSV(s) {
 		if strings.Contains(entry, "/") {
 			_, ipNet, err := net.ParseCIDR(entry)
 			if err != nil {
@@ -138,5 +138,5 @@ func ipAllowed(ip net.IP, allowList []*net.IPNet) bool {
 // connectPortAllowed reports whether port is in the allowed set.
 // An empty allowedPorts slice means all ports are permitted.
 func connectPortAllowed(port string, allowedPorts []string) bool {
-	return len(allowedPorts) == 0 || slices.ContainsFunc(allowedPorts, func(p string) bool { return p == connectPortWildcard || p == port })
+	return len(allowedPorts) == 0 || slices.ContainsFunc(allowedPorts, func(p string) bool { return p == ConnectPortWildcard || p == port })
 }

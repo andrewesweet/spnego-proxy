@@ -13,12 +13,13 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/andrewesweet/spnego-proxy/internal/proxy"
 	"golang.org/x/net/netutil"
 )
 
 func init() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
-		Level: logLevel,
+		Level: proxy.LogLevel,
 	})))
 }
 
@@ -40,7 +41,7 @@ func main() {
 	}
 
 	if c.Debug {
-		logLevel.Set(slog.LevelDebug)
+		proxy.LogLevel.Set(slog.LevelDebug)
 	}
 
 	if c.Addr == "" || c.Proxy == "" {
@@ -61,20 +62,20 @@ func main() {
 		slog.Error("failed to listen", "error", err, "addr", c.Addr)
 		os.Exit(1)
 	}
-	pseudonym := generateViaPseudonym()
+	pseudonym := proxy.GenerateViaPseudonym()
 
-	connectPorts := splitCSV(c.ConnectPorts)
+	connectPorts := proxy.SplitCSV(c.ConnectPorts)
 
-	allowList, err := parseAllowList(c.AllowedIPs)
+	allowList, err := proxy.ParseAllowList(c.AllowedIPs)
 	if err != nil {
 		slog.Error("invalid -allowed-ips", "error", err)
 		os.Exit(1)
 	}
 
-	noProxyPatterns := resolveNoProxy(c.NoProxy)
-	var noProxy *NoProxyMatcher
+	noProxyPatterns := proxy.ResolveNoProxy(c.NoProxy)
+	var noProxy *proxy.NoProxyMatcher
 	if noProxyPatterns != "" {
-		noProxy = NewNoProxyMatcher(noProxyPatterns)
+		noProxy = proxy.NewNoProxyMatcher(noProxyPatterns)
 		source := "flag"
 		if c.NoProxy == "" {
 			source = "env"
@@ -83,13 +84,13 @@ func main() {
 	}
 
 	// Build the upstream TLS config once at startup (avoids re-reading CA file per connection).
-	upstreamTLSCfg := UpstreamTLSConfig{
+	upstreamTLSCfg := proxy.UpstreamTLSConfig{
 		Enabled:            c.UpstreamTLS,
 		CAFile:             c.UpstreamCA,
 		InsecureSkipVerify: c.UpstreamTLSInsecure,
 		Dialer:             &net.Dialer{Timeout: c.DialTimeout},
 	}
-	if err := upstreamTLSCfg.buildTLSConfig(); err != nil {
+	if err := upstreamTLSCfg.BuildTLSConfig(); err != nil {
 		slog.Error("failed to build upstream TLS config", "error", err)
 		os.Exit(1)
 	}
@@ -97,7 +98,7 @@ func main() {
 		slog.Warn("upstream TLS certificate verification is disabled")
 	}
 
-	cfg := ProxyConfig{
+	cfg := proxy.Config{
 		Upstream:     c.Proxy,
 		Provider:     provider,
 		Pseudonym:    pseudonym,
@@ -108,7 +109,7 @@ func main() {
 		ConnectPorts: connectPorts,
 		AllowedIPs:   allowList,
 		NoProxy:      noProxy,
-		Forwarding: ForwardingConfig{
+		Forwarding: proxy.ForwardingConfig{
 			ForwardedEnabled:     c.Forwarded,
 			XForwardedForEnabled: c.XForwardedFor,
 		},
@@ -127,6 +128,6 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	serve(ctx, l, cfg, c.DrainTimeout)
+	proxy.Serve(ctx, l, cfg, c.DrainTimeout)
 	_ = provider.Close()
 }

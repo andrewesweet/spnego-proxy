@@ -77,7 +77,7 @@ func handleDialError(conn net.Conn, err error, target, clientAddr, path string) 
 // a different host are rejected with errMismatchedTarget so a smuggled
 // second request cannot ride the existing direct TCP connection to a
 // target it was never authorised for.
-func handleDirectHTTP(conn net.Conn, req *http.Request, reqReader *bufio.Reader, cfg ProxyConfig, clientAddr string) {
+func handleDirectHTTP(conn net.Conn, req *http.Request, reqReader *bufio.Reader, cfg Config, clientAddr string) {
 	targetConn, target, err := dialDirect(req.Host, "80", cfg.DialTimeout)
 	if err != nil {
 		handleDialError(conn, err, target, clientAddr, "HTTP")
@@ -173,7 +173,7 @@ func handleDirectHTTP(conn net.Conn, req *http.Request, reqReader *bufio.Reader,
 // bypassing the upstream proxy. Used for noproxy bypass of CONNECT requests.
 // Via is injected on the 200 response (not on req.Header, which is never
 // forwarded for CONNECT tunnels).
-func handleDirectConnect(conn net.Conn, req *http.Request, reqReader *bufio.Reader, cfg ProxyConfig, clientAddr string) {
+func handleDirectConnect(conn net.Conn, req *http.Request, reqReader *bufio.Reader, cfg Config, clientAddr string) {
 	targetConn, target, err := dialDirect(req.Host, "443", cfg.DialTimeout)
 	if err != nil {
 		handleDialError(conn, err, target, clientAddr, "CONNECT")

@@ -19,7 +19,7 @@ import (
 // acceptOneAndHandle starts a listener, accepts one connection, and runs
 // handleClient with the given config. Returns the listener address and a
 // channel that is closed when handleClient returns.
-func acceptOneAndHandle(t *testing.T, cfg ProxyConfig) (addr string, done <-chan struct{}) {
+func acceptOneAndHandle(t *testing.T, cfg Config) (addr string, done <-chan struct{}) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

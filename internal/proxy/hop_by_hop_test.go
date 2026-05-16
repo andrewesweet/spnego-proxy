@@ -912,7 +912,7 @@ func TestInjectVia_AppendsToExisting(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGenerateViaPseudonym_HasPrefix(t *testing.T) {
-	p := generateViaPseudonym()
+	p := GenerateViaPseudonym()
 	if !strings.HasPrefix(p, "spnego-proxy-") {
 		t.Errorf("pseudonym %q should have prefix %q", p, "spnego-proxy-")
 	}
@@ -921,7 +921,7 @@ func TestGenerateViaPseudonym_HasPrefix(t *testing.T) {
 func TestGenerateViaPseudonym_Unique(t *testing.T) {
 	seen := make(map[string]bool)
 	for range 100 {
-		p := generateViaPseudonym()
+		p := GenerateViaPseudonym()
 		if seen[p] {
 			t.Fatalf("duplicate pseudonym after %d iterations: %s", len(seen), p)
 		}

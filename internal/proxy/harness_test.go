@@ -171,14 +171,14 @@ type ProxyUnderTest struct {
 	// mu protects cfg so mutable fields (ConnectPorts, Forwarding) can
 	// be set after construction without a data race with acceptLoop.
 	mu  sync.RWMutex
-	cfg ProxyConfig
+	cfg Config
 
 	wg     sync.WaitGroup
 	closed chan struct{}
 }
 
 // getConfig returns a snapshot of the current ProxyConfig (thread-safe).
-func (p *ProxyUnderTest) getConfig() ProxyConfig {
+func (p *ProxyUnderTest) getConfig() Config {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.cfg
@@ -235,7 +235,7 @@ func (p *ProxyUnderTest) SetUpstreamTLS(cfg UpstreamTLSConfig) {
 	if cfg.Dialer == nil {
 		cfg.Dialer = p.cfg.UpstreamTLS.Dialer
 	}
-	if err := cfg.buildTLSConfig(); err != nil {
+	if err := cfg.BuildTLSConfig(); err != nil {
 		panic("SetUpstreamTLS: " + err.Error())
 	}
 	p.cfg.UpstreamTLS = cfg
@@ -254,7 +254,7 @@ func NewProxyUnderTest(t *testing.T, upstream string) *ProxyUnderTest {
 	p := &ProxyUnderTest{
 		listener: l,
 		Provider: provider,
-		cfg: ProxyConfig{
+		cfg: Config{
 			Upstream:    upstream,
 			Provider:    provider,
 			Pseudonym:   testPseudonym,
@@ -481,9 +481,9 @@ func waitForDone(t *testing.T, done <-chan struct{}) {
 // defaultTestConfig returns a ProxyConfig suitable for most tests. The
 // upstream address and provider are required; all other fields use sensible
 // defaults (testPseudonym, 5 s timeouts, no keep-alive).
-func defaultTestConfig(upstream string, provider TokenProvider) ProxyConfig {
+func defaultTestConfig(upstream string, provider TokenProvider) Config {
 	const dialTimeout = 5 * time.Second
-	return ProxyConfig{
+	return Config{
 		Upstream:    upstream,
 		Provider:    provider,
 		Pseudonym:   testPseudonym,

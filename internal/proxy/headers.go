@@ -81,7 +81,7 @@ func injectForwardingHeaders(req *http.Request, clientAddr string, fwdCfg Forwar
 // used in the Via header to identify this specific process. The format is
 // "spnego-proxy-<8-hex-chars>", providing 2^32 unique identifiers — sufficient
 // for loop detection across chains of spnego-proxy instances.
-func generateViaPseudonym() string {
+func GenerateViaPseudonym() string {
 	return "spnego-proxy-" + randomHex(4)
 }
 

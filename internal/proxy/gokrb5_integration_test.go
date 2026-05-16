@@ -139,7 +139,7 @@ func TestProxyChainWithRealToken(t *testing.T) {
 		if err != nil {
 			return
 		}
-		handleClient(conn, ProxyConfig{Upstream: upstream.Addr().String(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
+		handleClient(conn, Config{Upstream: upstream.Addr().String(), Provider: provider, Pseudonym: testPseudonym, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second})
 	}()
 
 	// Connect and send a request through the proxy.
@@ -291,7 +291,7 @@ func TestCircuitBreakerWithRealProvider(t *testing.T) {
 	// Phase 1: Verify successful token acquisition passes through.
 	provider, cleanup := startMockKDC(t, "testuser", "HTTP/proxy.test.realm.com")
 
-	cb := NewCircuitBreakerTokenProvider(provider, cbConsecutiveFailures, cbTimeout)
+	cb := NewCircuitBreakerTokenProvider(provider, CbConsecutiveFailures, CbTimeout)
 	token, err := cb.GetToken()
 	if err != nil {
 		cleanup()
@@ -327,10 +327,10 @@ func TestCircuitBreakerWithRealProvider(t *testing.T) {
 	}
 	defer func() { _ = failProvider.Close() }()
 
-	cb2 := NewCircuitBreakerTokenProvider(failProvider, cbConsecutiveFailures, cbTimeout)
+	cb2 := NewCircuitBreakerTokenProvider(failProvider, CbConsecutiveFailures, CbTimeout)
 
 	// Drive consecutive failures to trip the circuit breaker.
-	for i := range int(cbConsecutiveFailures) {
+	for i := range int(CbConsecutiveFailures) {
 		_, err := cb2.GetToken()
 		if err == nil {
 			t.Fatalf("expected error on call %d with closed KDC, got success", i+1)

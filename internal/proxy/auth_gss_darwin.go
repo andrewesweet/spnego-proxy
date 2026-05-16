@@ -74,7 +74,7 @@ func (g *GSSTokenProvider) Close() error {
 // newNativeTokenProvider on darwin uses the GSS-API framework.
 // It probes credentials at startup so the user gets an early warning
 // if kinit is needed, but a probe failure is not fatal.
-func newNativeTokenProvider(proxy, spn string) (TokenProvider, error) {
+func NewNativeTokenProvider(proxy, spn string) (TokenProvider, error) {
 	g, err := NewGSSTokenProvider(proxy, spn)
 	if err != nil {
 		return nil, err

@@ -35,7 +35,7 @@ func FuzzConnectPortChain(f *testing.F) {
 	f.Add("", "")
 
 	f.Fuzz(func(t *testing.T, authority, allowedCSV string) {
-		allowed := splitCSV(allowedCSV)
+		allowed := SplitCSV(allowedCSV)
 
 		_, port, err := net.SplitHostPort(authority)
 		if err != nil {
@@ -44,7 +44,7 @@ func FuzzConnectPortChain(f *testing.F) {
 
 		accepted := connectPortAllowed(port, allowed)
 
-		if accepted && len(allowed) > 0 && !slices.Contains(allowed, connectPortWildcard) {
+		if accepted && len(allowed) > 0 && !slices.Contains(allowed, ConnectPortWildcard) {
 			if !slices.Contains(allowed, port) {
 				t.Fatalf("port smuggled past gate: authority=%q port=%q allowed=%v accepted=true but port not listed",
 					authority, port, allowed)
@@ -71,7 +71,7 @@ func ipAllowRef(clientHost, allowCSV string) (decision bool, applicable bool) {
 	ca = ca.Unmap()
 
 	var prefixes []netip.Prefix
-	for _, tok := range splitCSV(allowCSV) {
+	for _, tok := range SplitCSV(allowCSV) {
 		if strings.Contains(tok, "/") {
 			p, e := netip.ParsePrefix(tok)
 			if e != nil || p.Addr().Is4In6() {
@@ -118,7 +118,7 @@ func FuzzIPAllowlistChain(f *testing.F) {
 		clientHost := extractHost(rawRemote)
 
 		// (1) Production chain never panics.
-		nets, perr := parseAllowList(allowCSV)
+		nets, perr := ParseAllowList(allowCSV)
 		prodIP := net.ParseIP(clientHost)
 		prodDecision := ipAllowed(prodIP, nets)
 

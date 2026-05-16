@@ -121,6 +121,6 @@ func (m *NoProxyMatcher) Match(host string) (matched bool, pattern string) {
 // resolveNoProxy returns the effective no-proxy value by applying the
 // following precedence: explicit flag value > NO_PROXY env var > no_proxy
 // env var. An empty string is returned when none of the sources is set.
-func resolveNoProxy(flagValue string) string {
+func ResolveNoProxy(flagValue string) string {
 	return cmp.Or(flagValue, os.Getenv("NO_PROXY"), os.Getenv("no_proxy"))
 }

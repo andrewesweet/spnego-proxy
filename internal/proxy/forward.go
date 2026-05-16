@@ -27,7 +27,7 @@ import (
 //
 // Noproxy matching and forwarding-header injection are NOT performed here;
 // they are caller-side routing decisions that vary by call site.
-func prepareForwardRequest(conn net.Conn, req *http.Request, cfg ProxyConfig, clientAddr string) (proceed bool, pe *proxyError) {
+func prepareForwardRequest(conn net.Conn, req *http.Request, cfg Config, clientAddr string) (proceed bool, pe *proxyError) {
 	// RFC 9110 §7.6.3: loop detection must run BEFORE sanitizeHopByHop so
 	// that a client sending "Connection: Via" cannot strip Via and bypass
 	// the check.
@@ -90,7 +90,7 @@ func connectionWillClose(req *http.Request, resp *http.Response) bool {
 // req, dials the upstream proxy, and enables TCP keepalive on both
 // sockets when configured. On any failure it writes a proxyError to conn
 // and returns nil. Returns the open upstream connection on success.
-func dialAndAuthUpstream(conn net.Conn, req *http.Request, cfg ProxyConfig, clientAddr string) net.Conn {
+func dialAndAuthUpstream(conn net.Conn, req *http.Request, cfg Config, clientAddr string) net.Conn {
 	token, terr := cfg.Provider.GetToken()
 	if terr != nil {
 		pe := tokenErrorToProxyError(terr)
@@ -123,7 +123,7 @@ func dialAndAuthUpstream(conn net.Conn, req *http.Request, cfg ProxyConfig, clie
 // non-connection parameters including upstream address, token provider,
 // timeouts, CONNECT port restrictions (D4, RFC 9110 §9.3.6), and
 // forwarding header injection (RFC 7239 Forwarded, X-Forwarded-For, etc.).
-func handleClient(conn net.Conn, cfg ProxyConfig) {
+func handleClient(conn net.Conn, cfg Config) {
 	defer func() { _ = conn.Close() }()
 	// Half-close the write half before the full close so the client
 	// reads EOF on the response stream rather than receiving a RST that
@@ -273,7 +273,7 @@ func handleClient(conn net.Conn, cfg ProxyConfig) {
 // A fresh connection is required because a CONNECT tunnel co-opts the
 // entire upstream connection for opaque bytes; it must not share with
 // prior keep-alive HTTP traffic on the same socket.
-func forwardConnectViaUpstream(conn net.Conn, req *http.Request, reqReader *bufio.Reader, cfg ProxyConfig, clientAddr string) {
+func forwardConnectViaUpstream(conn net.Conn, req *http.Request, reqReader *bufio.Reader, cfg Config, clientAddr string) {
 	injectForwardingHeaders(req, clientAddr, cfg.Forwarding)
 
 	proxyConn := dialAndAuthUpstream(conn, req, cfg, clientAddr)

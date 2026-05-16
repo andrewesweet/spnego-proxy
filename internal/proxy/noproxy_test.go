@@ -264,7 +264,7 @@ func TestNoProxyMatcher_BareStarMatchesAll(t *testing.T) {
 func TestResolveNoProxy_FlagTakesPrecedence(t *testing.T) {
 	t.Setenv("NO_PROXY", "env-no-proxy.com")
 	t.Setenv("no_proxy", "env-noproxy-lower.com")
-	got := resolveNoProxy("flag-value.com")
+	got := ResolveNoProxy("flag-value.com")
 	if got != "flag-value.com" {
 		t.Errorf("resolveNoProxy = %q, want %q", got, "flag-value.com")
 	}
@@ -273,7 +273,7 @@ func TestResolveNoProxy_FlagTakesPrecedence(t *testing.T) {
 func TestResolveNoProxy_EmptyFlagFallsToNO_PROXY(t *testing.T) {
 	t.Setenv("NO_PROXY", "from-NO_PROXY.com")
 	t.Setenv("no_proxy", "from-no_proxy.com")
-	got := resolveNoProxy("")
+	got := ResolveNoProxy("")
 	if got != "from-NO_PROXY.com" {
 		t.Errorf("resolveNoProxy = %q, want %q", got, "from-NO_PROXY.com")
 	}
@@ -282,7 +282,7 @@ func TestResolveNoProxy_EmptyFlagFallsToNO_PROXY(t *testing.T) {
 func TestResolveNoProxy_NO_PROXYEmptyFallsToLowercase(t *testing.T) {
 	t.Setenv("NO_PROXY", "")
 	t.Setenv("no_proxy", "from-no_proxy.com")
-	got := resolveNoProxy("")
+	got := ResolveNoProxy("")
 	if got != "from-no_proxy.com" {
 		t.Errorf("resolveNoProxy = %q, want %q", got, "from-no_proxy.com")
 	}
@@ -291,7 +291,7 @@ func TestResolveNoProxy_NO_PROXYEmptyFallsToLowercase(t *testing.T) {
 func TestResolveNoProxy_AllEmptyReturnsEmpty(t *testing.T) {
 	t.Setenv("NO_PROXY", "")
 	t.Setenv("no_proxy", "")
-	got := resolveNoProxy("")
+	got := ResolveNoProxy("")
 	if got != "" {
 		t.Errorf("resolveNoProxy = %q, want empty string", got)
 	}
@@ -300,7 +300,7 @@ func TestResolveNoProxy_AllEmptyReturnsEmpty(t *testing.T) {
 func TestResolveNoProxy_OnlyFlagSet(t *testing.T) {
 	t.Setenv("NO_PROXY", "")
 	t.Setenv("no_proxy", "")
-	got := resolveNoProxy("only-flag.com")
+	got := ResolveNoProxy("only-flag.com")
 	if got != "only-flag.com" {
 		t.Errorf("resolveNoProxy = %q, want %q", got, "only-flag.com")
 	}

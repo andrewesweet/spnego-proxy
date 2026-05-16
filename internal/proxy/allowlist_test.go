@@ -22,7 +22,7 @@ func TestParseAllowedIPs(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := parseAllowList(tc.input)
+			result, err := ParseAllowList(tc.input)
 			if tc.wantErr {
 				if err == nil {
 					t.Error("expected error, got nil")
@@ -40,7 +40,7 @@ func TestParseAllowedIPs(t *testing.T) {
 }
 
 func TestIPAllowed(t *testing.T) {
-	allowList, err := parseAllowList("192.168.1.0/24,10.0.0.1")
+	allowList, err := ParseAllowList("192.168.1.0/24,10.0.0.1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestAllowlistRejectsUnlisted(t *testing.T) {
 	raw := "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n"
 	resp, _ := proxyRawRoundTrip(t, raw, func(p *ProxyUnderTest) {
 		// Test client connects from 127.0.0.1. Allow only 10.0.0.1.
-		list, _ := parseAllowList("10.0.0.1")
+		list, _ := ParseAllowList("10.0.0.1")
 		p.SetAllowedIPs(list)
 	})
 	defer func() { _ = resp.Body.Close() }()
@@ -83,7 +83,7 @@ func TestAllowlistRejectsUnlisted(t *testing.T) {
 func TestAllowlistAllowsLocalhost(t *testing.T) {
 	raw := "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n"
 	resp, _ := proxyRawRoundTrip(t, raw, func(p *ProxyUnderTest) {
-		list, _ := parseAllowList("127.0.0.1")
+		list, _ := ParseAllowList("127.0.0.1")
 		p.SetAllowedIPs(list)
 	})
 	defer func() { _ = resp.Body.Close() }()
