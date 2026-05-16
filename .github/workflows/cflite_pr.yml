@@ -1,0 +1,42 @@
+name: ClusterFuzzLite PR
+
+# Code-change fuzzing on pull requests. Fork-safe: uses `pull_request` (never
+# `pull_request_target`), the read-only default GITHUB_TOKEN, and NO storage
+# repo / deploy key, so a malicious fork PR cannot reach the corpus repo.
+# A discovered crash fails this check and uploads the reproducer as an artifact.
+#
+# No explicit actions/checkout: the ClusterFuzzLite build_fuzzers action manages
+# its own checkout (base + PR refs) to diff changed code for code-change mode.
+
+on:
+  pull_request:
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.clusterfuzzlite/**'
+      - '.github/workflows/cflite_pr.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  pr-fuzzing:
+    name: code-change
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build fuzzers
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: go
+          sanitizer: address
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run fuzzers
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          language: go
+          fuzz-seconds: 600
+          mode: code-change
+          sanitizer: address

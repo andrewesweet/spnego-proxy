@@ -1,0 +1,152 @@
+name: ClusterFuzzLite Batch
+
+# Nightly deep fuzzing. Three sequential jobs share one storage repo:
+#   batch  -> grows the corpus (fuzz-seconds 3600 across all targets)
+#   prune  -> trims redundant corpus entries (mandatory companion to batch)
+#   coverage -> publishes an HTML report to the storage repo's gh-pages branch
+# `needs:` guarantees ordering; the cflite-storage concurrency group serialises
+# against the continuous-build workflow so corpus writes never race.
+# Storage auth is an SSH deploy key (mirrors update-homebrew.yml), never a PAT.
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cflite-storage
+  cancel-in-progress: false
+
+env:
+  STORAGE_REPO: git@github.com:andrewesweet/spnego-proxy-fuzz-corpus.git
+
+jobs:
+  batch:
+    name: batch fuzzing
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up SSH for storage deploy key
+        env:
+          DEPLOY_KEY: ${{ secrets.FUZZ_CORPUS_DEPLOY_KEY }}
+        run: |
+          if [ -z "${DEPLOY_KEY}" ]; then
+            echo "::error::FUZZ_CORPUS_DEPLOY_KEY secret is not configured"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          echo "${DEPLOY_KEY}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          git config --global core.sshCommand "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes"
+
+      - name: Build fuzzers
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: go
+          sanitizer: address
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          storage-repo: ${{ env.STORAGE_REPO }}
+          storage-repo-branch: main
+
+      - name: Run batch fuzzers
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          language: go
+          mode: batch
+          fuzz-seconds: 3600
+          sanitizer: address
+          storage-repo: ${{ env.STORAGE_REPO }}
+          storage-repo-branch: main
+
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
+
+  prune:
+    name: corpus pruning
+    needs: batch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up SSH for storage deploy key
+        env:
+          DEPLOY_KEY: ${{ secrets.FUZZ_CORPUS_DEPLOY_KEY }}
+        run: |
+          if [ -z "${DEPLOY_KEY}" ]; then
+            echo "::error::FUZZ_CORPUS_DEPLOY_KEY secret is not configured"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          echo "${DEPLOY_KEY}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          git config --global core.sshCommand "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes"
+
+      - name: Build fuzzers
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: go
+          sanitizer: address
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          storage-repo: ${{ env.STORAGE_REPO }}
+          storage-repo-branch: main
+
+      - name: Prune corpus
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          language: go
+          mode: prune
+          sanitizer: address
+          storage-repo: ${{ env.STORAGE_REPO }}
+          storage-repo-branch: main
+
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
+
+  coverage:
+    name: coverage report
+    needs: prune
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up SSH for storage deploy key
+        env:
+          DEPLOY_KEY: ${{ secrets.FUZZ_CORPUS_DEPLOY_KEY }}
+        run: |
+          if [ -z "${DEPLOY_KEY}" ]; then
+            echo "::error::FUZZ_CORPUS_DEPLOY_KEY secret is not configured"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          echo "${DEPLOY_KEY}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          git config --global core.sshCommand "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes"
+
+      - name: Build fuzzers (coverage)
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: go
+          sanitizer: coverage
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          storage-repo: ${{ env.STORAGE_REPO }}
+          storage-repo-branch: main
+
+      - name: Generate coverage report
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          language: go
+          mode: coverage
+          sanitizer: coverage
+          storage-repo: ${{ env.STORAGE_REPO }}
+          storage-repo-branch: main
+          storage-repo-branch-coverage: gh-pages
+
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
