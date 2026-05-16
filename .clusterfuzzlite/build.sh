@@ -18,18 +18,20 @@ cd "$SRC/spnego-proxy"
 go install github.com/AdamKorcz/go-118-fuzz-build@latest
 go get github.com/AdamKorcz/go-118-fuzz-build/testing
 
-MODULE=github.com/andrewesweet/spnego-proxy
+# Fuzz targets live in package proxy at internal/proxy (extracted from
+# package main in PR #225 so ClusterFuzzLite can import them).
+PKG=github.com/andrewesweet/spnego-proxy/internal/proxy
 
-compile_native_go_fuzzer "$MODULE" FuzzNoProxyMatch            fuzz_no_proxy_match
-compile_native_go_fuzzer "$MODULE" FuzzUpstreamResponseFraming fuzz_upstream_response_framing
-compile_native_go_fuzzer "$MODULE" FuzzConnectPortChain        fuzz_connect_port_chain
-compile_native_go_fuzzer "$MODULE" FuzzSameHost                fuzz_same_host
-compile_native_go_fuzzer "$MODULE" FuzzIPAllowlistChain        fuzz_ip_allowlist_chain
-compile_native_go_fuzzer "$MODULE" FuzzContentLengthValues     fuzz_content_length_values
-compile_native_go_fuzzer "$MODULE" FuzzHeaderByteValidators    fuzz_header_byte_validators
+compile_native_go_fuzzer "$PKG" FuzzNoProxyMatch            fuzz_no_proxy_match
+compile_native_go_fuzzer "$PKG" FuzzUpstreamResponseFraming fuzz_upstream_response_framing
+compile_native_go_fuzzer "$PKG" FuzzConnectPortChain        fuzz_connect_port_chain
+compile_native_go_fuzzer "$PKG" FuzzSameHost                fuzz_same_host
+compile_native_go_fuzzer "$PKG" FuzzIPAllowlistChain        fuzz_ip_allowlist_chain
+compile_native_go_fuzzer "$PKG" FuzzContentLengthValues     fuzz_content_length_values
+compile_native_go_fuzzer "$PKG" FuzzHeaderByteValidators    fuzz_header_byte_validators
 
 # Carry the committed Go regression seed into the ClusterFuzzLite corpus so a
 # fresh storage repo starts from the known FuzzNoProxyMatch reproducer.
-if [ -d testdata/fuzz/FuzzNoProxyMatch ]; then
-  zip -j "$OUT/fuzz_no_proxy_match_seed_corpus.zip" testdata/fuzz/FuzzNoProxyMatch/*
+if [ -d internal/proxy/testdata/fuzz/FuzzNoProxyMatch ]; then
+  zip -j "$OUT/fuzz_no_proxy_match_seed_corpus.zip" internal/proxy/testdata/fuzz/FuzzNoProxyMatch/*
 fi
