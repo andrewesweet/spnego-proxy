@@ -2,7 +2,9 @@ package main
 
 import (
 	"net"
+	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -47,6 +49,90 @@ func FuzzConnectPortChain(f *testing.F) {
 				t.Fatalf("port smuggled past gate: authority=%q port=%q allowed=%v accepted=true but port not listed",
 					authority, port, allowed)
 			}
+		}
+	})
+}
+
+// ipAllowRef is an independent netip-based re-derivation of the allowlist
+// membership decision under the ratified Option A policy (RFC 4291): the
+// client address is Unmap-ed so an IPv4-in-IPv6 form is the same identity as
+// the bare IPv4 address.
+//
+// To keep the oracle sound it is scoped to a grammar where net and netip agree
+// unambiguously: allowlist tokens must be pure (non IPv4-in-IPv6) IPs or CIDRs.
+// A mapped form on the *client* side is fully exercised — that is the
+// security-critical attacker-controlled input. applicable=false means the
+// input is outside the sound differential grammar and no claim is made.
+func ipAllowRef(clientHost, allowCSV string) (decision bool, applicable bool) {
+	ca, err := netip.ParseAddr(clientHost)
+	if err != nil {
+		return false, false
+	}
+	ca = ca.Unmap()
+
+	var prefixes []netip.Prefix
+	for _, tok := range splitCSV(allowCSV) {
+		if strings.Contains(tok, "/") {
+			p, e := netip.ParsePrefix(tok)
+			if e != nil || p.Addr().Is4In6() {
+				return false, false
+			}
+			prefixes = append(prefixes, p.Masked())
+		} else {
+			a, e := netip.ParseAddr(tok)
+			if e != nil || a.Is4In6() {
+				return false, false
+			}
+			prefixes = append(prefixes, netip.PrefixFrom(a, a.BitLen()))
+		}
+	}
+	if len(prefixes) == 0 {
+		return false, false
+	}
+	for _, p := range prefixes {
+		if p.Contains(ca) {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+// FuzzIPAllowlistChain mirrors the production client-IP gate
+// (extractHost(RemoteAddr) -> net.ParseIP -> ipAllowed over parseAllowList)
+// and asserts the membership decision matches an independent netip
+// re-derivation under Option A. A divergence is a real allowlist
+// bypass/escape (an attacker IP wrongly admitted, or a permitted client
+// wrongly denied).
+func FuzzIPAllowlistChain(f *testing.F) {
+	f.Add("1.2.3.4:5", "1.2.3.0/24")
+	f.Add("::ffff:127.0.0.1", "127.0.0.0/8")
+	f.Add("[::ffff:1.2.3.4]:80", "1.2.3.4/32")
+	f.Add("10.0.0.1", "10.0.0.0/8")
+	f.Add("not-an-ip", "0.0.0.0/0")
+	f.Add("[fe80::1%eth0]:80", "fe80::/10")
+	f.Add("", "1.2.3.4")
+	f.Add("192.168.1.5:9", "192.168.1.5")
+	f.Add("2001:db8::1", "2001:db8::/32")
+
+	f.Fuzz(func(t *testing.T, rawRemote, allowCSV string) {
+		clientHost := extractHost(rawRemote)
+
+		// (1) Production chain never panics.
+		nets, perr := parseAllowList(allowCSV)
+		prodIP := net.ParseIP(clientHost)
+		prodDecision := ipAllowed(prodIP, nets)
+
+		// (2) Sound differential, gated on both sides fully parsing.
+		if perr != nil || prodIP == nil {
+			return
+		}
+		refDecision, applicable := ipAllowRef(clientHost, allowCSV)
+		if !applicable {
+			return
+		}
+		if prodDecision != refDecision {
+			t.Fatalf("allowlist decision divergence: clientHost=%q allow=%q prod=%v ref=%v",
+				clientHost, allowCSV, prodDecision, refDecision)
 		}
 	})
 }
