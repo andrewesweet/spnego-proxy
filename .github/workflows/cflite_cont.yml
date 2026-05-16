@@ -1,0 +1,62 @@
+name: ClusterFuzzLite Continuous Build
+
+# Rebuilds fuzzers on every push to master and syncs the corpus to the separate
+# storage repo. Storage auth is an SSH deploy key (mirrors update-homebrew.yml),
+# never a PAT — no token is embedded in a git URL or leaked to logs.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.clusterfuzzlite/**'
+      - '.github/workflows/cflite_cont.yml'
+  # On-demand: fast SSH-deploy-key / storage round-trip check (build + corpus
+  # sync only, no fuzzing) without waiting for a push to master.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialise every storage-repo writer (this + the nightly batch) so corpus
+# pushes never race on the storage branch.
+concurrency:
+  group: cflite-storage
+  cancel-in-progress: false
+
+env:
+  STORAGE_REPO: git@github.com:andrewesweet/spnego-proxy-fuzz-corpus.git
+
+jobs:
+  continuous-build:
+    name: build + seed corpus
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up SSH for storage deploy key
+        env:
+          DEPLOY_KEY: ${{ secrets.FUZZ_CORPUS_DEPLOY_KEY }}
+        run: |
+          if [ -z "${DEPLOY_KEY}" ]; then
+            echo "::error::FUZZ_CORPUS_DEPLOY_KEY secret is not configured"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          echo "${DEPLOY_KEY}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          git config --global core.sshCommand "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes"
+
+      - name: Build fuzzers and sync corpus
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: go
+          sanitizer: address
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          storage-repo: ${{ env.STORAGE_REPO }}
+          storage-repo-branch: main
+
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

@@ -134,7 +134,16 @@ Key details for AI context:
   `[]byte`/`string`/scalars (OSS-Fuzz portable)
 - Real bug → `fix:` + commit reproducer as regression seed. Unsound oracle →
   tighten predicate and delete the noise reproducer (never commit it)
-- Add every new `Fuzz*` name to the matrix in `.github/workflows/fuzz.yml`
+- ClusterFuzzLite runs the same targets: `cflite_pr.yml` (PR code-change,
+  fork-safe, no storage), `cflite_cont.yml` (corpus seed on push to master),
+  `cflite_batch.yml` (nightly batch → prune → coverage). Build integration in
+  `.clusterfuzzlite/{project.yaml,Dockerfile,build.sh}`; corpus/crashes/coverage
+  in separate repo `andrewesweet/spnego-proxy-fuzz-corpus` via the
+  `FUZZ_CORPUS_DEPLOY_KEY` SSH deploy key (never a PAT)
+- Register every new `Fuzz*` with a `compile_native_go_fuzzer` line in
+  `.clusterfuzzlite/build.sh`. Legacy `.github/workflows/fuzz.yml` retained
+  until the CFL batch is validated, then removed; while present, add the name
+  to its matrix too
 
 ## Release Process
 

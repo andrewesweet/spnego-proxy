@@ -1,0 +1,5 @@
+language: go
+# AddressSanitizer is the only sanitizer valid for Go. Coverage is produced
+# separately via run_fuzzers `mode: coverage` (see .github/workflows/cflite_batch.yml).
+sanitizers:
+  - address
