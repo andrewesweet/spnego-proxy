@@ -39,7 +39,7 @@ jobs:
 
       - name: Generate release notes from changelog
         id: changelog
-        uses: orhun/git-cliff-action@c93ef52f3d0ddcdcc9bd5447d98d458a11cd4f72 # v4.7.1
+        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4.8.0
         with:
           args: --latest --strip header
         env:
@@ -84,7 +84,7 @@ jobs:
       # re-implement that behavior with no security benefit, since the
       # action runs pinned to a commit SHA.
       - name: Create draft release with assets
-        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1 # zizmor: ignore[superfluous-actions]
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v2.6.1 # zizmor: ignore[superfluous-actions]
         with:
           tag_name: ${{ github.ref_name }}
           draft: true
