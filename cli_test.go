@@ -23,15 +23,17 @@ const minimalKrb5Conf = `[libdefaults]
   }
 `
 
-// writeFile0600 writes content to a temp file and forces 0600 permissions
-// (os.WriteFile is subject to umask, so chmod after).
-func writeFile0600(t *testing.T, name, content string) string {
+// writeFile writes content to a temp file, then chmods it to perm. The file
+// is always created at 0600 and the exact mode applied via os.Chmod (a literal
+// perm arg to os.WriteFile/os.Chmod trips gosec G306/G302; a variable does
+// not — same pattern as internal/proxy's writePasswordFile helper).
+func writeFile(t *testing.T, name, content string, perm os.FileMode) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write %s: %v", name, err)
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	if err := os.Chmod(path, perm); err != nil {
 		t.Fatalf("chmod %s: %v", name, err)
 	}
 	return path
@@ -157,7 +159,7 @@ func TestBuildProviderGokrb5MissingConfigRealm(t *testing.T) {
 }
 
 func TestBuildProviderGokrb5BadPasswordFile(t *testing.T) {
-	cfg := writeFile0600(t, "krb5.conf", minimalKrb5Conf)
+	cfg := writeFile(t, "krb5.conf", minimalKrb5Conf, 0o600)
 	p, err := buildProvider(&cliConfig{
 		User:         "alice",
 		Realm:        "TEST.REALM",
@@ -181,14 +183,8 @@ func TestBuildProviderGokrb5InsecurePasswordPerms(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX permission bits not enforced on Windows")
 	}
-	cfg := writeFile0600(t, "krb5.conf", minimalKrb5Conf)
-	pw := filepath.Join(t.TempDir(), "pw")
-	if err := os.WriteFile(pw, []byte("secret\n"), 0o644); err != nil {
-		t.Fatalf("write pw: %v", err)
-	}
-	if err := os.Chmod(pw, 0o644); err != nil {
-		t.Fatalf("chmod pw: %v", err)
-	}
+	cfg := writeFile(t, "krb5.conf", minimalKrb5Conf, 0o600)
+	pw := writeFile(t, "pw", "secret\n", 0o644)
 	_, err := buildProvider(&cliConfig{
 		User: "alice", Realm: "TEST.REALM", CfgFile: cfg, PasswordFile: pw,
 	})
@@ -202,8 +198,8 @@ func TestBuildProviderGokrb5InsecurePasswordPerms(t *testing.T) {
 // account-lockout defence (circuit_breaker.go), so a regression that returned
 // the bare provider would be a security regression, not just a behaviour change.
 func TestBuildProviderWrapsInCircuitBreaker(t *testing.T) {
-	cfg := writeFile0600(t, "krb5.conf", minimalKrb5Conf)
-	pw := writeFile0600(t, "pw", "secret\n")
+	cfg := writeFile(t, "krb5.conf", minimalKrb5Conf, 0o600)
+	pw := writeFile(t, "pw", "secret\n", 0o600)
 	p, err := buildProvider(&cliConfig{
 		User:         "alice",
 		Realm:        "TEST.REALM",
