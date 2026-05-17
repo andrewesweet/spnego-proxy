@@ -102,7 +102,7 @@ func (s *ClientSession) forwardDirect(req *http.Request) {
 				slog.Debug("noproxy keep-alive loop ended", "error", rerr, "target", target, "iter", iter, "client_addr", s.clientAddr)
 				return
 			}
-			proceed, pe := prepareForwardRequest(s.conn, nextReq, s.cfg, s.clientAddr)
+			proceed, pe := s.validateRequest(nextReq)
 			if !proceed {
 				if pe != nil {
 					writeHTTPError(s.conn, pe)

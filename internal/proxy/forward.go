@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// prepareForwardRequest runs the per-request validation pipeline shared by
+// validateRequest runs the per-request validation pipeline shared by
 // every iteration of the client-facing keep-alive loop (issue #215). It
 // performs, in order: Via loop detection, CONNECT port allowlist,
 // Max-Forwards decrement (with local response for the terminal case), and
@@ -27,24 +27,24 @@ import (
 //
 // Noproxy matching and forwarding-header injection are NOT performed here;
 // they are caller-side routing decisions that vary by call site.
-func prepareForwardRequest(conn net.Conn, req *http.Request, cfg Config, clientAddr string) (proceed bool, pe *proxyError) {
+func (s *ClientSession) validateRequest(req *http.Request) (proceed bool, pe *proxyError) {
 	// RFC 9110 §7.6.3: loop detection must run BEFORE sanitizeHopByHop so
 	// that a client sending "Connection: Via" cannot strip Via and bypass
 	// the check.
-	if prior := req.Header.Get(headerVia); prior != "" && strings.Contains(prior, cfg.Pseudonym) {
-		slog.Warn("proxy loop detected", "via", prior, "pseudonym", cfg.Pseudonym, "client_addr", clientAddr, "method", req.Method, "host", req.Host)
+	if prior := req.Header.Get(headerVia); prior != "" && strings.Contains(prior, s.cfg.Pseudonym) {
+		slog.Warn("proxy loop detected", "via", prior, "pseudonym", s.cfg.Pseudonym, "client_addr", s.clientAddr, "method", req.Method, "host", req.Host)
 		return false, errProxyLoopDetected
 	}
 
 	// D4 (RFC 9110 §9.3.6): restrict CONNECT to allowed ports.
-	if req.Method == http.MethodConnect && len(cfg.ConnectPorts) > 0 {
+	if req.Method == http.MethodConnect && len(s.cfg.ConnectPorts) > 0 {
 		_, port, err := net.SplitHostPort(req.Host)
 		if err != nil {
-			slog.Debug("CONNECT host has no explicit port, defaulting to 443", "host", req.Host, "error", err, "client_addr", clientAddr)
+			slog.Debug("CONNECT host has no explicit port, defaulting to 443", "host", req.Host, "error", err, "client_addr", s.clientAddr)
 			port = "443"
 		}
-		if !connectPortAllowed(port, cfg.ConnectPorts) {
-			slog.Warn("CONNECT port not allowed", "host", req.Host, "port", port, "client_addr", clientAddr)
+		if !connectPortAllowed(port, s.cfg.ConnectPorts) {
+			slog.Warn("CONNECT port not allowed", "host", req.Host, "port", port, "client_addr", s.clientAddr)
 			return false, errForbiddenPort
 		}
 	}
@@ -55,10 +55,10 @@ func prepareForwardRequest(conn net.Conn, req *http.Request, cfg Config, clientA
 			n, err := strconv.Atoi(mf)
 			switch {
 			case err != nil:
-				slog.Debug("non-numeric Max-Forwards value, forwarding unmodified", "max_forwards", mf, "client_addr", clientAddr)
+				slog.Debug("non-numeric Max-Forwards value, forwarding unmodified", "max_forwards", mf, "client_addr", s.clientAddr)
 			case n <= 0:
-				slog.Debug("Max-Forwards: 0, responding locally", "method", req.Method, "client_addr", clientAddr)
-				writeMaxForwardsResponse(conn, req)
+				slog.Debug("Max-Forwards: 0, responding locally", "method", req.Method, "client_addr", s.clientAddr)
+				writeMaxForwardsResponse(s.conn, req)
 				return false, nil
 			default:
 				req.Header.Set(headerMaxForwards, strconv.Itoa(n-1))
@@ -199,7 +199,7 @@ func (s *ClientSession) run() {
 			return
 		}
 
-		proceed, pe := prepareForwardRequest(s.conn, req, s.cfg, s.clientAddr)
+		proceed, pe := s.validateRequest(req)
 		if !proceed {
 			if pe != nil {
 				writeHTTPError(s.conn, pe)
