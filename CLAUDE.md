@@ -138,8 +138,10 @@ Key details for AI context:
   fork-safe, no storage), `cflite_cont.yml` (corpus seed on push to master),
   `cflite_batch.yml` (nightly batch → prune → coverage). Build integration in
   `.clusterfuzzlite/{project.yaml,Dockerfile,build.sh}`; corpus/crashes/coverage
-  in separate repo `andrewesweet/spnego-proxy-fuzz-corpus` via the
-  `FUZZ_CORPUS_DEPLOY_KEY` SSH deploy key (never a PAT)
+  in separate repo `andrewesweet/spnego-proxy-fuzz-corpus`. CFL clones the
+  storage repo inside the OSS-Fuzz container (no ssh there), so auth is a
+  fine-grained PAT scoped to ONLY that repo (contents RW), secret
+  `FUZZ_CORPUS_TOKEN` — not an SSH deploy key
 - Register every new `Fuzz*` with a `compile_native_go_fuzzer` line in
   `.clusterfuzzlite/build.sh`. Legacy `.github/workflows/fuzz.yml` retained
   until the CFL batch is validated, then removed; while present, add the name
