@@ -100,7 +100,7 @@ func hasForbiddenFieldValueByte(v string) bool {
 // Content-Length values per RFC 9112 §6.1. It returns a non-nil *proxyError
 // when the response must be rejected with 502.
 func validateResponseContentLength(resp *http.Response) *proxyError {
-	clValues := resp.Header["Content-Length"]
+	clValues := resp.Header[headerContentLength]
 	if len(clValues) == 0 {
 		return nil
 	}
@@ -191,9 +191,9 @@ func readUpstreamResponse(upstreamReader *bufio.Reader, req *http.Request, pseud
 
 	// RFC 9112 §6.1: if both Transfer-Encoding and Content-Length
 	// are present in the response, remove Content-Length.
-	if cl := resp.Header.Get("Content-Length"); len(resp.TransferEncoding) > 0 && cl != "" {
+	if cl := resp.Header.Get(headerContentLength); len(resp.TransferEncoding) > 0 && cl != "" {
 		logTECLConflict("response", resp.TransferEncoding, cl)
-		resp.Header.Del("Content-Length")
+		resp.Header.Del(headerContentLength)
 		// Reset to -1 so resp.Write uses chunked framing instead
 		// of a fixed-length body derived from the removed header.
 		resp.ContentLength = -1
@@ -202,7 +202,7 @@ func readUpstreamResponse(upstreamReader *bufio.Reader, req *http.Request, pseud
 	// B3 (RFC 9110 §11.7.2): Proxy-Authenticate is hop-by-hop — it applies
 	// only between the client and the next inbound proxy. Strip it before
 	// relaying the response downstream.
-	resp.Header.Del("Proxy-Authenticate")
+	resp.Header.Del(headerProxyAuthenticate)
 
 	// RFC 9110 §7.6.3: a forward proxy MUST add Via to responses.
 	injectVia(resp.Header, resp.Proto, pseudonym)

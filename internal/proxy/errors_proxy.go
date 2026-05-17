@@ -147,9 +147,9 @@ func writeHTTPError(conn net.Conn, pe *proxyError) {
 	body := pe.body()
 	// RFC 9209 Proxy-Status header with RFC 8941 Structured Fields syntax.
 	header := http.Header{
-		"Content-Type": {"text/plain; charset=utf-8"},
-		"Connection":   {"close"},
-		"Proxy-Status": {"spnego-proxy; error=" + pe.errorType},
+		headerContentType: {contentTypeTextUTF8},
+		headerConnection:  {connectionClose},
+		headerProxyStatus: {proxyStatusPrefix + pe.errorType},
 	}
 
 	resp := &http.Response{

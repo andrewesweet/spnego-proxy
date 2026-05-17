@@ -31,7 +31,7 @@ func prepareForwardRequest(conn net.Conn, req *http.Request, cfg Config, clientA
 	// RFC 9110 §7.6.3: loop detection must run BEFORE sanitizeHopByHop so
 	// that a client sending "Connection: Via" cannot strip Via and bypass
 	// the check.
-	if prior := req.Header.Get("Via"); prior != "" && strings.Contains(prior, cfg.Pseudonym) {
+	if prior := req.Header.Get(headerVia); prior != "" && strings.Contains(prior, cfg.Pseudonym) {
 		slog.Warn("proxy loop detected", "via", prior, "pseudonym", cfg.Pseudonym, "client_addr", clientAddr, "method", req.Method, "host", req.Host)
 		return false, errProxyLoopDetected
 	}
@@ -51,7 +51,7 @@ func prepareForwardRequest(conn net.Conn, req *http.Request, cfg Config, clientA
 
 	// G1 (RFC 9110 §7.6.2): TRACE/OPTIONS Max-Forwards.
 	if req.Method == http.MethodTrace || req.Method == http.MethodOptions {
-		if mf := req.Header.Get("Max-Forwards"); mf != "" {
+		if mf := req.Header.Get(headerMaxForwards); mf != "" {
 			n, err := strconv.Atoi(mf)
 			switch {
 			case err != nil:
@@ -61,7 +61,7 @@ func prepareForwardRequest(conn net.Conn, req *http.Request, cfg Config, clientA
 				writeMaxForwardsResponse(conn, req)
 				return false, nil
 			default:
-				req.Header.Set("Max-Forwards", strconv.Itoa(n-1))
+				req.Header.Set(headerMaxForwards, strconv.Itoa(n-1))
 			}
 		}
 	}
@@ -98,7 +98,7 @@ func dialAndAuthUpstream(conn net.Conn, req *http.Request, cfg Config, clientAdd
 		writeHTTPError(conn, pe)
 		return nil
 	}
-	req.Header.Set("Proxy-Authorization", "Negotiate "+token)
+	req.Header.Set(headerProxyAuthorization, negotiateScheme+token)
 
 	proxyConn, derr := dialUpstream(cfg.Upstream, cfg.UpstreamTLS)
 	if derr != nil {
@@ -232,7 +232,7 @@ func handleClient(conn net.Conn, cfg Config) {
 		}
 		injectVia(req.Header, req.Proto, cfg.Pseudonym)
 
-		slog.Debug("proxy request", "method", req.Method, "uri", req.RequestURI, "proto", req.Proto, "headers", len(req.Header), "client_addr", clientAddr, "upstream_addr", cfg.Upstream, "via", req.Header.Get("Via"), "iter", iter)
+		slog.Debug("proxy request", "method", req.Method, "uri", req.RequestURI, "proto", req.Proto, "headers", len(req.Header), "client_addr", clientAddr, "upstream_addr", cfg.Upstream, "via", req.Header.Get(headerVia), "iter", iter)
 		if err := req.WriteProxy(proxyConn); err != nil {
 			slog.Error("failed to write request to proxy", "error", err, "error_type", errConnectionTerminated.errorType, "client_addr", clientAddr, "upstream_addr", cfg.Upstream, "method", req.Method, "host", req.Host)
 			writeHTTPError(conn, errConnectionTerminated)
@@ -285,7 +285,7 @@ func forwardConnectViaUpstream(conn net.Conn, req *http.Request, reqReader *bufi
 	defer func() { _ = proxyConn.Close() }()
 	injectVia(req.Header, req.Proto, cfg.Pseudonym)
 
-	slog.Debug("proxy request", "method", req.Method, "uri", req.RequestURI, "proto", req.Proto, "headers", len(req.Header), "client_addr", clientAddr, "upstream_addr", cfg.Upstream, "via", req.Header.Get("Via"))
+	slog.Debug("proxy request", "method", req.Method, "uri", req.RequestURI, "proto", req.Proto, "headers", len(req.Header), "client_addr", clientAddr, "upstream_addr", cfg.Upstream, "via", req.Header.Get(headerVia))
 	if err := req.WriteProxy(proxyConn); err != nil {
 		slog.Error("failed to write request to proxy", "error", err, "error_type", errConnectionTerminated.errorType, "client_addr", clientAddr, "upstream_addr", cfg.Upstream, "method", req.Method, "host", req.Host)
 		writeHTTPError(conn, errConnectionTerminated)
