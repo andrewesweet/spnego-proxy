@@ -15,7 +15,9 @@ import (
 // (netutil.LimitListener) applied by the caller.
 func Serve(ctx context.Context, l net.Listener, cfg Config, drainTimeout time.Duration) {
 	var wg sync.WaitGroup
+	acceptDone := make(chan struct{})
 	go func() {
+		defer close(acceptDone)
 		for {
 			conn, err := l.Accept()
 			if err != nil {
@@ -36,6 +38,10 @@ func Serve(ctx context.Context, l net.Listener, cfg Config, drainTimeout time.Du
 	<-ctx.Done()
 	slog.Info("shutting down, draining connections...")
 	_ = l.Close()
+	// Wait for the accept loop to observe the closed listener and stop
+	// before draining: this guarantees no further wg.Go can race with the
+	// wg.Wait below (a sync.WaitGroup add concurrent with Wait is a misuse).
+	<-acceptDone
 
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
