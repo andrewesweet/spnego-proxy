@@ -1,0 +1,17 @@
+# zizmor configuration — https://docs.zizmor.sh/configuration/
+#
+# Rule ignores live here rather than as inline `# zizmor: ignore[...]`
+# trailing comments on `uses:` lines. An inline ignore after the version
+# comment breaks Dependabot's version-comment rewrite (it leaves the
+# `# vX.Y.Z` comment stale on bump, which then trips zizmor's
+# ref-version-mismatch audit). Keeping the SHA pin's `# vX.Y.Z` as the
+# final token on the line lets Dependabot update both SHA and comment.
+rules:
+  # softprops/action-gh-release is used intentionally in release.yml for its
+  # native multi-file asset upload and draft/prerelease handling. Replacing it
+  # with a `gh release` script would re-implement that behaviour with no
+  # security benefit (the action is pinned to a commit SHA). Suppress the
+  # superfluous-actions audit for that workflow only.
+  superfluous-actions:
+    ignore:
+      - release.yml
