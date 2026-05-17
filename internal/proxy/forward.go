@@ -127,6 +127,14 @@ func (s *ClientSession) dialAndAuthUpstream(req *http.Request) net.Conn {
 // non-connection parameters including upstream address, token provider,
 // timeouts, CONNECT port restrictions (D4, RFC 9110 §9.3.6), and
 // forwarding header injection (RFC 7239 Forwarded, X-Forwarded-For, etc.).
+//
+// handleClient is the stable seam called by Serve and the test harness;
+// its signature is deliberately unchanged. It performs the connection-level
+// guards (pseudonym, IP allowlist), owns the conn close / closeWrite and
+// proxyConn cleanup defers (issue #75 LIFO ordering), constructs the
+// per-connection ClientSession, and delegates the request lifecycle to
+// ClientSession.run. All per-connection handlers are methods on
+// ClientSession; cfg is no longer threaded through them individually.
 func handleClient(conn net.Conn, cfg Config) {
 	defer func() { _ = conn.Close() }()
 	// Half-close the write half before the full close so the client
