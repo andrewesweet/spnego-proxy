@@ -88,33 +88,37 @@ func connectionWillClose(req *http.Request, resp *http.Response) bool {
 
 // dialAndAuthUpstream acquires a SPNEGO token, sets Proxy-Authorization on
 // req, dials the upstream proxy, and enables TCP keepalive on both
-// sockets when configured. On any failure it writes a proxyError to conn
-// and returns nil. Returns the open upstream connection on success.
-func dialAndAuthUpstream(conn net.Conn, req *http.Request, cfg Config, clientAddr string) net.Conn {
-	token, terr := cfg.Provider.GetToken()
+// sockets when configured. On any failure it writes a proxyError to the
+// client conn and returns nil. Returns the open upstream connection on
+// success. The connection is RETURNED rather than stored on the session:
+// the keep-alive path assigns it to s.proxyConn (reused across iterations)
+// while tunnelViaUpstream keeps it method-local (fresh per CONNECT), so
+// the two must not alias.
+func (s *ClientSession) dialAndAuthUpstream(req *http.Request) net.Conn {
+	token, terr := s.cfg.Provider.GetToken()
 	if terr != nil {
 		pe := tokenErrorToProxyError(terr)
-		slog.Error("failed to get SPNEGO token", "error", terr, "error_type", pe.errorType, "client_addr", clientAddr, "upstream_addr", cfg.Upstream, "method", req.Method, "host", req.Host)
-		writeHTTPError(conn, pe)
+		slog.Error("failed to get SPNEGO token", "error", terr, "error_type", pe.errorType, "client_addr", s.clientAddr, "upstream_addr", s.cfg.Upstream, "method", req.Method, "host", req.Host)
+		writeHTTPError(s.conn, pe)
 		return nil
 	}
 	req.Header.Set(headerProxyAuthorization, negotiateScheme+token)
 
-	proxyConn, derr := dialUpstream(cfg.Upstream, cfg.UpstreamTLS)
+	proxyConn, derr := dialUpstream(s.cfg.Upstream, s.cfg.UpstreamTLS)
 	if derr != nil {
 		var ne net.Error
 		if errors.As(derr, &ne) && ne.Timeout() {
-			slog.Error("failed to connect to proxy", "error", derr, "error_type", errConnectionTimeout.errorType, "client_addr", clientAddr, "upstream_addr", cfg.Upstream)
-			writeHTTPError(conn, errConnectionTimeout)
+			slog.Error("failed to connect to proxy", "error", derr, "error_type", errConnectionTimeout.errorType, "client_addr", s.clientAddr, "upstream_addr", s.cfg.Upstream)
+			writeHTTPError(s.conn, errConnectionTimeout)
 		} else {
-			slog.Error("failed to connect to proxy", "error", derr, "error_type", errConnectionRefused.errorType, "client_addr", clientAddr, "upstream_addr", cfg.Upstream)
-			writeHTTPError(conn, errConnectionRefused)
+			slog.Error("failed to connect to proxy", "error", derr, "error_type", errConnectionRefused.errorType, "client_addr", s.clientAddr, "upstream_addr", s.cfg.Upstream)
+			writeHTTPError(s.conn, errConnectionRefused)
 		}
 		return nil
 	}
-	if cfg.KeepAlive > 0 {
-		enableKeepAlive(conn, cfg.KeepAlive)
-		enableKeepAlive(proxyConn, cfg.KeepAlive)
+	if s.cfg.KeepAlive > 0 {
+		enableKeepAlive(s.conn, s.cfg.KeepAlive)
+		enableKeepAlive(proxyConn, s.cfg.KeepAlive)
 	}
 	return proxyConn
 }
@@ -236,7 +240,7 @@ func (s *ClientSession) run() {
 		// connection on subsequent requests (RFC 4559 §5).
 		injectForwardingHeaders(req, s.clientAddr, s.cfg.Forwarding)
 		if s.proxyConn == nil {
-			s.proxyConn = dialAndAuthUpstream(s.conn, req, s.cfg, s.clientAddr)
+			s.proxyConn = s.dialAndAuthUpstream(req)
 			if s.proxyConn == nil {
 				return
 			}
@@ -292,7 +296,7 @@ func (s *ClientSession) run() {
 func (s *ClientSession) tunnelViaUpstream(req *http.Request) {
 	injectForwardingHeaders(req, s.clientAddr, s.cfg.Forwarding)
 
-	proxyConn := dialAndAuthUpstream(s.conn, req, s.cfg, s.clientAddr)
+	proxyConn := s.dialAndAuthUpstream(req)
 	if proxyConn == nil {
 		return
 	}
