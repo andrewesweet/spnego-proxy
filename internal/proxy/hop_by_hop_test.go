@@ -18,25 +18,25 @@ import (
 
 func TestB1_RFC9110_ConnectionHeaderAndNamedHeadersRemoved(t *testing.T) {
 	upReq := proxyRoundTrip(t, http.Header{
-		"Connection":   {"X-Custom-Hop"},
-		"X-Custom-Hop": {"secret"},
-		"X-Legitimate": {"keep-me"},
+		headerConnection: {"X-Custom-Hop"},
+		"X-Custom-Hop":   {"secret"},
+		"X-Legitimate":   {"keep-me"},
 	})
 
-	assertHeaderAbsent(t, upReq.Header, "Connection")
+	assertHeaderAbsent(t, upReq.Header, headerConnection)
 	assertHeaderAbsent(t, upReq.Header, "X-Custom-Hop")
 	assertHeaderPresent(t, upReq.Header, "X-Legitimate", "keep-me")
 }
 
 func TestB1_RFC9110_ConnectionHeaderMultipleValues(t *testing.T) {
 	upReq := proxyRoundTrip(t, http.Header{
-		"Connection":   {"X-Hop-A, X-Hop-B"},
-		"X-Hop-A":      {"a-value"},
-		"X-Hop-B":      {"b-value"},
-		"X-End-To-End": {"preserved"},
+		headerConnection: {"X-Hop-A, X-Hop-B"},
+		"X-Hop-A":        {"a-value"},
+		"X-Hop-B":        {"b-value"},
+		"X-End-To-End":   {"preserved"},
 	})
 
-	assertHeaderAbsent(t, upReq.Header, "Connection")
+	assertHeaderAbsent(t, upReq.Header, headerConnection)
 	assertHeaderAbsent(t, upReq.Header, "X-Hop-A")
 	assertHeaderAbsent(t, upReq.Header, "X-Hop-B")
 	assertHeaderPresent(t, upReq.Header, "X-End-To-End", "preserved")
@@ -52,11 +52,11 @@ func TestHopByHop_WellKnownHeadersStripped(t *testing.T) {
 		header string
 		value  string
 	}{
-		{"B1/Keep-Alive", "Keep-Alive", "timeout=5"},
-		{"K3/Proxy-Connection", "Proxy-Connection", "keep-alive"},
-		{"J2/Upgrade", "Upgrade", "websocket"},
-		{"B1/TE", "TE", "trailers"},
-		{"B1/Trailer", "Trailer", "X-Checksum"},
+		{"B1/Keep-Alive", headerKeepAlive, "timeout=5"},
+		{"K3/Proxy-Connection", headerProxyConnection, "keep-alive"},
+		{"J2/Upgrade", headerUpgrade, "websocket"},
+		{"B1/TE", headerTE, "trailers"},
+		{"B1/Trailer", headerTrailer, "X-Checksum"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -72,12 +72,12 @@ func TestHopByHop_WellKnownHeadersStripped(t *testing.T) {
 
 func TestB2_RFC9110_ClientProxyAuthorizationConsumed(t *testing.T) {
 	upReq := proxyRoundTrip(t, http.Header{
-		"Proxy-Authorization": {"Basic abc123"},
+		headerProxyAuthorization: {"Basic abc123"},
 	})
 
 	// The proxy must inject its own Negotiate token, NOT forward the
 	// client's Basic credential.
-	pa := upReq.Header.Get("Proxy-Authorization")
+	pa := upReq.Header.Get(headerProxyAuthorization)
 	if pa == "Basic abc123" {
 		t.Error("client's Proxy-Authorization was forwarded; expected proxy's own Negotiate token")
 	}
@@ -129,7 +129,7 @@ func TestE1_RFC9112_TEAndCLConflictRemovesCL(t *testing.T) {
 	}
 
 	// Content-Length must be absent.
-	assertHeaderAbsent(t, reqs[0].Header, "Content-Length")
+	assertHeaderAbsent(t, reqs[0].Header, headerContentLength)
 
 	// Transfer-Encoding (chunked framing) must still be present so the
 	// upstream can correctly decode the body.
@@ -190,7 +190,7 @@ func TestE2_RFC9112_InvalidContentLengthInResponse(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	assertStatusCode(t, resp, http.StatusBadGateway)
-	if ps := resp.Header.Get("Proxy-Status"); !strings.Contains(ps, "http_protocol_error") {
+	if ps := resp.Header.Get(headerProxyStatus); !strings.Contains(ps, "http_protocol_error") {
 		t.Errorf("expected Proxy-Status to contain 'http_protocol_error', got %q", ps)
 	}
 }
@@ -295,7 +295,7 @@ func TestE1_RFC9112_ResponseTEAndCLConflictRemovesCL(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	assertStatusCode(t, resp, http.StatusOK)
-	assertHeaderAbsent(t, resp.Header, "Content-Length")
+	assertHeaderAbsent(t, resp.Header, headerContentLength)
 
 	body, _ := io.ReadAll(resp.Body)
 	if string(body) != "hello" {
@@ -318,68 +318,68 @@ func TestSanitizeHopByHop_Unit(t *testing.T) {
 		{
 			name: "B1: Connection names single header",
 			headers: http.Header{
-				"Connection":   {"X-Hop"},
-				"X-Hop":        {"val"},
-				"X-Persistent": {"val"},
+				headerConnection: {"X-Hop"},
+				"X-Hop":          {"val"},
+				"X-Persistent":   {"val"},
 			},
-			wantAbsent: []string{"Connection", "X-Hop"},
+			wantAbsent: []string{headerConnection, "X-Hop"},
 			wantKeep:   map[string]string{"X-Persistent": "val"},
 		},
 		{
 			name: "B1: Connection names multiple comma-separated headers",
 			headers: http.Header{
-				"Connection": {"X-A, X-B"},
-				"X-A":        {"a"},
-				"X-B":        {"b"},
+				headerConnection: {"X-A, X-B"},
+				"X-A":            {"a"},
+				"X-B":            {"b"},
 			},
-			wantAbsent: []string{"Connection", "X-A", "X-B"},
+			wantAbsent: []string{headerConnection, "X-A", "X-B"},
 		},
 		{
 			name: "B2: Proxy-Authorization removed",
 			headers: http.Header{
-				"Proxy-Authorization": {"Basic abc"},
+				headerProxyAuthorization: {"Basic abc"},
 			},
-			wantAbsent: []string{"Proxy-Authorization"},
+			wantAbsent: []string{headerProxyAuthorization},
 		},
 		{
 			name: "K3: Proxy-Connection removed",
 			headers: http.Header{
-				"Proxy-Connection": {"keep-alive"},
+				headerProxyConnection: {"keep-alive"},
 			},
-			wantAbsent: []string{"Proxy-Connection"},
+			wantAbsent: []string{headerProxyConnection},
 		},
 		{
 			name: "J2: Upgrade removed",
 			headers: http.Header{
-				"Upgrade": {"websocket"},
+				headerUpgrade: {"websocket"},
 			},
-			wantAbsent: []string{"Upgrade"},
+			wantAbsent: []string{headerUpgrade},
 		},
 		{
 			name: "Well-known hop-by-hop: Keep-Alive, TE, Trailer",
 			headers: http.Header{
-				"Keep-Alive": {"timeout=5"},
-				"Te":         {"trailers"},
-				"Trailer":    {"X-Checksum"},
+				headerKeepAlive: {"timeout=5"},
+				"Te":            {"trailers"},
+				headerTrailer:   {"X-Checksum"},
 			},
-			wantAbsent: []string{"Keep-Alive", "Te", "Trailer"},
+			wantAbsent: []string{headerKeepAlive, "Te", headerTrailer},
 		},
 		{
 			name:             "E1: TE + CL conflict removes CL",
-			headers:          http.Header{"Content-Length": {"100"}},
+			headers:          http.Header{headerContentLength: {"100"}},
 			transferEncoding: []string{"chunked"},
-			wantAbsent:       []string{"Content-Length"},
+			wantAbsent:       []string{headerContentLength},
 		},
 		{
 			name:     "E1: CL without TE is preserved",
-			headers:  http.Header{"Content-Length": {"42"}},
-			wantKeep: map[string]string{"Content-Length": "42"},
+			headers:  http.Header{headerContentLength: {"42"}},
+			wantKeep: map[string]string{headerContentLength: "42"},
 		},
 		{
 			name:    "empty Connection header",
-			headers: http.Header{"Connection": {""}},
+			headers: http.Header{headerConnection: {""}},
 			// Connection itself is removed; no crash on empty values.
-			wantAbsent: []string{"Connection"},
+			wantAbsent: []string{headerConnection},
 		},
 		{
 			name: "Connection names Proxy-Authorization",
@@ -387,10 +387,10 @@ func TestSanitizeHopByHop_Unit(t *testing.T) {
 			// Proxy-Authorization by naming it in Connection. This is
 			// safe because sanitizeHopByHop runs before token injection.
 			headers: http.Header{
-				"Connection":          {"Proxy-Authorization"},
-				"Proxy-Authorization": {"Basic attacker"},
+				headerConnection:         {"Proxy-Authorization"},
+				headerProxyAuthorization: {"Basic attacker"},
 			},
-			wantAbsent: []string{"Connection", "Proxy-Authorization"},
+			wantAbsent: []string{headerConnection, headerProxyAuthorization},
 		},
 	}
 
@@ -445,7 +445,7 @@ func TestValidateResponseContentLength_Unit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := &http.Response{Header: http.Header{}}
 			for _, v := range tc.cl {
-				resp.Header.Add("Content-Length", v)
+				resp.Header.Add(headerContentLength, v)
 			}
 			pe := validateResponseContentLength(resp)
 			if tc.wantErr && pe == nil {
@@ -464,17 +464,17 @@ func TestValidateResponseContentLength_Unit(t *testing.T) {
 
 func TestHopByHop_EndToEndHeadersPreserved(t *testing.T) {
 	upReq := proxyRoundTrip(t, http.Header{
-		"Accept":        {"text/html"},
-		"Authorization": {"Bearer token123"},
-		"Cache-Control": {"no-cache"},
-		"Content-Type":  {"application/json"},
-		"X-Custom-App":  {"my-value"},
+		"Accept":          {"text/html"},
+		"Authorization":   {"Bearer token123"},
+		"Cache-Control":   {"no-cache"},
+		headerContentType: {"application/json"},
+		"X-Custom-App":    {"my-value"},
 	})
 
 	assertHeaderPresent(t, upReq.Header, "Accept", "text/html")
 	assertHeaderPresent(t, upReq.Header, "Authorization", "Bearer token123")
 	assertHeaderPresent(t, upReq.Header, "Cache-Control", "no-cache")
-	assertHeaderPresent(t, upReq.Header, "Content-Type", "application/json")
+	assertHeaderPresent(t, upReq.Header, headerContentType, "application/json")
 	assertHeaderPresent(t, upReq.Header, "X-Custom-App", "my-value")
 }
 
@@ -486,7 +486,7 @@ func TestE2_RFC9112_MultipleDifferingCLInResponse(t *testing.T) {
 	// Go's http.ReadResponse rejects responses with differing
 	// Content-Length headers before our validateResponseContentLength
 	// runs. This test verifies the proxy returns 502 (via the
-	// strings.Contains "Content-Length" check in the ReadResponse
+	// strings.Contains headerContentLength check in the ReadResponse
 	// error path) rather than silently raw-relaying the smuggling
 	// attempt.
 	rawUpstream, err := net.Listen("tcp", "127.0.0.1:0")
@@ -535,7 +535,7 @@ func TestE2_RFC9112_MultipleDifferingCLInResponse(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	assertStatusCode(t, resp, http.StatusBadGateway)
-	if ps := resp.Header.Get("Proxy-Status"); !strings.Contains(ps, "http_protocol_error") {
+	if ps := resp.Header.Get(headerProxyStatus); !strings.Contains(ps, "http_protocol_error") {
 		t.Errorf("expected Proxy-Status to contain 'http_protocol_error', got %q", ps)
 	}
 }
@@ -558,8 +558,8 @@ func TestHopByHop_ViaHeaderStillInjected(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	req, _ := http.NewRequest("GET", "http://example.com/via", nil)
-	req.Header.Set("Connection", "close")
-	req.Header.Set("Proxy-Connection", "keep-alive")
+	req.Header.Set(headerConnection, "close")
+	req.Header.Set(headerProxyConnection, "keep-alive")
 	if err := req.WriteProxy(conn); err != nil {
 		t.Fatalf("write request: %v", err)
 	}
@@ -577,7 +577,7 @@ func TestHopByHop_ViaHeaderStillInjected(t *testing.T) {
 	}
 
 	// Via must be present on the forwarded request.
-	via := reqs[0].Header.Get("Via")
+	via := reqs[0].Header.Get(headerVia)
 	if via == "" {
 		t.Error("expected Via header in upstream request, got empty")
 	}
@@ -586,7 +586,7 @@ func TestHopByHop_ViaHeaderStillInjected(t *testing.T) {
 	}
 
 	// Via must also be present on the response.
-	if resp.Header.Get("Via") == "" {
+	if resp.Header.Get(headerVia) == "" {
 		t.Error("expected Via header in response, got empty")
 	}
 }
@@ -610,7 +610,7 @@ func TestHopByHop_ProxyAuthInjectedAfterSanitization(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	req, _ := http.NewRequest("GET", "http://example.com/auth-inject", nil)
-	req.Header.Set("Proxy-Authorization", "Basic should-be-removed")
+	req.Header.Set(headerProxyAuthorization, "Basic should-be-removed")
 	if err := req.WriteProxy(conn); err != nil {
 		t.Fatalf("write request: %v", err)
 	}
@@ -627,7 +627,7 @@ func TestHopByHop_ProxyAuthInjectedAfterSanitization(t *testing.T) {
 		t.Fatalf("upstream received %d requests, want 1", len(reqs))
 	}
 
-	assertHeaderPresent(t, reqs[0].Header, "Proxy-Authorization",
+	assertHeaderPresent(t, reqs[0].Header, headerProxyAuthorization,
 		"Negotiate "+proxy.Provider.token)
 }
 
@@ -652,8 +652,8 @@ func TestHopByHop_ConnectionViaCannotBypassLoopDetection(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	req, _ := http.NewRequest("GET", "http://example.com/loop-bypass", nil)
-	req.Header.Set("Via", "1.1 "+testPseudonym)
-	req.Header.Set("Connection", "Via")
+	req.Header.Set(headerVia, "1.1 "+testPseudonym)
+	req.Header.Set(headerConnection, "Via")
 	if err := req.WriteProxy(conn); err != nil {
 		t.Fatalf("write request: %v", err)
 	}
@@ -667,7 +667,7 @@ func TestHopByHop_ConnectionViaCannotBypassLoopDetection(t *testing.T) {
 	// The proxy must return 502 with proxy_loop_detected, not forward
 	// the request with the Via header stripped.
 	assertStatusCode(t, resp, http.StatusBadGateway)
-	if ps := resp.Header.Get("Proxy-Status"); !strings.Contains(ps, "proxy_loop_detected") {
+	if ps := resp.Header.Get(headerProxyStatus); !strings.Contains(ps, "proxy_loop_detected") {
 		t.Errorf("expected Proxy-Status to contain 'proxy_loop_detected', got %q", ps)
 	}
 }
@@ -682,7 +682,7 @@ func TestHopByHop_ConnectionViaCannotBypassLoopDetection(t *testing.T) {
 func TestA1_RFC9110_ViaAppendedOnForwardedRequest(t *testing.T) {
 	upReq := proxyRoundTrip(t, nil)
 
-	via := upReq.Header.Get("Via")
+	via := upReq.Header.Get(headerVia)
 	want := "HTTP/1.1 " + testPseudonym
 	if via != want {
 		t.Errorf("Via header: want %q, got %q", want, via)
@@ -693,10 +693,10 @@ func TestA1_RFC9110_ViaAppendedOnForwardedRequest(t *testing.T) {
 // entries from upstream proxies are preserved and our entry is appended.
 func TestA1_RFC9110_ViaPreservesExistingEntries(t *testing.T) {
 	upReq := proxyRoundTrip(t, http.Header{
-		"Via": {"1.1 other-proxy"},
+		headerVia: {"1.1 other-proxy"},
 	})
 
-	via := upReq.Header.Get("Via")
+	via := upReq.Header.Get(headerVia)
 	want := "1.1 other-proxy, HTTP/1.1 " + testPseudonym
 	if via != want {
 		t.Errorf("Via header: want %q, got %q", want, via)
@@ -731,7 +731,7 @@ func TestA1_RFC9110_ViaAppendedOnResponse(t *testing.T) {
 
 	assertStatusCode(t, resp, http.StatusOK)
 
-	via := resp.Header.Get("Via")
+	via := resp.Header.Get(headerVia)
 	want := "HTTP/1.1 " + testPseudonym
 	if via != want {
 		t.Errorf("response Via header: want %q, got %q", want, via)
@@ -759,7 +759,7 @@ func loopDetectionScenario(t *testing.T) (*http.Response, *ProxyUnderTest, *Mock
 	t.Cleanup(func() { _ = conn.Close() })
 
 	req, _ := http.NewRequest("GET", "http://example.com/loop-test", nil)
-	req.Header.Set("Via", "1.1 "+testPseudonym)
+	req.Header.Set(headerVia, "1.1 "+testPseudonym)
 	if err := req.WriteProxy(conn); err != nil {
 		t.Fatalf("write request: %v", err)
 	}
@@ -783,7 +783,7 @@ func TestA2_RFC9110_LoopDetectionReturns502(t *testing.T) {
 	assertStatusCode(t, resp, http.StatusBadGateway)
 
 	wantPS := "spnego-proxy; error=proxy_loop_detected"
-	if ps := resp.Header.Get("Proxy-Status"); ps != wantPS {
+	if ps := resp.Header.Get(headerProxyStatus); ps != wantPS {
 		t.Errorf("Proxy-Status: want %q, got %q", wantPS, ps)
 	}
 
@@ -835,10 +835,10 @@ func TestA3_RFC9209_ProxyStatusOnLoopDetected(t *testing.T) {
 // detection — only this instance's own pseudonym indicates a loop.
 func TestA2_RFC9110_DifferentPseudonymNotDetectedAsLoop(t *testing.T) {
 	upReq := proxyRoundTrip(t, http.Header{
-		"Via": {"1.1 some-other-proxy"},
+		headerVia: {"1.1 some-other-proxy"},
 	})
 
-	via := upReq.Header.Get("Via")
+	via := upReq.Header.Get(headerVia)
 	want := "1.1 some-other-proxy, HTTP/1.1 " + testPseudonym
 	if via != want {
 		t.Errorf("Via header: want %q, got %q", want, via)
@@ -865,7 +865,7 @@ func TestA2_RFC9110_SubstringPseudonymDetectedAsLoop(t *testing.T) {
 
 	// Via entry contains our pseudonym as a prefix of a longer identifier.
 	req, _ := http.NewRequest("GET", "http://example.com/a2-substr", nil)
-	req.Header.Set("Via", "1.1 "+testPseudonym+"-extended")
+	req.Header.Set(headerVia, "1.1 "+testPseudonym+"-extended")
 	if err := req.WriteProxy(conn); err != nil {
 		t.Fatalf("write request: %v", err)
 	}
@@ -892,17 +892,17 @@ func TestInjectVia_EmptyHeader(t *testing.T) {
 	h := make(http.Header)
 	injectVia(h, "HTTP/1.1", "test-proxy")
 
-	if got := h.Get("Via"); got != "HTTP/1.1 test-proxy" {
+	if got := h.Get(headerVia); got != "HTTP/1.1 test-proxy" {
 		t.Errorf("Via: want %q, got %q", "HTTP/1.1 test-proxy", got)
 	}
 }
 
 func TestInjectVia_AppendsToExisting(t *testing.T) {
-	h := http.Header{"Via": {"1.0 first-proxy"}}
+	h := http.Header{headerVia: {"1.0 first-proxy"}}
 	injectVia(h, "HTTP/1.1", "second-proxy")
 
 	want := "1.0 first-proxy, HTTP/1.1 second-proxy"
-	if got := h.Get("Via"); got != want {
+	if got := h.Get(headerVia); got != want {
 		t.Errorf("Via: want %q, got %q", want, got)
 	}
 }
@@ -985,7 +985,7 @@ func TestHandleClientAppendsToExistingResponseVia(t *testing.T) {
 	}
 
 	want := "1.0 upstream-proxy, HTTP/1.1 " + testPseudonym
-	if got := resp.Header.Get("Via"); got != want {
+	if got := resp.Header.Get(headerVia); got != want {
 		t.Errorf("response Via header = %q, want %q", got, want)
 	}
 
@@ -1037,7 +1037,7 @@ func TestUnparseableUpstreamReturns502(t *testing.T) {
 	assertStatusCode(t, resp, http.StatusBadGateway)
 
 	wantPS := "spnego-proxy; error=http_protocol_error"
-	if got := resp.Header.Get("Proxy-Status"); got != wantPS {
+	if got := resp.Header.Get(headerProxyStatus); got != wantPS {
 		t.Errorf("Proxy-Status: want %q, got %q", wantPS, got)
 	}
 }
@@ -1097,7 +1097,7 @@ func TestHandleClientAddsViaToConnectResponse(t *testing.T) {
 
 	// Verify Via header on the CONNECT response.
 	want := "HTTP/1.1 " + testPseudonym
-	if got := resp.Header.Get("Via"); got != want {
+	if got := resp.Header.Get(headerVia); got != want {
 		t.Errorf("response Via header = %q, want %q", got, want)
 	}
 

@@ -47,7 +47,7 @@ func TestE3_RFC9112_NonChunkedTransferEncoding_Request(t *testing.T) {
 			if resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusBadGateway {
 				t.Errorf("status: want 400 or 502, got %d", resp.StatusCode)
 			}
-			if ps := resp.Header.Get("Proxy-Status"); !strings.Contains(ps, "http_") {
+			if ps := resp.Header.Get(headerProxyStatus); !strings.Contains(ps, "http_") {
 				t.Errorf("expected http_* Proxy-Status token, got %q", ps)
 			}
 			if len(reqs) != 0 {
@@ -141,7 +141,7 @@ func TestE5_RFC9110_ResponseHeaderControlOctetsRejected(t *testing.T) {
 			defer func() { _ = resp.Body.Close() }()
 
 			assertStatusCode(t, resp, http.StatusBadGateway)
-			if ps := resp.Header.Get("Proxy-Status"); !strings.Contains(ps, "http_protocol_error") {
+			if ps := resp.Header.Get(headerProxyStatus); !strings.Contains(ps, "http_protocol_error") {
 				t.Errorf("expected Proxy-Status to contain 'http_protocol_error', got %q", ps)
 			}
 			// The injected header MUST NOT reach the client.
@@ -296,7 +296,7 @@ func TestE7_RFC9112_ChunkedResponseWithTrailerConsistent(t *testing.T) {
 	// value must arrive (resp.Trailer populated) OR Trailer must be
 	// stripped from the response headers. The proxy must not advertise
 	// trailers it will never deliver.
-	advertised := resp.Header.Get("Trailer")
+	advertised := resp.Header.Get(headerTrailer)
 	if advertised != "" {
 		// Trailer advertised → the named trailer must be present.
 		if v := resp.Trailer.Get(advertised); v == "" {

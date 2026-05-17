@@ -546,7 +546,7 @@ func TestComplianceHarnessSmokeTest(t *testing.T) {
 	assertHeaderPresent(t, resp.Header, "X-Upstream", "true")
 
 	// Via header must be present on the response per RFC 9110 §7.6.3.
-	if via := resp.Header.Get("Via"); via == "" {
+	if via := resp.Header.Get(headerVia); via == "" {
 		t.Error("expected Via header in response, got empty")
 	} else if !strings.Contains(via, testPseudonym) {
 		t.Errorf("Via header %q does not contain pseudonym %q", via, testPseudonym)
@@ -568,13 +568,13 @@ func TestComplianceHarnessSmokeTest(t *testing.T) {
 	upstreamReq := reqs[0]
 
 	// Proxy-Authorization must be injected by the proxy.
-	assertHeaderPresent(t, upstreamReq.Header, "Proxy-Authorization", "Negotiate test-token")
+	assertHeaderPresent(t, upstreamReq.Header, headerProxyAuthorization, "Negotiate test-token")
 
 	// Custom header must be forwarded transparently.
 	assertHeaderPresent(t, upstreamReq.Header, "X-Custom", "value")
 
 	// Via must be present on the forwarded request.
-	if via := upstreamReq.Header.Get("Via"); via == "" {
+	if via := upstreamReq.Header.Get(headerVia); via == "" {
 		t.Error("expected Via header in upstream request, got empty")
 	}
 

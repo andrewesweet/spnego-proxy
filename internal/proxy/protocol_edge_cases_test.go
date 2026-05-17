@@ -185,8 +185,8 @@ func TestG1_MaxForwards_Table(t *testing.T) {
 					t.Fatalf("upstream received %d requests, want 1", len(reqs))
 				}
 				if tc.wantMF == "" {
-					assertHeaderAbsent(t, reqs[0].Header, "Max-Forwards")
-				} else if got := reqs[0].Header.Get("Max-Forwards"); got != tc.wantMF {
+					assertHeaderAbsent(t, reqs[0].Header, headerMaxForwards)
+				} else if got := reqs[0].Header.Get(headerMaxForwards); got != tc.wantMF {
 					t.Errorf("upstream Max-Forwards: want %q, got %q", tc.wantMF, got)
 				}
 			} else {
@@ -203,7 +203,7 @@ func TestG1_MaxForwards_Table(t *testing.T) {
 				}
 				// OPTIONS MF=0: Allow header must be present per RFC 9110.
 				if tc.method == "OPTIONS" {
-					if allow := resp.Header.Get("Allow"); allow == "" {
+					if allow := resp.Header.Get(headerAllow); allow == "" {
 						t.Error("OPTIONS MF=0 response missing Allow header")
 					}
 				}

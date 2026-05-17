@@ -104,7 +104,7 @@ func TestNoProxyHTTPBypassGoesToTarget(t *testing.T) {
 	assertHeaderPresent(t, resp.Header, "X-Direct", "true")
 
 	// Via must be injected by the proxy per RFC 9110 §7.6.3.
-	via := resp.Header.Get("Via")
+	via := resp.Header.Get(headerVia)
 	if via == "" {
 		t.Error("expected Via header in response, got empty")
 	} else if !strings.Contains(via, testPseudonym) {
@@ -132,7 +132,7 @@ func TestNoProxyNonMatchGoesUpstream(t *testing.T) {
 	})
 
 	// Upstream must have received the request.
-	assertHeaderPresent(t, recorded.Header, "Proxy-Authorization", "Negotiate test-token")
+	assertHeaderPresent(t, recorded.Header, headerProxyAuthorization, "Negotiate test-token")
 }
 
 // TestNoProxyHTTPRequestInOriginForm verifies that when a request is bypassed
@@ -289,7 +289,7 @@ func TestNoProxyCONNECTBypassEstablishesDirectTunnel(t *testing.T) {
 	assertStatusCode(t, resp, http.StatusOK)
 
 	// Via must appear on the 200 response per RFC 9110 §7.6.3.
-	via := resp.Header.Get("Via")
+	via := resp.Header.Get(headerVia)
 	if via == "" {
 		t.Error("expected Via header in CONNECT 200 response, got empty")
 	} else if !strings.Contains(via, testPseudonym) {
@@ -298,8 +298,8 @@ func TestNoProxyCONNECTBypassEstablishesDirectTunnel(t *testing.T) {
 
 	// Content-Length and Connection: close MUST NOT appear — they cause
 	// Bun/undici clients to close the connection before the TLS handshake.
-	assertHeaderAbsent(t, resp.Header, "Content-Length")
-	assertHeaderAbsent(t, resp.Header, "Connection")
+	assertHeaderAbsent(t, resp.Header, headerContentLength)
+	assertHeaderAbsent(t, resp.Header, headerConnection)
 
 	// Verify the tunnel actually works: send data and read the echo back.
 	const payload = "hello-direct-tunnel"

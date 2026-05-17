@@ -235,8 +235,8 @@ func TestForwardingC7_NoTransformBodyPreserved(t *testing.T) {
 			ProtoMajor: 1,
 			ProtoMinor: 1,
 			Header: http.Header{
-				"Cache-Control": {"no-transform"},
-				"Content-Type":  {"application/octet-stream"},
+				"Cache-Control":   {"no-transform"},
+				headerContentType: {"application/octet-stream"},
 			},
 			Body:          io.NopCloser(strings.NewReader(body)),
 			ContentLength: int64(len(body)),
@@ -296,7 +296,7 @@ func TestForwardingB3_ProxyAuthenticateNotForwardedToClient(t *testing.T) {
 			ProtoMajor: 1,
 			ProtoMinor: 1,
 			Header: http.Header{
-				"Proxy-Authenticate": {"Negotiate"},
+				headerProxyAuthenticate: {"Negotiate"},
 			},
 			Body:          http.NoBody,
 			ContentLength: 0,
@@ -312,5 +312,5 @@ func TestForwardingB3_ProxyAuthenticateNotForwardedToClient(t *testing.T) {
 	assertStatusCode(t, resp, http.StatusOK)
 
 	// B3: Proxy-Authenticate MUST NOT be forwarded to the client.
-	assertHeaderAbsent(t, resp.Header, "Proxy-Authenticate")
+	assertHeaderAbsent(t, resp.Header, headerProxyAuthenticate)
 }

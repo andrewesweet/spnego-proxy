@@ -95,7 +95,7 @@ func TestHandleClientReadTimeout(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected status 400, got %d", resp.StatusCode)
 	}
-	if ps := resp.Header.Get("Proxy-Status"); ps != "spnego-proxy; error=http_request_error" {
+	if ps := resp.Header.Get(headerProxyStatus); ps != "spnego-proxy; error=http_request_error" {
 		t.Errorf("expected Proxy-Status header %q, got %q", "spnego-proxy; error=http_request_error", ps)
 	}
 	body, _ := io.ReadAll(resp.Body)
@@ -317,7 +317,7 @@ func TestShutdownDrainsInFlightConnections(t *testing.T) {
 
 	// Verify Via header was added to the relayed response.
 	wantResponseVia := "HTTP/1.1 " + testPseudonym
-	if got := resp.Header.Get("Via"); got != wantResponseVia {
+	if got := resp.Header.Get(headerVia); got != wantResponseVia {
 		t.Errorf("response Via header = %q, want %q", got, wantResponseVia)
 	}
 
@@ -468,7 +468,7 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 			gotVia <- "READ_ERR: " + err.Error()
 			return
 		}
-		gotVia <- req.Header.Get("Via")
+		gotVia <- req.Header.Get(headerVia)
 		_ = req.Body.Close()
 
 		// Send 200 to complete the CONNECT handshake.
@@ -513,7 +513,7 @@ func TestHandleClientForwardsBufferedData(t *testing.T) {
 
 	// Verify Via header was added to the relayed response.
 	wantResponseVia := "HTTP/1.1 " + testPseudonym
-	if got := resp.Header.Get("Via"); got != wantResponseVia {
+	if got := resp.Header.Get(headerVia); got != wantResponseVia {
 		t.Errorf("response Via header = %q, want %q", got, wantResponseVia)
 	}
 
@@ -567,7 +567,7 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 		if err != nil {
 			gotVia <- "READ_ERR: " + err.Error()
 		} else {
-			gotVia <- req.Header.Get("Via")
+			gotVia <- req.Header.Get(headerVia)
 			_ = req.Body.Close()
 		}
 		resp := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
@@ -620,7 +620,7 @@ func TestCloseWriteCalledOnForwardCompletion(t *testing.T) {
 
 	// Verify Via header was added to the relayed response.
 	wantResponseVia := "HTTP/1.1 " + testPseudonym
-	if got := resp.Header.Get("Via"); got != wantResponseVia {
+	if got := resp.Header.Get(headerVia); got != wantResponseVia {
 		t.Errorf("response Via header = %q, want %q", got, wantResponseVia)
 	}
 
@@ -726,7 +726,7 @@ func TestHandleClientKeepAlive(t *testing.T) {
 				if err != nil {
 					gotVia <- "READ_ERR: " + err.Error()
 				} else {
-					gotVia <- req.Header.Get("Via")
+					gotVia <- req.Header.Get(headerVia)
 					_ = req.Body.Close()
 				}
 				resp := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
@@ -768,7 +768,7 @@ func TestHandleClientKeepAlive(t *testing.T) {
 
 	// Verify Via header was added to the relayed response.
 	wantResponseVia := "HTTP/1.1 " + testPseudonym
-	if got := resp.Header.Get("Via"); got != wantResponseVia {
+	if got := resp.Header.Get(headerVia); got != wantResponseVia {
 		t.Errorf("response Via header = %q, want %q", got, wantResponseVia)
 	}
 
@@ -875,7 +875,7 @@ func TestHandleClientRejectsSmuggledRequest(t *testing.T) {
 	if resp2.StatusCode != http.StatusForbidden {
 		t.Fatalf("resp2 status: want 403 (forbidden_port), got %d (body=%q)", resp2.StatusCode, body)
 	}
-	if ps := resp2.Header.Get("Proxy-Status"); ps != "spnego-proxy; error=http_request_denied" {
+	if ps := resp2.Header.Get(headerProxyStatus); ps != "spnego-proxy; error=http_request_denied" {
 		t.Errorf("resp2 Proxy-Status = %q, want http_request_denied", ps)
 	}
 
@@ -947,17 +947,17 @@ func TestHandleClientKeepAliveForwardsSecondRequest(t *testing.T) {
 
 	wantVia := "HTTP/1.1 " + testPseudonym
 	for i, r := range reqs {
-		if v := r.Header.Get("Via"); v != wantVia {
+		if v := r.Header.Get(headerVia); v != wantVia {
 			t.Errorf("req[%d] Via = %q, want %q", i, v, wantVia)
 		}
 	}
-	if pa := reqs[0].Header.Get("Proxy-Authorization"); pa != "Negotiate tok" {
+	if pa := reqs[0].Header.Get(headerProxyAuthorization); pa != "Negotiate tok" {
 		t.Errorf("req[0] Proxy-Authorization = %q, want %q (real proxy token)", pa, "Negotiate tok")
 	}
 	// Subsequent request on an already-authenticated connection: no
 	// Proxy-Authorization. The smuggled "evil-attacker-token" must NOT
 	// reach the upstream.
-	if pa := reqs[1].Header.Get("Proxy-Authorization"); pa != "" {
+	if pa := reqs[1].Header.Get(headerProxyAuthorization); pa != "" {
 		t.Errorf("req[1] Proxy-Authorization = %q, want empty (smuggled token must be stripped, connection auth reused)", pa)
 	}
 	if n := provider.calls.Load(); n != 1 {
@@ -1494,11 +1494,11 @@ func TestRFC4559_ConnectionBoundAuthSingleTokenAcquisition(t *testing.T) {
 		t.Fatalf("upstream received %d requests, want 3", len(reqs))
 	}
 
-	if pa := reqs[0].Header.Get("Proxy-Authorization"); pa != "Negotiate tok" {
+	if pa := reqs[0].Header.Get(headerProxyAuthorization); pa != "Negotiate tok" {
 		t.Errorf("req[0] Proxy-Authorization = %q, want %q", pa, "Negotiate tok")
 	}
 	for i := 1; i < len(reqs); i++ {
-		if pa := reqs[i].Header.Get("Proxy-Authorization"); pa != "" {
+		if pa := reqs[i].Header.Get(headerProxyAuthorization); pa != "" {
 			t.Errorf("req[%d] Proxy-Authorization = %q, want empty (RFC 4559 §5 connection-bound; smuggled tokens MUST be stripped)", i, pa)
 		}
 	}

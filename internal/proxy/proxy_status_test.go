@@ -45,7 +45,7 @@ func assertProxyStatus(t *testing.T, resp *http.Response, wantCode int, wantErro
 	assertStatusCode(t, resp, wantCode)
 
 	wantPS := "spnego-proxy; error=" + wantErrorType
-	if got := resp.Header.Get("Proxy-Status"); got != wantPS {
+	if got := resp.Header.Get(headerProxyStatus); got != wantPS {
 		t.Errorf("Proxy-Status: want %q, got %q", wantPS, got)
 	}
 }
@@ -182,7 +182,7 @@ func TestA3_RFC9209_ProxyStatusOnProxyInternalError(t *testing.T) {
 			assertProxyStatus(t, resp, http.StatusBadGateway, "proxy_internal_error")
 
 			// Verify the proxy identifier prefix is exactly "spnego-proxy;".
-			ps := resp.Header.Get("Proxy-Status")
+			ps := resp.Header.Get(headerProxyStatus)
 			if !strings.HasPrefix(ps, "spnego-proxy;") {
 				t.Errorf("Proxy-Status %q: identifier must start with %q", ps, "spnego-proxy;")
 			}
@@ -343,7 +343,7 @@ func TestL2_RFC9110_GatewayTimeoutOnDialTimeout(t *testing.T) {
 
 	// RFC 9209: Proxy-Status MUST carry the connection_timeout error token.
 	const wantPS = "spnego-proxy; error=connection_timeout"
-	if got := resp.Header.Get("Proxy-Status"); got != wantPS {
+	if got := resp.Header.Get(headerProxyStatus); got != wantPS {
 		t.Errorf("Proxy-Status: want %q, got %q", wantPS, got)
 	}
 
@@ -402,7 +402,7 @@ func TestL1_RFC9112_BadGatewayOnConnectionRefused(t *testing.T) {
 
 	// RFC 9209: Proxy-Status MUST carry the connection_refused error token.
 	const wantPS = "spnego-proxy; error=connection_refused"
-	if got := resp.Header.Get("Proxy-Status"); got != wantPS {
+	if got := resp.Header.Get(headerProxyStatus); got != wantPS {
 		t.Errorf("Proxy-Status: want %q, got %q", wantPS, got)
 	}
 
