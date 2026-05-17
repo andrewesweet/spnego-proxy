@@ -91,10 +91,15 @@ Actions: code-change fuzzing on every PR (`cflite_pr.yml`, fork-safe, no
 storage), corpus seeding on push to `master` (`cflite_cont.yml`), and a nightly
 batch → prune → coverage pipeline (`cflite_batch.yml`). Corpus, crashes, and
 the coverage report live in a **separate storage repo**
-(`andrewesweet/spnego-proxy-fuzz-corpus`); the workflows authenticate to it
-with the `FUZZ_CORPUS_DEPLOY_KEY` SSH deploy-key secret (same pattern as the
-Homebrew tap — never a PAT). Build integration lives in `.clusterfuzzlite/`
-(`project.yaml`, `Dockerfile`, `build.sh`).
+(`andrewesweet/spnego-proxy-fuzz-corpus`). ClusterFuzzLite clones the storage
+repo *inside* the OSS-Fuzz build container, where there is no `ssh` binary and
+the runner's `~/.ssh` is not mounted, so an SSH deploy key cannot be used
+here (unlike the Homebrew tap, whose clone is host-side). The workflows
+authenticate with a **fine-grained PAT scoped to only the corpus repo**
+(Contents: read/write), stored as the `FUZZ_CORPUS_TOKEN` secret; GitHub masks
+it in logs and the repo holds non-sensitive corpus/coverage data. Build
+integration lives in `.clusterfuzzlite/` (`project.yaml`, `Dockerfile`,
+`build.sh`).
 
 Run one target locally:
 
