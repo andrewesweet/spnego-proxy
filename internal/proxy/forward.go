@@ -217,7 +217,7 @@ func (s *ClientSession) run() {
 		if matched {
 			slog.Debug("noproxy bypass", "host", req.Host, "pattern", pattern, "method", req.Method, "client_addr", s.clientAddr)
 			if req.Method == http.MethodConnect {
-				handleDirectConnect(s.conn, req, s.reqReader, s.cfg, s.clientAddr)
+				s.tunnelDirect(req)
 			} else {
 				injectVia(req.Header, req.Proto, s.cfg.Pseudonym)
 				handleDirectHTTP(s.conn, req, s.reqReader, s.cfg, s.clientAddr)

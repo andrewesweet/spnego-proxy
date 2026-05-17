@@ -176,14 +176,15 @@ func handleDirectHTTP(conn net.Conn, req *http.Request, reqReader *bufio.Reader,
 	}
 }
 
-// handleDirectConnect establishes a direct TCP tunnel to the target host,
+// tunnelDirect establishes a direct TCP tunnel to the target host,
 // bypassing the upstream proxy. Used for noproxy bypass of CONNECT requests.
 // Via is injected on the 200 response (not on req.Header, which is never
-// forwarded for CONNECT tunnels).
-func handleDirectConnect(conn net.Conn, req *http.Request, reqReader *bufio.Reader, cfg Config, clientAddr string) {
-	targetConn, target, err := dialDirect(req.Host, "443", cfg.DialTimeout)
+// forwarded for CONNECT tunnels). targetConn is method-local (the noproxy
+// connection is single-target and never reused as s.proxyConn).
+func (s *ClientSession) tunnelDirect(req *http.Request) {
+	targetConn, target, err := dialDirect(req.Host, "443", s.cfg.DialTimeout)
 	if err != nil {
-		handleDialError(conn, err, target, clientAddr, "CONNECT")
+		handleDialError(s.conn, err, target, s.clientAddr, "CONNECT")
 		return
 	}
 	defer func() { _ = targetConn.Close() }()
@@ -194,28 +195,28 @@ func handleDirectConnect(conn net.Conn, req *http.Request, reqReader *bufio.Read
 		ProtoMinor: 1,
 		Header:     make(http.Header),
 	}
-	injectVia(resp.Header, req.Proto, cfg.Pseudonym)
-	if err := writeConnectOK(conn, resp); err != nil {
+	injectVia(resp.Header, req.Proto, s.cfg.Pseudonym)
+	if err := writeConnectOK(s.conn, resp); err != nil {
 		if isExpectedCloseError(err) {
-			slog.Debug("noproxy CONNECT response write closed", "error", err, "target", target, "client_addr", clientAddr)
+			slog.Debug("noproxy CONNECT response write closed", "error", err, "target", target, "client_addr", s.clientAddr)
 		} else {
-			slog.Error("noproxy CONNECT response write failed", "error", err, "target", target, "client_addr", clientAddr)
+			slog.Error("noproxy CONNECT response write failed", "error", err, "target", target, "client_addr", s.clientAddr)
 		}
 		return
 	}
 
-	if cfg.KeepAlive > 0 {
-		enableKeepAlive(conn, cfg.KeepAlive)
-		enableKeepAlive(targetConn, cfg.KeepAlive)
+	if s.cfg.KeepAlive > 0 {
+		enableKeepAlive(s.conn, s.cfg.KeepAlive)
+		enableKeepAlive(targetConn, s.cfg.KeepAlive)
 	}
 
-	slog.Debug("noproxy CONNECT tunnel established", "target", target, "client_addr", clientAddr)
+	slog.Debug("noproxy CONNECT tunnel established", "target", target, "client_addr", s.clientAddr)
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		forwardHalf(targetConn, reqReader, conn, conn.RemoteAddr(), targetConn.RemoteAddr(), cfg.IdleTimeout)
+		forwardHalf(targetConn, s.reqReader, s.conn, s.conn.RemoteAddr(), targetConn.RemoteAddr(), s.cfg.IdleTimeout)
 	})
 	wg.Go(func() {
-		forwardHalf(conn, bufio.NewReader(targetConn), targetConn, targetConn.RemoteAddr(), conn.RemoteAddr(), cfg.IdleTimeout)
+		forwardHalf(s.conn, bufio.NewReader(targetConn), targetConn, targetConn.RemoteAddr(), s.conn.RemoteAddr(), s.cfg.IdleTimeout)
 	})
 	wg.Wait()
 }
