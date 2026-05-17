@@ -84,7 +84,7 @@ jobs:
       # re-implement that behavior with no security benefit, since the
       # action runs pinned to a commit SHA.
       - name: Create draft release with assets
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v2.6.1 # zizmor: ignore[superfluous-actions]
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
           tag_name: ${{ github.ref_name }}
           draft: true
