@@ -54,21 +54,21 @@ func injectForwardingHeaders(req *http.Request, clientAddr string, fwdCfg Forwar
 	if fwdCfg.ForwardedEnabled {
 		obfID := generateObfuscatedID()
 		entry := fmt.Sprintf("for=%s;proto=http", obfID)
-		appendHeaderValue(req.Header, "Forwarded", entry)
+		appendHeaderValue(req.Header, headerForwarded, entry)
 	}
 
 	// H2/H3/H4
 	if fwdCfg.XForwardedForEnabled {
 		clientIP := extractHost(clientAddr)
 		// H2
-		appendHeaderValue(req.Header, "X-Forwarded-For", clientIP)
+		appendHeaderValue(req.Header, headerXForwardedFor, clientIP)
 		// H3
-		if req.Header.Get("X-Forwarded-Proto") == "" {
-			req.Header.Set("X-Forwarded-Proto", "http")
+		if req.Header.Get(headerXForwardedProto) == "" {
+			req.Header.Set(headerXForwardedProto, schemeHTTP)
 		}
 		// H4
-		if req.Header.Get("X-Forwarded-Host") == "" {
-			req.Header.Set("X-Forwarded-Host", req.Host)
+		if req.Header.Get(headerXForwardedHost) == "" {
+			req.Header.Set(headerXForwardedHost, req.Host)
 		}
 	}
 }
@@ -85,7 +85,7 @@ func GenerateViaPseudonym() string {
 // RFC 9110 §7.6.3. The entry identifies this proxy instance using the
 // protocol version received and the proxy's pseudonym.
 func injectVia(header http.Header, proto, pseudonym string) {
-	appendHeaderValue(header, "Via", proto+" "+pseudonym)
+	appendHeaderValue(header, headerVia, proto+" "+pseudonym)
 }
 
 // writeConnectOK writes a raw CONNECT 2xx response to conn without using
@@ -100,7 +100,7 @@ func writeConnectOK(conn net.Conn, resp *http.Response) error {
 	fmt.Fprintf(&buf, "HTTP/%d.%d %d %s\r\n",
 		resp.ProtoMajor, resp.ProtoMinor,
 		resp.StatusCode, http.StatusText(resp.StatusCode))
-	if via := resp.Header.Get("Via"); via != "" {
+	if via := resp.Header.Get(headerVia); via != "" {
 		fmt.Fprintf(&buf, "Via: %s\r\n", via)
 	}
 	buf.WriteString("\r\n")
@@ -125,34 +125,34 @@ func sanitizeHopByHop(req *http.Request) {
 
 	// B1 (RFC 9110 §7.6.1): parse the Connection header for additional
 	// field names to remove, then remove Connection itself.
-	for _, v := range header["Connection"] {
+	for _, v := range header[headerConnection] {
 		for name := range strings.SplitSeq(v, ",") {
 			if name = strings.TrimSpace(name); name != "" {
 				header.Del(name)
 			}
 		}
 	}
-	header.Del("Connection")
+	header.Del(headerConnection)
 
 	// Well-known hop-by-hop headers (RFC 9110 §7.6.1, RFC 9113 §8.2.2).
-	header.Del("Keep-Alive")
-	header.Del("Proxy-Connection") // K3: non-standard hop-by-hop
-	header.Del("TE")
-	header.Del("Trailer")
-	req.Trailer = nil     // ReadRequest moves Trailer into this field
-	header.Del("Upgrade") // J2: strip unless proxy supports the protocol
+	header.Del(headerKeepAlive)
+	header.Del(headerProxyConnection) // K3: non-standard hop-by-hop
+	header.Del(headerTE)
+	header.Del(headerTrailer)
+	req.Trailer = nil         // ReadRequest moves Trailer into this field
+	header.Del(headerUpgrade) // J2: strip unless proxy supports the protocol
 
 	// B2 (RFC 9110 §11.7.1): consume the client's Proxy-Authorization.
 	// The proxy injects its own SPNEGO token after this function returns.
-	header.Del("Proxy-Authorization")
+	header.Del(headerProxyAuthorization)
 
 	// E1 (RFC 9112 §6.1): when both Transfer-Encoding and Content-Length
 	// are present, remove Content-Length to prevent request smuggling.
 	// ReadRequest moves Transfer-Encoding into req.TransferEncoding, so
 	// we check that field rather than the header map.
-	if cl := header.Get("Content-Length"); len(req.TransferEncoding) > 0 && cl != "" {
+	if cl := header.Get(headerContentLength); len(req.TransferEncoding) > 0 && cl != "" {
 		logTECLConflict("request", req.TransferEncoding, cl)
-		header.Del("Content-Length")
+		header.Del(headerContentLength)
 	}
 }
 
@@ -173,14 +173,14 @@ func writeMaxForwardsResponse(conn net.Conn, req *http.Request) {
 		ProtoMajor: 1,
 		ProtoMinor: 1,
 		Header: http.Header{
-			"Content-Type": {"text/plain; charset=utf-8"},
-			"Connection":   {"close"},
+			headerContentType: {contentTypeTextUTF8},
+			headerConnection:  {connectionClose},
 		},
 		Body: http.NoBody,
 	}
 	// OPTIONS: advertise the request methods this proxy accepts.
 	if req.Method == http.MethodOptions {
-		resp.Header.Set("Allow", "GET, HEAD, POST, PUT, DELETE, OPTIONS, TRACE, CONNECT")
+		resp.Header.Set(headerAllow, allowMethods)
 	}
 	_ = resp.Write(conn)
 }
