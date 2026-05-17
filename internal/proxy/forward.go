@@ -220,7 +220,7 @@ func (s *ClientSession) run() {
 				s.tunnelDirect(req)
 			} else {
 				injectVia(req.Header, req.Proto, s.cfg.Pseudonym)
-				handleDirectHTTP(s.conn, req, s.reqReader, s.cfg, s.clientAddr)
+				s.forwardDirect(req)
 			}
 			return
 		}
