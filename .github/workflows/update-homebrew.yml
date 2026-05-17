@@ -68,8 +68,18 @@ jobs:
           mkdir -p ~/.ssh
           echo "${DEPLOY_KEY}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan github.com >> ~/.ssh/known_hosts
-          git config --global core.sshCommand "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes"
+          # Pin GitHub's host keys from the authenticated HTTPS metadata API
+          # rather than trusting whatever the SSH path serves (ssh-keyscan is
+          # trust-on-first-use). Auto-adapts to GitHub host-key rotation. See
+          # issue #226.
+          curl -fsSL --retry 3 https://api.github.com/meta \
+            | jq -r '.ssh_keys[] | "github.com " + .' > ~/.ssh/known_hosts
+          if [ ! -s ~/.ssh/known_hosts ]; then
+            echo "::error::failed to fetch GitHub SSH host keys from api.github.com/meta"
+            exit 1
+          fi
+          chmod 644 ~/.ssh/known_hosts
+          git config --global core.sshCommand "ssh -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes"
 
       - name: Clone tap repo
         run: git clone git@github.com:andrewesweet/homebrew-spnego-proxy.git /tmp/tap
