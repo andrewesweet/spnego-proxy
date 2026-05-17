@@ -167,6 +167,16 @@ func handleClient(conn net.Conn, cfg Config) {
 		}
 	}()
 
+	s.run()
+}
+
+// run executes the client-facing keep-alive loop: read a request, run the
+// validation pipeline, route it (noproxy bypass, CONNECT-via-upstream, or
+// plain HTTP through the upstream proxy), and repeat until either side
+// signals close or an error occurs. The session's conn close / closeWrite
+// and proxyConn cleanup defers stay in handleClient and fire when run
+// returns, preserving the issue #75 LIFO ordering.
+func (s *ClientSession) run() {
 	for iter := 0; ; iter++ {
 		_ = s.conn.SetReadDeadline(time.Now().Add(s.cfg.ReadTimeout))
 		req, err := http.ReadRequest(s.reqReader)
