@@ -159,7 +159,14 @@ func handleDirectHTTP(conn net.Conn, req *http.Request, reqReader *bufio.Reader,
 			}
 			return
 		}
-		_, _ = io.Copy(io.Discard, resp.Body)
+		// Drain so upstreamReader is aligned for the next iteration. A
+		// drain failure means the reader may be mid-body; reusing it
+		// risks response misframing, so close instead of looping.
+		if _, derr := io.Copy(io.Discard, resp.Body); derr != nil {
+			_ = resp.Body.Close()
+			slog.Debug("noproxy upstream body drain failed, closing connection", "error", derr, "target", target, "client_addr", clientAddr)
+			return
+		}
 		_ = resp.Body.Close()
 		slog.Debug("noproxy HTTP response forwarding done", "target", target, "client_addr", clientAddr, "iter", iter)
 

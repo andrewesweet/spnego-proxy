@@ -248,17 +248,19 @@ func handleClient(conn net.Conn, cfg Config) {
 		writeErr := resp.Write(conn)
 		if writeErr != nil {
 			_ = resp.Body.Close()
-			if isExpectedCloseError(writeErr) {
-				slog.Debug("forward closed", "error", writeErr, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
-			} else {
-				slog.Error("forward error", "error", writeErr, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
-			}
+			logForwardError(writeErr, proxyConn.RemoteAddr(), conn.RemoteAddr())
 			return
 		}
 		// Drain any unread body so upstreamReader is aligned for the
 		// next iteration; resp.Write already consumed it for well-framed
-		// responses.
-		_, _ = io.Copy(io.Discard, resp.Body)
+		// responses. If the drain fails the reader may be mid-body and
+		// reusing it for the next request risks response misframing —
+		// close the connection instead of continuing the keep-alive loop.
+		if _, derr := io.Copy(io.Discard, resp.Body); derr != nil {
+			_ = resp.Body.Close()
+			slog.Debug("upstream body drain failed, closing connection", "error", derr, "client_addr", clientAddr, "upstream_addr", cfg.Upstream)
+			return
+		}
 		_ = resp.Body.Close()
 
 		if connectionWillClose(req, resp) {

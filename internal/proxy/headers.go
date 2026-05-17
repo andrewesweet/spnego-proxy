@@ -59,11 +59,7 @@ func injectForwardingHeaders(req *http.Request, clientAddr string, fwdCfg Forwar
 
 	// H2/H3/H4
 	if fwdCfg.XForwardedForEnabled {
-		clientIP, _, err := net.SplitHostPort(clientAddr)
-		if err != nil {
-			slog.Debug("could not parse host:port from client address, using raw address", "client_addr", clientAddr, "error", err)
-			clientIP = clientAddr // fallback when address has no port component
-		}
+		clientIP := extractHost(clientAddr)
 		// H2
 		appendHeaderValue(req.Header, "X-Forwarded-For", clientIP)
 		// H3

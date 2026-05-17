@@ -73,6 +73,20 @@ func isExpectedCloseError(err error) bool {
 	return false
 }
 
+// logForwardError logs a data-forwarding error at the appropriate level:
+// Debug for routine connection teardown (see isExpectedCloseError), Error
+// otherwise. It is a no-op when err is nil.
+func logForwardError(err error, fromAddr, toAddr net.Addr) {
+	if err == nil {
+		return
+	}
+	if isExpectedCloseError(err) {
+		slog.Debug("forward closed", "error", err, "from", fromAddr, "to", toAddr)
+	} else {
+		slog.Error("forward error", "error", err, "from", fromAddr, "to", toAddr)
+	}
+}
+
 // forwardHalf copies data from src to dst, calling CloseWrite on dst when
 // done. It logs the start, completion, and any errors. Callers use
 // wg.Go to launch forwardHalf so the WaitGroup is managed automatically.
@@ -88,13 +102,7 @@ func forwardHalf(dst net.Conn, src io.Reader, srcConn net.Conn, fromAddr, toAddr
 	} else {
 		_, err = io.Copy(dst, src)
 	}
-	if err != nil {
-		if isExpectedCloseError(err) {
-			slog.Debug("forward closed", "error", err, "from", fromAddr, "to", toAddr)
-		} else {
-			slog.Error("forward error", "error", err, "from", fromAddr, "to", toAddr)
-		}
-	}
+	logForwardError(err, fromAddr, toAddr)
 }
 
 // handleConnectTunnel manages the CONNECT tunnel lifecycle per RFC 9110 §9.3.6.
@@ -118,11 +126,7 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 		// Connection is cleaned up by deferred conn.Close() in
 		// handleClient (D5).
 		if err := resp.Write(conn); err != nil {
-			if isExpectedCloseError(err) {
-				slog.Debug("forward closed", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
-			} else {
-				slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
-			}
+			logForwardError(err, proxyConn.RemoteAddr(), conn.RemoteAddr())
 		}
 		slog.Debug("upstream rejected CONNECT", "status", resp.StatusCode, "client_addr", clientAddr)
 		return
@@ -133,11 +137,7 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 	// headers that cause Bun/undici clients to close the connection before
 	// the TLS handshake through the tunnel can begin.
 	if err := writeConnectOK(conn, resp); err != nil {
-		if isExpectedCloseError(err) {
-			slog.Debug("forward closed", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
-		} else {
-			slog.Error("forward error", "error", err, "from", proxyConn.RemoteAddr(), "to", conn.RemoteAddr())
-		}
+		logForwardError(err, proxyConn.RemoteAddr(), conn.RemoteAddr())
 		return
 	}
 
