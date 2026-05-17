@@ -39,10 +39,10 @@ const (
 // negotiateScheme carries a MANDATORY trailing space (RFC 4559 auth-scheme
 // followed by SP before the token).
 const (
-	negotiateScheme     = "Negotiate "                // RFC 4559; trailing SP REQUIRED — do not trim
-	connectionClose     = "close"                     // Connection header value
-	contentTypeTextUTF8 = "text/plain; charset=utf-8" // exact: single space after ';'
-	proxyStatusPrefix   = "spnego-proxy; error="      // RFC 9209 + RFC 8941; trailing '=' intentional
-	schemeHTTP          = "http"                      // X-Forwarded-Proto default
-	allowMethods        = "GET, HEAD, POST, PUT, DELETE, OPTIONS, TRACE, CONNECT"
+	negotiateScheme     = "Negotiate "                                                   // RFC 4559; trailing SP REQUIRED — do not trim
+	connectionClose     = "close"                                                        // Connection header value
+	contentTypeTextUTF8 = "text/plain; charset=utf-8"                                    // exact: single space after ';'
+	proxyStatusPrefix   = "spnego-proxy; error="                                         // RFC 9209 + RFC 8941; trailing '=' intentional
+	schemeHTTP          = "http"                                                         // X-Forwarded-Proto default
+	allowMethods        = "GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS, TRACE, CONNECT" // PATCH per RFC 5789 §3.1
 )
