@@ -24,7 +24,7 @@ func withForwardingConfig(cfg ForwardingConfig) func(*ProxyUnderTest) {
 // added when ForwardingConfig.ForwardedEnabled is false (the zero value).
 func TestForwardedDisabledByDefault(t *testing.T) {
 	rec := proxyRoundTrip(t, nil, withForwardingConfig(ForwardingConfig{}))
-	assertHeaderAbsent(t, rec.Header, "Forwarded")
+	assertHeaderAbsent(t, rec.Header, headerForwarded)
 }
 
 // TestForwardedHeaderAdded verifies that when ForwardedEnabled is true the
@@ -33,7 +33,7 @@ func TestForwardedDisabledByDefault(t *testing.T) {
 func TestForwardedHeaderAdded(t *testing.T) {
 	rec := proxyRoundTrip(t, nil, withForwardingConfig(ForwardingConfig{ForwardedEnabled: true}))
 
-	fwd := rec.Header.Get("Forwarded")
+	fwd := rec.Header.Get(headerForwarded)
 	if fwd == "" {
 		t.Fatal("expected Forwarded header, got none")
 	}
@@ -53,11 +53,11 @@ func TestForwardedHeaderAdded(t *testing.T) {
 func TestForwardedChaining(t *testing.T) {
 	existing := "for=192.0.2.60;proto=http;by=203.0.113.43"
 	rec := proxyRoundTrip(t,
-		http.Header{"Forwarded": {existing}},
+		http.Header{headerForwarded: {existing}},
 		withForwardingConfig(ForwardingConfig{ForwardedEnabled: true}),
 	)
 
-	fwd := rec.Header.Get("Forwarded")
+	fwd := rec.Header.Get(headerForwarded)
 	if fwd == "" {
 		t.Fatal("expected Forwarded header, got none")
 	}
@@ -110,7 +110,7 @@ func TestForwardedObfuscatedFormat(t *testing.T) {
 // added when ForwardingConfig.XForwardedForEnabled is false (the zero value).
 func TestXForwardedForDisabledByDefault(t *testing.T) {
 	rec := proxyRoundTrip(t, nil, withForwardingConfig(ForwardingConfig{}))
-	assertHeaderAbsent(t, rec.Header, "X-Forwarded-For")
+	assertHeaderAbsent(t, rec.Header, headerXForwardedFor)
 }
 
 // TestXForwardedForAdded verifies that when XForwardedForEnabled is true, the
@@ -118,7 +118,7 @@ func TestXForwardedForDisabledByDefault(t *testing.T) {
 func TestXForwardedForAdded(t *testing.T) {
 	rec := proxyRoundTrip(t, nil, withForwardingConfig(ForwardingConfig{XForwardedForEnabled: true}))
 
-	xff := rec.Header.Get("X-Forwarded-For")
+	xff := rec.Header.Get(headerXForwardedFor)
 	if xff == "" {
 		t.Fatal("expected X-Forwarded-For header, got none")
 	}
@@ -133,11 +133,11 @@ func TestXForwardedForAdded(t *testing.T) {
 func TestXForwardedForChaining(t *testing.T) {
 	existing := "10.0.0.1"
 	rec := proxyRoundTrip(t,
-		http.Header{"X-Forwarded-For": {existing}},
+		http.Header{headerXForwardedFor: {existing}},
 		withForwardingConfig(ForwardingConfig{XForwardedForEnabled: true}),
 	)
 
-	xff := rec.Header.Get("X-Forwarded-For")
+	xff := rec.Header.Get(headerXForwardedFor)
 	if !strings.HasPrefix(xff, existing) {
 		t.Errorf("X-Forwarded-For %q: expected to start with existing value %q", xff, existing)
 	}
@@ -155,7 +155,7 @@ func TestXForwardedForChaining(t *testing.T) {
 func TestXForwardedProtoAddedWithXFF(t *testing.T) {
 	rec := proxyRoundTrip(t, nil, withForwardingConfig(ForwardingConfig{XForwardedForEnabled: true}))
 
-	if got := rec.Header.Get("X-Forwarded-Proto"); got != "http" {
+	if got := rec.Header.Get(headerXForwardedProto); got != "http" {
 		t.Errorf("X-Forwarded-Proto: want %q, got %q", "http", got)
 	}
 }
@@ -164,11 +164,11 @@ func TestXForwardedProtoAddedWithXFF(t *testing.T) {
 // X-Forwarded-Proto value is not replaced.
 func TestXForwardedProtoNotOverwritten(t *testing.T) {
 	rec := proxyRoundTrip(t,
-		http.Header{"X-Forwarded-Proto": {"https"}},
+		http.Header{headerXForwardedProto: {"https"}},
 		withForwardingConfig(ForwardingConfig{XForwardedForEnabled: true}),
 	)
 
-	if got := rec.Header.Get("X-Forwarded-Proto"); got != "https" {
+	if got := rec.Header.Get(headerXForwardedProto); got != "https" {
 		t.Errorf("X-Forwarded-Proto: want existing %q preserved, got %q", "https", got)
 	}
 }
@@ -177,7 +177,7 @@ func TestXForwardedProtoNotOverwritten(t *testing.T) {
 // not injected when XForwardedForEnabled is false.
 func TestXForwardedProtoAbsentWhenDisabled(t *testing.T) {
 	rec := proxyRoundTrip(t, nil, withForwardingConfig(ForwardingConfig{}))
-	assertHeaderAbsent(t, rec.Header, "X-Forwarded-Proto")
+	assertHeaderAbsent(t, rec.Header, headerXForwardedProto)
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +189,7 @@ func TestXForwardedProtoAbsentWhenDisabled(t *testing.T) {
 func TestXForwardedHostAddedWithXFF(t *testing.T) {
 	rec := proxyRoundTrip(t, nil, withForwardingConfig(ForwardingConfig{XForwardedForEnabled: true}))
 
-	if got := rec.Header.Get("X-Forwarded-Host"); got != "example.com" {
+	if got := rec.Header.Get(headerXForwardedHost); got != "example.com" {
 		t.Errorf("X-Forwarded-Host: want %q, got %q", "example.com", got)
 	}
 }
@@ -198,11 +198,11 @@ func TestXForwardedHostAddedWithXFF(t *testing.T) {
 // X-Forwarded-Host value is not replaced.
 func TestXForwardedHostNotOverwritten(t *testing.T) {
 	rec := proxyRoundTrip(t,
-		http.Header{"X-Forwarded-Host": {"original.example.com"}},
+		http.Header{headerXForwardedHost: {"original.example.com"}},
 		withForwardingConfig(ForwardingConfig{XForwardedForEnabled: true}),
 	)
 
-	if got := rec.Header.Get("X-Forwarded-Host"); got != "original.example.com" {
+	if got := rec.Header.Get(headerXForwardedHost); got != "original.example.com" {
 		t.Errorf("X-Forwarded-Host: want existing %q preserved, got %q", "original.example.com", got)
 	}
 }
@@ -211,7 +211,7 @@ func TestXForwardedHostNotOverwritten(t *testing.T) {
 // injected when XForwardedForEnabled is false.
 func TestXForwardedHostAbsentWhenDisabled(t *testing.T) {
 	rec := proxyRoundTrip(t, nil, withForwardingConfig(ForwardingConfig{}))
-	assertHeaderAbsent(t, rec.Header, "X-Forwarded-Host")
+	assertHeaderAbsent(t, rec.Header, headerXForwardedHost)
 }
 
 // ---------------------------------------------------------------------------
@@ -227,16 +227,16 @@ func TestBothForwardingHeadersEnabled(t *testing.T) {
 	}
 	rec := proxyRoundTrip(t, nil, withForwardingConfig(cfg))
 
-	if fwd := rec.Header.Get("Forwarded"); fwd == "" {
+	if fwd := rec.Header.Get(headerForwarded); fwd == "" {
 		t.Error("expected Forwarded header, got none")
 	}
-	if xff := rec.Header.Get("X-Forwarded-For"); xff == "" {
+	if xff := rec.Header.Get(headerXForwardedFor); xff == "" {
 		t.Error("expected X-Forwarded-For header, got none")
 	}
-	if xfp := rec.Header.Get("X-Forwarded-Proto"); xfp != "http" {
+	if xfp := rec.Header.Get(headerXForwardedProto); xfp != "http" {
 		t.Errorf("X-Forwarded-Proto: want %q, got %q", "http", xfp)
 	}
-	if xfh := rec.Header.Get("X-Forwarded-Host"); xfh != "example.com" {
+	if xfh := rec.Header.Get(headerXForwardedHost); xfh != "example.com" {
 		t.Errorf("X-Forwarded-Host: want %q, got %q", "example.com", xfh)
 	}
 }
@@ -271,7 +271,7 @@ func TestForwardingHeadersDoNotAffectVia(t *testing.T) {
 	}
 	rec := proxyRoundTrip(t, nil, withForwardingConfig(cfg))
 
-	via := rec.Header.Get("Via")
+	via := rec.Header.Get(headerVia)
 	if via == "" {
 		t.Error("Via header absent when forwarding headers enabled")
 	}
@@ -290,5 +290,5 @@ func TestForwardingHeadersDoNotAffectProxyAuthorization(t *testing.T) {
 	}
 	rec := proxyRoundTrip(t, nil, withForwardingConfig(cfg))
 
-	assertHeaderPresent(t, rec.Header, "Proxy-Authorization", fmt.Sprintf("Negotiate %s", "test-token"))
+	assertHeaderPresent(t, rec.Header, headerProxyAuthorization, fmt.Sprintf("Negotiate %s", "test-token"))
 }

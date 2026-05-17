@@ -98,7 +98,7 @@ func FuzzContentLengthValues(f *testing.F) {
 	f.Fuzz(func(t *testing.T, raw string) {
 		// '\n'-separated header values; each value may itself be a comma list.
 		values := strings.Split(raw, "\n")
-		resp := &http.Response{Header: http.Header{"Content-Length": values}}
+		resp := &http.Response{Header: http.Header{headerContentLength: values}}
 
 		accepted := validateResponseContentLength(resp) == nil
 		if !accepted {
@@ -150,7 +150,7 @@ func isTcharByte(c byte) bool {
 // them. Only the boolean is asserted (validateResponseHeaderBytes ranges a map
 // and the *blamed* header is non-deterministic; the nil/non-nil result is not).
 func FuzzHeaderByteValidators(f *testing.F) {
-	f.Add("Content-Type", "text/html")
+	f.Add(headerContentType, "text/html")
 	f.Add("X\x01", "v")
 	f.Add("Set-Cookie", "a\rb")
 	f.Add("Set-Cookie", "a\x7fb")

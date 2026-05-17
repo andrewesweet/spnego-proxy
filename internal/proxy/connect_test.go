@@ -121,7 +121,7 @@ func TestD4_ConnectPortRestriction(t *testing.T) {
 
 			if tc.wantStatus == http.StatusForbidden {
 				wantPS := "spnego-proxy; error=http_request_denied"
-				if got := resp.Header.Get("Proxy-Status"); got != wantPS {
+				if got := resp.Header.Get(headerProxyStatus); got != wantPS {
 					t.Errorf("Proxy-Status: want %q, got %q", wantPS, got)
 				}
 
@@ -572,8 +572,8 @@ func TestD3_RFC9112_NoTransferEncodingInCONNECTResponse(t *testing.T) {
 	// Content-Length and Connection: close MUST NOT appear in the CONNECT
 	// 2xx response — they cause Bun/undici to close the connection before
 	// the TLS handshake through the tunnel can begin.
-	assertHeaderAbsent(t, resp.Header, "Content-Length")
-	assertHeaderAbsent(t, resp.Header, "Connection")
+	assertHeaderAbsent(t, resp.Header, headerContentLength)
+	assertHeaderAbsent(t, resp.Header, headerConnection)
 }
 
 // ---------------------------------------------------------------------------

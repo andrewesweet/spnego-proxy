@@ -266,8 +266,8 @@ func TestGSSProxyChainWithEphemeralKDC(t *testing.T) {
 			return
 		}
 		_ = req.Body.Close()
-		gotAuth <- req.Header.Get("Proxy-Authorization")
-		gotVia <- req.Header.Get("Via")
+		gotAuth <- req.Header.Get(headerProxyAuthorization)
+		gotVia <- req.Header.Get(headerVia)
 
 		resp := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
 		_, _ = conn.Write([]byte(resp))
