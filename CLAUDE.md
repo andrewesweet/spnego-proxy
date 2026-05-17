@@ -143,9 +143,7 @@ Key details for AI context:
   fine-grained PAT scoped to ONLY that repo (contents RW), secret
   `FUZZ_CORPUS_TOKEN` — not an SSH deploy key
 - Register every new `Fuzz*` with a `compile_native_go_fuzzer` line in
-  `.clusterfuzzlite/build.sh`. Legacy `.github/workflows/fuzz.yml` retained
-  until the CFL batch is validated, then removed; while present, add the name
-  to its matrix too
+  `.clusterfuzzlite/build.sh`
 
 ## Release Process
 

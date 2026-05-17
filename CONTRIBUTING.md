@@ -146,9 +146,6 @@ library directly (the Go team already does) — fuzz *our* logic, optionally
    reproducer (do not commit it).
 5. **Register the target.** Add a `compile_native_go_fuzzer` line for every new
    `Fuzz*` function in `.clusterfuzzlite/build.sh` so ClusterFuzzLite builds it.
-   The legacy nightly `Fuzz` workflow (`.github/workflows/fuzz.yml`) is retained
-   until the ClusterFuzzLite batch is validated against the storage repo, then
-   removed; while it exists, also add the name to its matrix.
 
 ## Formatting
 
