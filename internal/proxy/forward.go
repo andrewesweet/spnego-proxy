@@ -227,7 +227,7 @@ func (s *ClientSession) run() {
 		// cannot share with prior HTTP responses on the keep-alive
 		// connection.
 		if req.Method == http.MethodConnect {
-			forwardConnectViaUpstream(s.conn, req, s.reqReader, s.cfg, s.clientAddr)
+			s.tunnelViaUpstream(req)
 			return
 		}
 
@@ -281,28 +281,30 @@ func (s *ClientSession) run() {
 	}
 }
 
-// forwardConnectViaUpstream performs the CONNECT-via-upstream-proxy flow:
+// tunnelViaUpstream performs the CONNECT-via-upstream-proxy flow:
 // inject forwarding headers, acquire a SPNEGO token, dial a FRESH upstream
 // connection, send the CONNECT request, and hand off to handleConnectTunnel.
 // A fresh connection is required because a CONNECT tunnel co-opts the
 // entire upstream connection for opaque bytes; it must not share with
-// prior keep-alive HTTP traffic on the same socket.
-func forwardConnectViaUpstream(conn net.Conn, req *http.Request, reqReader *bufio.Reader, cfg Config, clientAddr string) {
-	injectForwardingHeaders(req, clientAddr, cfg.Forwarding)
+// prior keep-alive HTTP traffic on the same socket. The fresh proxyConn is
+// therefore a method-local connection with its own deferred Close and is
+// never stored on the session (s.proxyConn is the reused keep-alive conn).
+func (s *ClientSession) tunnelViaUpstream(req *http.Request) {
+	injectForwardingHeaders(req, s.clientAddr, s.cfg.Forwarding)
 
-	proxyConn := dialAndAuthUpstream(conn, req, cfg, clientAddr)
+	proxyConn := dialAndAuthUpstream(s.conn, req, s.cfg, s.clientAddr)
 	if proxyConn == nil {
 		return
 	}
 	defer func() { _ = proxyConn.Close() }()
-	injectVia(req.Header, req.Proto, cfg.Pseudonym)
+	injectVia(req.Header, req.Proto, s.cfg.Pseudonym)
 
-	slog.Debug("proxy request", "method", req.Method, "uri", req.RequestURI, "proto", req.Proto, "headers", len(req.Header), "client_addr", clientAddr, "upstream_addr", cfg.Upstream, "via", req.Header.Get(headerVia))
+	slog.Debug("proxy request", "method", req.Method, "uri", req.RequestURI, "proto", req.Proto, "headers", len(req.Header), "client_addr", s.clientAddr, "upstream_addr", s.cfg.Upstream, "via", req.Header.Get(headerVia))
 	if err := req.WriteProxy(proxyConn); err != nil {
-		slog.Error("failed to write request to proxy", "error", err, "error_type", errConnectionTerminated.errorType, "client_addr", clientAddr, "upstream_addr", cfg.Upstream, "method", req.Method, "host", req.Host)
-		writeHTTPError(conn, errConnectionTerminated)
+		slog.Error("failed to write request to proxy", "error", err, "error_type", errConnectionTerminated.errorType, "client_addr", s.clientAddr, "upstream_addr", s.cfg.Upstream, "method", req.Method, "host", req.Host)
+		writeHTTPError(s.conn, errConnectionTerminated)
 		return
 	}
 
-	handleConnectTunnel(conn, proxyConn, reqReader, req, cfg.Pseudonym, clientAddr, cfg.IdleTimeout)
+	handleConnectTunnel(s.conn, proxyConn, s.reqReader, req, s.cfg.Pseudonym, s.clientAddr, s.cfg.IdleTimeout)
 }
