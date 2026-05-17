@@ -201,10 +201,15 @@ func TestG1_MaxForwards_Table(t *testing.T) {
 				if len(body) != 0 {
 					t.Errorf("expected empty body for MF=0 local response, got %d bytes: %q", len(body), body)
 				}
-				// OPTIONS MF=0: Allow header must be present per RFC 9110.
+				// OPTIONS MF=0: Allow header must be present per RFC 9110
+				// §9.3.7, and carry the proxy's exact advertised method set
+				// (RFC 9110 §10.1.1; PATCH per RFC 5789 §3.1). Pinning the
+				// literal locks this HTTP-contract surface against drift —
+				// asserting against allowMethods would be tautological.
 				if tc.method == "OPTIONS" {
-					if allow := resp.Header.Get(headerAllow); allow == "" {
-						t.Error("OPTIONS MF=0 response missing Allow header")
+					const wantAllow = "GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS, TRACE, CONNECT"
+					if allow := resp.Header.Get(headerAllow); allow != wantAllow {
+						t.Errorf("OPTIONS MF=0 Allow header = %q, want %q", allow, wantAllow)
 					}
 				}
 			}
