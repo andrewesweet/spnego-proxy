@@ -161,3 +161,21 @@ Key details for AI context:
 - No GoReleaser — macOS builds require `CGO_ENABLED=1` for native GSS framework
 - Manual release: `git tag vX.Y.Z && git push origin vX.Y.Z` (requires admin)
 - Verify: `gh attestation verify <archive> -R andrewesweet/spnego-proxy`
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked as GitHub issues via the `gh` CLI in
+`andrewesweet/spnego-proxy`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical triage roles using the default label names (`needs-triage`,
+`needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`).
+See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root.
+See `docs/agents/domain.md`.
