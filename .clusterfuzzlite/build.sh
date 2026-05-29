@@ -21,17 +21,26 @@ GO118_FUZZ_BUILD_VERSION=v0.0.0-20250520111509-a70c2aa677fa
 go install "github.com/AdamKorcz/go-118-fuzz-build@${GO118_FUZZ_BUILD_VERSION}"
 go get "github.com/AdamKorcz/go-118-fuzz-build/testing@${GO118_FUZZ_BUILD_VERSION}"
 
-# compile_native_go_fuzzer imports the target by path; package main is not
+# compile_native_go_fuzzer_v2 imports the target by path; package main is not
 # importable, so the targets live in the internal/proxy package.
 PKG=github.com/andrewesweet/spnego-proxy/internal/proxy
 
-compile_native_go_fuzzer "$PKG" FuzzNoProxyMatch            fuzz_no_proxy_match
-compile_native_go_fuzzer "$PKG" FuzzUpstreamResponseFraming fuzz_upstream_response_framing
-compile_native_go_fuzzer "$PKG" FuzzConnectPortChain        fuzz_connect_port_chain
-compile_native_go_fuzzer "$PKG" FuzzSameHost                fuzz_same_host
-compile_native_go_fuzzer "$PKG" FuzzIPAllowlistChain        fuzz_ip_allowlist_chain
-compile_native_go_fuzzer "$PKG" FuzzContentLengthValues     fuzz_content_length_values
-compile_native_go_fuzzer "$PKG" FuzzHeaderByteValidators    fuzz_header_byte_validators
+# Use the _v2 entrypoint, NOT plain compile_native_go_fuzzer. The v1 script
+# routes coverage builds through build_native_go_fuzzer_legacy, which never
+# writes $OUT/fuzzer_function_names.json (nor native_go_fuzzers.json /
+# fuzzer-parameters.json). The post-#13835 base-runner coverage script reads
+# those files to build `-test.run=^<FuzzFunc>$` and to convert the downloaded
+# corpus to Go's stdlib format; without them every target matched no test
+# ("testing: warning: no tests to run") and reported 0% coverage. The v2
+# entrypoint takes the same args and runs the modern build_native_go_fuzzer,
+# which emits all three files and replays the real corpus during coverage.
+compile_native_go_fuzzer_v2 "$PKG" FuzzNoProxyMatch            fuzz_no_proxy_match
+compile_native_go_fuzzer_v2 "$PKG" FuzzUpstreamResponseFraming fuzz_upstream_response_framing
+compile_native_go_fuzzer_v2 "$PKG" FuzzConnectPortChain        fuzz_connect_port_chain
+compile_native_go_fuzzer_v2 "$PKG" FuzzSameHost                fuzz_same_host
+compile_native_go_fuzzer_v2 "$PKG" FuzzIPAllowlistChain        fuzz_ip_allowlist_chain
+compile_native_go_fuzzer_v2 "$PKG" FuzzContentLengthValues     fuzz_content_length_values
+compile_native_go_fuzzer_v2 "$PKG" FuzzHeaderByteValidators    fuzz_header_byte_validators
 
 # Carry the committed Go regression seed into the ClusterFuzzLite corpus so a
 # fresh storage repo starts from the known FuzzNoProxyMatch reproducer.

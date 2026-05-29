@@ -142,8 +142,10 @@ Key details for AI context:
   storage repo inside the OSS-Fuzz container (no ssh there), so auth is a
   fine-grained PAT scoped to ONLY that repo (contents RW), secret
   `FUZZ_CORPUS_TOKEN` — not an SSH deploy key
-- Register every new `Fuzz*` with a `compile_native_go_fuzzer` line in
-  `.clusterfuzzlite/build.sh`
+- Register every new `Fuzz*` with a `compile_native_go_fuzzer_v2` line in
+  `.clusterfuzzlite/build.sh` (the `_v2` entrypoint, not plain
+  `compile_native_go_fuzzer`: v1 routes coverage through the legacy path that
+  skips the `fuzzer_function_names.json` the runner needs, giving 0% coverage)
 
 ## Release Process
 
