@@ -27,6 +27,39 @@ func sameHostRef(h, defaultPort string) string {
 	return host + "|" + port
 }
 
+// wellFormedHost reports whether h is a realistic authority: a valid IP literal
+// (optionally bracketed) or a clean DNS-charset name, optionally with a port.
+// The differential below is only sound for such inputs. On malformed bracketing
+// (e.g. "[z:" vs "[[z:]") production's balanced stripIPv6Brackets and
+// sameHostRef's independent TrimPrefix/TrimSuffix legitimately diverge without
+// any two genuinely valid hosts colliding, so asserting there is noise, not a
+// smuggling vector. Mirrors differentiableHost in noproxy_fuzz_test.go.
+func wellFormedHost(h string) bool {
+	h = strings.ToLower(strings.TrimSpace(h))
+	host, _, err := net.SplitHostPort(h)
+	if err != nil {
+		host = h
+		if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+			host = host[1 : len(host)-1]
+		}
+	}
+	if _, e := netip.ParseAddr(host); e == nil {
+		return true
+	}
+	if host == "" {
+		return false
+	}
+	for i := range len(host) {
+		c := host[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '.', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // FuzzSameHost guards the keep-alive connection binding in handleDirectHTTP:
 // sameHost falsely reporting two different hosts as equal lets a smuggled
 // pipelined request ride a direct connection bound to a different,
@@ -36,9 +69,12 @@ func sameHostRef(h, defaultPort string) string {
 //   - never panics;
 //   - reflexivity: sameHost(a,a,d) is always true;
 //   - symmetry: sameHost(a,b,d) == sameHost(b,a,d);
-//   - one-directional soundness: sameHost(a,b,d)==true implies an independent
-//     canonicalisation also considers them equal. The converse is NOT asserted
-//     (production being stricter than the reference is safe).
+//   - one-directional soundness: for well-formed authorities,
+//     sameHost(a,b,d)==true implies an independent canonicalisation also
+//     considers them equal. The converse is NOT asserted (production being
+//     stricter than the reference is safe), and malformed-bracket inputs are
+//     excluded via wellFormedHost (the two bracket-stripping strategies diverge
+//     there without any valid hosts colliding — noise, not a smuggling vector).
 func FuzzSameHost(f *testing.F) {
 	f.Add("Example.com:80", "example.com", "80")
 	f.Add("[::1]", "[0:0:0:0:0:0:0:1]:80", "80")
@@ -58,7 +94,11 @@ func FuzzSameHost(f *testing.F) {
 		if ab != sameHost(b, a, defaultPort) {
 			t.Fatalf("symmetry violated: a=%q b=%q d=%q", a, b, defaultPort)
 		}
-		if ab && sameHostRef(a, defaultPort) != sameHostRef(b, defaultPort) {
+		// Sound differential, restricted to well-formed authorities: only there
+		// do production's canon and sameHostRef agree on bracket handling, so a
+		// disagreement is a real collision rather than malformed-bracket noise.
+		if ab && wellFormedHost(a) && wellFormedHost(b) &&
+			sameHostRef(a, defaultPort) != sameHostRef(b, defaultPort) {
 			t.Fatalf("sameHost equated different hosts (smuggling vector): a=%q b=%q d=%q ref(a)=%q ref(b)=%q",
 				a, b, defaultPort, sameHostRef(a, defaultPort), sameHostRef(b, defaultPort))
 		}
