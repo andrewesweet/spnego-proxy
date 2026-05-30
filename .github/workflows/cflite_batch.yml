@@ -63,6 +63,13 @@ jobs:
   prune:
     name: corpus pruning
     needs: batch
+    # Run regardless of whether batch found a bug. run_fuzzers reports a failure
+    # (non-zero exit) on any finding unless dry-run is set, so batch goes red
+    # even though it already uploaded the grown corpus. Corpus pruning and the
+    # coverage upload are orthogonal to "a bug exists" and must not be skipped
+    # by the default failed-dependency behaviour. !cancelled() keeps the bug
+    # signal red while still running here; it skips only on manual cancellation.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Build fuzzers
@@ -87,6 +94,10 @@ jobs:
   coverage:
     name: coverage report
     needs: prune
+    # See prune: run even if batch/prune went red, so the coverage report still
+    # publishes. needs: prune is retained only for ordering (coverage uses the
+    # pruned corpus); !cancelled() detaches it from prune's success/failure.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Build fuzzers (coverage)
