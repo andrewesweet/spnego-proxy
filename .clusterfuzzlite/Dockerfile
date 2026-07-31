@@ -5,7 +5,7 @@
 # (see .github/dependabot.yml, directory /.clusterfuzzlite) keeps this digest
 # current. base-builder-go ships the Go toolchain plus the
 # `compile_native_go_fuzzer` helper used by build.sh.
-FROM gcr.io/oss-fuzz-base/base-builder-go@sha256:d98fd3174e3824f362850e675dc4acab8135dc18a0e1efdfbeaacea7fb0c2dbb
+FROM gcr.io/oss-fuzz-base/base-builder-go@sha256:e5e5ecf4fb18a2f47bf0462c37e35728e8f6023ee4b7ff8bc5f903e6acba46da
 
 COPY . $SRC/spnego-proxy
 WORKDIR $SRC/spnego-proxy
