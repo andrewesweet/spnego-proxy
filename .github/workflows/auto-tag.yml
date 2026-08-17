@@ -98,6 +98,11 @@ jobs:
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          # Scope the token down from the app's blanket installation
+          # permissions. The token is only used to check out the repository and
+          # to `git push origin HEAD:master --tags`, both of which are covered
+          # by contents:write.
+          permission-contents: write
 
       - name: Checkout
         # zizmor: ignore[artipacked] credentials are persisted intentionally so the
