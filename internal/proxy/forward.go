@@ -50,20 +50,8 @@ func (s *ClientSession) validateRequest(req *http.Request) (proceed bool, pe *pr
 	}
 
 	// G1 (RFC 9110 §7.6.2): TRACE/OPTIONS Max-Forwards.
-	if req.Method == http.MethodTrace || req.Method == http.MethodOptions {
-		if mf := req.Header.Get(headerMaxForwards); mf != "" {
-			n, err := strconv.Atoi(mf)
-			switch {
-			case err != nil:
-				slog.Debug("non-numeric Max-Forwards value, forwarding unmodified", "max_forwards", mf, "client_addr", s.clientAddr)
-			case n <= 0:
-				slog.Debug("Max-Forwards: 0, responding locally", "method", req.Method, "client_addr", s.clientAddr)
-				writeMaxForwardsResponse(s.conn, req)
-				return false, nil
-			default:
-				req.Header.Set(headerMaxForwards, strconv.Itoa(n-1))
-			}
-		}
+	if !s.applyMaxForwards(req) {
+		return false, nil
 	}
 
 	// Hop-by-hop sanitisation (RFC 9110 §7.6.1) — runs on every
@@ -71,6 +59,32 @@ func (s *ClientSession) validateRequest(req *http.Request) (proceed bool, pe *pr
 	// already-authenticated upstream connection.
 	sanitizeHopByHop(req)
 	return true, nil
+}
+
+// applyMaxForwards implements the G1 (RFC 9110 §7.6.2) Max-Forwards rule for
+// TRACE and OPTIONS: decrement the header when it carries a positive count,
+// leave a non-numeric value untouched, and answer locally when the count has
+// reached zero. It reports whether the request should still be forwarded;
+// false means a local response has already been written.
+func (s *ClientSession) applyMaxForwards(req *http.Request) bool {
+	if req.Method != http.MethodTrace && req.Method != http.MethodOptions {
+		return true
+	}
+	mf := req.Header.Get(headerMaxForwards)
+	if mf == "" {
+		return true
+	}
+	switch n, err := strconv.Atoi(mf); {
+	case err != nil:
+		slog.Debug("non-numeric Max-Forwards value, forwarding unmodified", "max_forwards", mf, "client_addr", s.clientAddr)
+	case n <= 0:
+		slog.Debug("Max-Forwards: 0, responding locally", "method", req.Method, "client_addr", s.clientAddr)
+		writeMaxForwardsResponse(s.conn, req)
+		return false
+	default:
+		req.Header.Set(headerMaxForwards, strconv.Itoa(n-1))
+	}
+	return true
 }
 
 // connectionWillClose reports whether either side has signalled that the
