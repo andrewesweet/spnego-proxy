@@ -70,6 +70,26 @@ func NewNoProxyMatcher(patterns string) *NoProxyMatcher {
 	return m
 }
 
+// matches reports whether this single rule covers the given host. hostIP is
+// the host pre-parsed as an IP address (invalid when the host is a name); an
+// invalid Addr never equals a rule IP nor is contained by a rule prefix, so no
+// separate validity check is needed.
+func (r noProxyRule) matches(host string, hostIP netip.Addr) bool {
+	switch r.kind {
+	case ruleAll:
+		return true
+	case ruleHostname:
+		return host == r.host
+	case ruleWildcard:
+		// ".corp.com" matches the base domain "corp.com" and any subdomain.
+		return host == r.suffix[1:] || strings.HasSuffix(host, r.suffix)
+	case ruleIP:
+		return hostIP == r.ip
+	default: // ruleCIDR
+		return r.prefix.Contains(hostIP)
+	}
+}
+
 // Match reports whether host (with or without a port) is covered by any
 // bypass pattern. On a match it also returns the original pattern string so
 // callers can include it in debug log messages.
@@ -88,31 +108,8 @@ func (m *NoProxyMatcher) Match(host string) (matched bool, pattern string) {
 	hostIP, _ := netip.ParseAddr(host)
 
 	for _, rule := range m.rules {
-		switch rule.kind {
-		case ruleAll:
+		if rule.matches(host, hostIP) {
 			return true, rule.raw
-		case ruleHostname:
-			if host == rule.host {
-				return true, rule.raw
-			}
-		case ruleWildcard:
-			// Match the base domain itself (e.g. "corp.com" matches ".corp.com").
-			base := rule.suffix[1:] // strip leading '.'
-			if host == base {
-				return true, rule.raw
-			}
-			// Match any subdomain (e.g. "foo.corp.com" matches ".corp.com").
-			if strings.HasSuffix(host, rule.suffix) {
-				return true, rule.raw
-			}
-		case ruleIP:
-			if hostIP.IsValid() && hostIP == rule.ip {
-				return true, rule.raw
-			}
-		case ruleCIDR:
-			if hostIP.IsValid() && rule.prefix.Contains(hostIP) {
-				return true, rule.raw
-			}
 		}
 	}
 	return false, ""
