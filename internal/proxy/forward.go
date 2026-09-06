@@ -50,20 +50,8 @@ func (s *ClientSession) validateRequest(req *http.Request) (proceed bool, pe *pr
 	}
 
 	// G1 (RFC 9110 §7.6.2): TRACE/OPTIONS Max-Forwards.
-	if req.Method == http.MethodTrace || req.Method == http.MethodOptions {
-		if mf := req.Header.Get(headerMaxForwards); mf != "" {
-			n, err := strconv.Atoi(mf)
-			switch {
-			case err != nil:
-				slog.Debug("non-numeric Max-Forwards value, forwarding unmodified", "max_forwards", mf, "client_addr", s.clientAddr)
-			case n <= 0:
-				slog.Debug("Max-Forwards: 0, responding locally", "method", req.Method, "client_addr", s.clientAddr)
-				writeMaxForwardsResponse(s.conn, req)
-				return false, nil
-			default:
-				req.Header.Set(headerMaxForwards, strconv.Itoa(n-1))
-			}
-		}
+	if !s.applyMaxForwards(req) {
+		return false, nil
 	}
 
 	// Hop-by-hop sanitisation (RFC 9110 §7.6.1) — runs on every
@@ -71,6 +59,32 @@ func (s *ClientSession) validateRequest(req *http.Request) (proceed bool, pe *pr
 	// already-authenticated upstream connection.
 	sanitizeHopByHop(req)
 	return true, nil
+}
+
+// applyMaxForwards implements the G1 (RFC 9110 §7.6.2) Max-Forwards rule for
+// TRACE and OPTIONS: decrement the header when it carries a positive count,
+// leave a non-numeric value untouched, and answer locally when the count has
+// reached zero. It reports whether the request should still be forwarded;
+// false means a local response has already been written.
+func (s *ClientSession) applyMaxForwards(req *http.Request) bool {
+	if req.Method != http.MethodTrace && req.Method != http.MethodOptions {
+		return true
+	}
+	mf := req.Header.Get(headerMaxForwards)
+	if mf == "" {
+		return true
+	}
+	switch n, err := strconv.Atoi(mf); {
+	case err != nil:
+		slog.Debug("non-numeric Max-Forwards value, forwarding unmodified", "max_forwards", mf, "client_addr", s.clientAddr)
+	case n <= 0:
+		slog.Debug("Max-Forwards: 0, responding locally", "method", req.Method, "client_addr", s.clientAddr)
+		writeMaxForwardsResponse(s.conn, req)
+		return false
+	default:
+		req.Header.Set(headerMaxForwards, strconv.Itoa(n-1))
+	}
+	return true
 }
 
 // connectionWillClose reports whether either side has signalled that the
@@ -190,20 +204,8 @@ func handleClient(conn net.Conn, cfg Config) {
 // returns, preserving the issue #75 LIFO ordering.
 func (s *ClientSession) run() {
 	for iter := 0; ; iter++ {
-		_ = s.conn.SetReadDeadline(time.Now().Add(s.cfg.ReadTimeout))
-		req, err := http.ReadRequest(s.reqReader)
-		_ = s.conn.SetReadDeadline(time.Time{})
-		if err != nil {
-			if iter == 0 {
-				if isExpectedCloseError(err) {
-					slog.Debug("client connection closed before request", "error", err, "client_addr", s.clientAddr)
-				} else {
-					slog.Error("failed to read request", "error", err, "error_type", errHTTPRequestError.errorType, "client_addr", s.clientAddr)
-					writeHTTPError(s.conn, errHTTPRequestError)
-				}
-			} else {
-				slog.Debug("keep-alive loop ended", "error", err, "iter", iter, "client_addr", s.clientAddr)
-			}
+		req := s.readNextRequest(iter)
+		if req == nil {
 			return
 		}
 
@@ -215,82 +217,117 @@ func (s *ClientSession) run() {
 			return
 		}
 
-		// Noproxy bypass — direct dial to the target. Terminates the
-		// keep-alive loop because the authenticated upstream connection
-		// (if any) cannot serve a direct-dial request.
-		matched, pattern := false, ""
-		if s.cfg.NoProxy != nil {
-			matched, pattern = s.cfg.NoProxy.Match(req.Host)
-		}
-		if matched {
-			slog.Debug("noproxy bypass", "host", req.Host, "pattern", pattern, "method", req.Method, "client_addr", s.clientAddr)
-			if req.Method == http.MethodConnect {
-				s.tunnelDirect(req)
-			} else {
-				injectVia(req.Header, req.Proto, s.cfg.Pseudonym)
-				s.forwardDirect(req)
-			}
+		// Noproxy bypass and CONNECT-via-upstream both terminate the
+		// keep-alive loop: neither can share the authenticated upstream
+		// connection with further HTTP requests.
+		if s.routeNoProxy(req) {
 			return
 		}
-
-		// CONNECT via upstream proxy — tunnel mode terminates the loop.
-		// A CONNECT request always dials a fresh upstream connection
-		// because a tunnel co-opts the connection for opaque bytes; it
-		// cannot share with prior HTTP responses on the keep-alive
-		// connection.
 		if req.Method == http.MethodConnect {
 			s.tunnelViaUpstream(req)
 			return
 		}
 
-		// Plain HTTP through upstream proxy. Lazy-dial on the first
-		// non-CONNECT, non-noproxy request; reuse the SPNEGO-authenticated
-		// connection on subsequent requests (RFC 4559 §5).
-		injectForwardingHeaders(req, s.clientAddr, s.cfg.Forwarding)
-		if s.proxyConn == nil {
-			s.proxyConn = s.dialAndAuthUpstream(req)
-			if s.proxyConn == nil {
-				return
-			}
-			s.upstreamReader = bufio.NewReader(s.proxyConn)
-		}
-		injectVia(req.Header, req.Proto, s.cfg.Pseudonym)
-
-		slog.Debug("proxy request", "method", req.Method, "uri", req.RequestURI, "proto", req.Proto, "headers", len(req.Header), "client_addr", s.clientAddr, "upstream_addr", s.cfg.Upstream, "via", req.Header.Get(headerVia), "iter", iter)
-		if err := req.WriteProxy(s.proxyConn); err != nil {
-			slog.Error("failed to write request to proxy", "error", err, "error_type", errConnectionTerminated.errorType, "client_addr", s.clientAddr, "upstream_addr", s.cfg.Upstream, "method", req.Method, "host", req.Host)
-			writeHTTPError(s.conn, errConnectionTerminated)
-			return
-		}
-
-		resp, err := readUpstreamResponse(s.upstreamReader, req, s.cfg.Pseudonym)
-		if err != nil {
-			handleUpstreamResponseError(s.conn, s.proxyConn, err, s.clientAddr)
-			return
-		}
-
-		writeErr := resp.Write(s.conn)
-		if writeErr != nil {
-			_ = resp.Body.Close()
-			logForwardError(writeErr, s.proxyConn.RemoteAddr(), s.conn.RemoteAddr())
-			return
-		}
-		// Drain any unread body so upstreamReader is aligned for the
-		// next iteration; resp.Write already consumed it for well-framed
-		// responses. If the drain fails the reader may be mid-body and
-		// reusing it for the next request risks response misframing —
-		// close the connection instead of continuing the keep-alive loop.
-		if _, derr := io.Copy(io.Discard, resp.Body); derr != nil {
-			_ = resp.Body.Close()
-			slog.Debug("upstream body drain failed, closing connection", "error", derr, "client_addr", s.clientAddr, "upstream_addr", s.cfg.Upstream)
-			return
-		}
-		_ = resp.Body.Close()
-
-		if connectionWillClose(req, resp) {
+		if !s.relayViaUpstream(req, iter) {
 			return
 		}
 	}
+}
+
+// readNextRequest reads the next request from the client connection under
+// the read timeout. It returns nil when no further request will arrive:
+// iteration 0 distinguishes an expected close from a malformed request (and
+// answers the latter with a 400), while a failure on a later iteration just
+// ends the keep-alive loop.
+func (s *ClientSession) readNextRequest(iter int) *http.Request {
+	_ = s.conn.SetReadDeadline(time.Now().Add(s.cfg.ReadTimeout))
+	req, err := http.ReadRequest(s.reqReader)
+	_ = s.conn.SetReadDeadline(time.Time{})
+	if err == nil {
+		return req
+	}
+	switch {
+	case iter > 0:
+		slog.Debug("keep-alive loop ended", "error", err, "iter", iter, "client_addr", s.clientAddr)
+	case isExpectedCloseError(err):
+		slog.Debug("client connection closed before request", "error", err, "client_addr", s.clientAddr)
+	default:
+		slog.Error("failed to read request", "error", err, "error_type", errHTTPRequestError.errorType, "client_addr", s.clientAddr)
+		writeHTTPError(s.conn, errHTTPRequestError)
+	}
+	return nil
+}
+
+// routeNoProxy handles a request whose host matches the noproxy matcher by
+// dialling the target directly, bypassing the upstream proxy and SPNEGO. It
+// reports whether it took the request; false means the caller must route it
+// via the upstream proxy.
+func (s *ClientSession) routeNoProxy(req *http.Request) bool {
+	if s.cfg.NoProxy == nil {
+		return false
+	}
+	matched, pattern := s.cfg.NoProxy.Match(req.Host)
+	if !matched {
+		return false
+	}
+	slog.Debug("noproxy bypass", "host", req.Host, "pattern", pattern, "method", req.Method, "client_addr", s.clientAddr)
+	if req.Method == http.MethodConnect {
+		s.tunnelDirect(req)
+		return true
+	}
+	injectVia(req.Header, req.Proto, s.cfg.Pseudonym)
+	s.forwardDirect(req)
+	return true
+}
+
+// relayViaUpstream forwards one plain-HTTP request through the upstream
+// proxy and relays the response to the client. The upstream connection is
+// lazy-dialled on the first such request and the SPNEGO-authenticated
+// connection is reused on subsequent ones (RFC 4559 §5). It reports whether
+// the client connection may carry a further request; false means it must be
+// closed, either because of an error or because a side signalled close.
+func (s *ClientSession) relayViaUpstream(req *http.Request, iter int) bool {
+	injectForwardingHeaders(req, s.clientAddr, s.cfg.Forwarding)
+	if s.proxyConn == nil {
+		s.proxyConn = s.dialAndAuthUpstream(req)
+		if s.proxyConn == nil {
+			return false
+		}
+		s.upstreamReader = bufio.NewReader(s.proxyConn)
+	}
+	injectVia(req.Header, req.Proto, s.cfg.Pseudonym)
+
+	slog.Debug("proxy request", "method", req.Method, "uri", req.RequestURI, "proto", req.Proto, "headers", len(req.Header), "client_addr", s.clientAddr, "upstream_addr", s.cfg.Upstream, "via", req.Header.Get(headerVia), "iter", iter)
+	if err := req.WriteProxy(s.proxyConn); err != nil {
+		slog.Error("failed to write request to proxy", "error", err, "error_type", errConnectionTerminated.errorType, "client_addr", s.clientAddr, "upstream_addr", s.cfg.Upstream, "method", req.Method, "host", req.Host)
+		writeHTTPError(s.conn, errConnectionTerminated)
+		return false
+	}
+
+	resp, err := readUpstreamResponse(s.upstreamReader, req, s.cfg.Pseudonym)
+	if err != nil {
+		handleUpstreamResponseError(s.conn, s.proxyConn, err, s.clientAddr)
+		return false
+	}
+
+	if writeErr := resp.Write(s.conn); writeErr != nil {
+		_ = resp.Body.Close()
+		logForwardError(writeErr, s.proxyConn.RemoteAddr(), s.conn.RemoteAddr())
+		return false
+	}
+	// Drain any unread body so upstreamReader is aligned for the
+	// next iteration; resp.Write already consumed it for well-framed
+	// responses. If the drain fails the reader may be mid-body and
+	// reusing it for the next request risks response misframing —
+	// close the connection instead of continuing the keep-alive loop.
+	if _, derr := io.Copy(io.Discard, resp.Body); derr != nil {
+		_ = resp.Body.Close()
+		slog.Debug("upstream body drain failed, closing connection", "error", derr, "client_addr", s.clientAddr, "upstream_addr", s.cfg.Upstream)
+		return false
+	}
+	_ = resp.Body.Close()
+
+	return !connectionWillClose(req, resp)
 }
 
 // tunnelViaUpstream performs the CONNECT-via-upstream-proxy flow:
