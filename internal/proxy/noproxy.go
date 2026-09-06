@@ -39,11 +39,7 @@ type NoProxyMatcher struct {
 // time so that Match performs no allocations on the hot path.
 func NewNoProxyMatcher(patterns string) *NoProxyMatcher {
 	m := &NoProxyMatcher{}
-	for pat := range strings.SplitSeq(patterns, ",") {
-		pat = strings.TrimSpace(pat)
-		if pat == "" {
-			continue
-		}
+	for _, pat := range SplitCSV(patterns) {
 		rule := noProxyRule{raw: pat}
 		if pat == "*" {
 			rule.kind = ruleAll
@@ -53,14 +49,11 @@ func NewNoProxyMatcher(patterns string) *NoProxyMatcher {
 		} else if ip, err := netip.ParseAddr(pat); err == nil {
 			rule.kind = ruleIP
 			rule.ip = ip
-		} else if suffix, ok := strings.CutPrefix(pat, "*"); ok && strings.HasPrefix(suffix, ".") {
+		} else if suffix := strings.TrimPrefix(pat, "*"); strings.HasPrefix(suffix, ".") {
 			rule.kind = ruleWildcard
 			// Normalize to a leading-dot suffix regardless of whether the
 			// caller wrote "*.corp.com" or ".corp.com".
 			rule.suffix = strings.ToLower(suffix)
-		} else if strings.HasPrefix(pat, ".") {
-			rule.kind = ruleWildcard
-			rule.suffix = strings.ToLower(pat)
 		} else {
 			rule.kind = ruleHostname
 			rule.host = strings.ToLower(pat)
