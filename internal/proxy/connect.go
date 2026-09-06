@@ -105,6 +105,19 @@ func forwardHalf(dst net.Conn, src io.Reader, srcConn net.Conn, fromAddr, toAddr
 	logForwardError(err, fromAddr, toAddr)
 }
 
+// forwardTunnel copies both directions until both halves finish. Reuse the
+// existing readers so payload buffered while reading HTTP headers is preserved.
+func forwardTunnel(conn, peerConn net.Conn, reqReader, peerReader *bufio.Reader, idleTimeout time.Duration) {
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		forwardHalf(peerConn, reqReader, conn, conn.RemoteAddr(), peerConn.RemoteAddr(), idleTimeout)
+	})
+	wg.Go(func() {
+		forwardHalf(conn, peerReader, peerConn, peerConn.RemoteAddr(), conn.RemoteAddr(), idleTimeout)
+	})
+	wg.Wait()
+}
+
 // handleConnectTunnel manages the CONNECT tunnel lifecycle per RFC 9110 §9.3.6.
 // It reads the upstream response before forwarding any client payload (D6),
 // relays the response to the client (D7), and then starts bidirectional
@@ -142,12 +155,5 @@ func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req 
 	}
 
 	slog.Debug("CONNECT tunnel established", "client_addr", clientAddr, "upstream_addr", proxyConn.RemoteAddr())
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		forwardHalf(proxyConn, reqReader, conn, conn.RemoteAddr(), proxyConn.RemoteAddr(), idleTimeout)
-	})
-	wg.Go(func() {
-		forwardHalf(conn, upstreamReader, proxyConn, proxyConn.RemoteAddr(), conn.RemoteAddr(), idleTimeout)
-	})
-	wg.Wait()
+	forwardTunnel(conn, proxyConn, reqReader, upstreamReader, idleTimeout)
 }

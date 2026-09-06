@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -226,12 +225,5 @@ func (s *ClientSession) tunnelDirect(req *http.Request) {
 	}
 
 	slog.Debug("noproxy CONNECT tunnel established", "target", target, "client_addr", s.clientAddr)
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		forwardHalf(targetConn, s.reqReader, s.conn, s.conn.RemoteAddr(), targetConn.RemoteAddr(), s.cfg.IdleTimeout)
-	})
-	wg.Go(func() {
-		forwardHalf(s.conn, bufio.NewReader(targetConn), targetConn, targetConn.RemoteAddr(), s.conn.RemoteAddr(), s.cfg.IdleTimeout)
-	})
-	wg.Wait()
+	forwardTunnel(s.conn, targetConn, s.reqReader, bufio.NewReader(targetConn), s.cfg.IdleTimeout)
 }
