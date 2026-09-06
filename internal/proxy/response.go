@@ -100,17 +100,12 @@ func hasForbiddenFieldValueByte(v string) bool {
 // Content-Length values per RFC 9112 §6.1. It returns a non-nil *proxyError
 // when the response must be rejected with 502.
 func validateResponseContentLength(resp *http.Response) *proxyError {
-	clValues := resp.Header[headerContentLength]
-	if len(clValues) == 0 {
-		return nil
-	}
-
 	// Collect all individual values; headers may be comma-separated per
 	// RFC 9110 §5.6.1. Compare numerically so that semantically equal
 	// values like "042" and "42" are not rejected.
 	var first uint64
 	var seen bool
-	for _, v := range clValues {
+	for _, v := range resp.Header[headerContentLength] {
 		for part := range strings.SplitSeq(v, ",") {
 			part = strings.TrimSpace(part)
 			if part == "" {

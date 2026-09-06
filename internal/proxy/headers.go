@@ -132,19 +132,18 @@ func sanitizeHopByHop(req *http.Request) {
 			}
 		}
 	}
-	header.Del(headerConnection)
 
 	// Well-known hop-by-hop headers (RFC 9110 §7.6.1, RFC 9113 §8.2.2).
-	header.Del(headerKeepAlive)
-	header.Del(headerProxyConnection) // K3: non-standard hop-by-hop
-	header.Del(headerTE)
-	header.Del(headerTrailer)
-	req.Trailer = nil         // ReadRequest moves Trailer into this field
-	header.Del(headerUpgrade) // J2: strip unless proxy supports the protocol
-
-	// B2 (RFC 9110 §11.7.1): consume the client's Proxy-Authorization.
-	// The proxy injects its own SPNEGO token after this function returns.
-	header.Del(headerProxyAuthorization)
+	// Includes non-standard Proxy-Connection (K3) and unsupported Upgrade (J2).
+	// B2 (RFC 9110 §11.7.1): consume the client's Proxy-Authorization before
+	// the proxy injects its own SPNEGO token after this function returns.
+	for _, name := range []string{
+		headerConnection, headerKeepAlive, headerProxyConnection,
+		headerTE, headerTrailer, headerUpgrade, headerProxyAuthorization,
+	} {
+		header.Del(name)
+	}
+	req.Trailer = nil // ReadRequest moves Trailer into this field
 
 	// E1 (RFC 9112 §6.1): when both Transfer-Encoding and Content-Length
 	// are present, remove Content-Length to prevent request smuggling.

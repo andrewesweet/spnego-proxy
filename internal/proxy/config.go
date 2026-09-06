@@ -91,9 +91,6 @@ func SplitCSV(s string) []string {
 // ParseAllowList parses a comma-separated string of IPs and CIDR ranges
 // into a slice of *net.IPNet entries for use with ipAllowed.
 func ParseAllowList(s string) ([]*net.IPNet, error) {
-	if s == "" {
-		return nil, nil
-	}
 	var nets []*net.IPNet
 	for _, entry := range SplitCSV(s) {
 		if strings.Contains(entry, "/") {

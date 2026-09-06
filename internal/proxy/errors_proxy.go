@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -182,29 +183,21 @@ func tokenErrorToProxyError(err error) *proxyError {
 }
 
 // handleUpstreamResponseError handles errors from readUpstreamResponse.
-// For invalid Content-Length or malformed response headers it sends a 502
-// error to the client; for all other errors it falls back to raw-relaying
-// the upstream bytes.
+// It sends a 502 error to the client, logging invalid Content-Length or
+// malformed response headers at Error level and other parse failures at Warn.
 func handleUpstreamResponseError(conn, proxyConn net.Conn, err error, clientAddr string) {
-	if errors.Is(err, errContentLengthInvalid) {
-		slog.Error("invalid Content-Length in upstream response",
-			"error", err, "error_type", errInvalidContentLength.errorType,
-			"client_addr", clientAddr,
-			"upstream_addr", proxyConn.RemoteAddr())
-		writeHTTPError(conn, errInvalidContentLength)
-		return
+	pe := errUnparseableResponse
+	message := "unparseable upstream response"
+	level := slog.LevelWarn
+	switch {
+	case errors.Is(err, errContentLengthInvalid):
+		pe, message, level = errInvalidContentLength, "invalid Content-Length in upstream response", slog.LevelError
+	case errors.Is(err, errMalformedResponse):
+		pe, message, level = errMalformedResponseHeader, "malformed upstream response header", slog.LevelError
 	}
-	if errors.Is(err, errMalformedResponse) {
-		slog.Error("malformed upstream response header",
-			"error", err, "error_type", errMalformedResponseHeader.errorType,
-			"client_addr", clientAddr,
-			"upstream_addr", proxyConn.RemoteAddr())
-		writeHTTPError(conn, errMalformedResponseHeader)
-		return
-	}
-	slog.Warn("unparseable upstream response",
-		"error", err, "error_type", errUnparseableResponse.errorType,
+	slog.Log(context.Background(), level, message,
+		"error", err, "error_type", pe.errorType,
 		"client_addr", clientAddr,
 		"upstream_addr", proxyConn.RemoteAddr())
-	writeHTTPError(conn, errUnparseableResponse)
+	writeHTTPError(conn, pe)
 }

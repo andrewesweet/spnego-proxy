@@ -3,12 +3,10 @@ package proxy
 import (
 	"bufio"
 	"errors"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -55,16 +53,22 @@ func dialDirect(host, defaultPort string, timeout time.Duration) (net.Conn, stri
 	return conn, target, err
 }
 
-// handleDialError logs and responds to a failed direct dial attempt.
-func handleDialError(conn net.Conn, err error, target, clientAddr, path string) {
+// handleDialError logs and responds to a failed dial attempt. An empty path
+// identifies an upstream dial; direct dials use "HTTP" or "CONNECT".
+func (s *ClientSession) handleDialError(err error, target, path string) {
+	pe := errConnectionRefused
+	message := "noproxy direct dial failed"
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
-		slog.Error("noproxy direct dial timeout", "error", err, "target", target, "client_addr", clientAddr, "path", path)
-		writeHTTPError(conn, errConnectionTimeout)
-	} else {
-		slog.Error("noproxy direct dial failed", "error", err, "target", target, "client_addr", clientAddr, "path", path)
-		writeHTTPError(conn, errConnectionRefused)
+		pe = errConnectionTimeout
+		message = "noproxy direct dial timeout"
 	}
+	if path == "" {
+		slog.Error("failed to connect to proxy", "error", err, "error_type", pe.errorType, "client_addr", s.clientAddr, "upstream_addr", target)
+	} else {
+		slog.Error(message, "error", err, "target", target, "client_addr", s.clientAddr, "path", path)
+	}
+	writeHTTPError(s.conn, pe)
 }
 
 // logDirectError logs a failure on a direct (noproxy) connection: at Debug
@@ -92,7 +96,7 @@ func (s *ClientSession) logDirectError(what string, err error, target string) {
 func (s *ClientSession) forwardDirect(req *http.Request) {
 	targetConn, target, err := dialDirect(req.Host, "80", s.cfg.DialTimeout)
 	if err != nil {
-		handleDialError(s.conn, err, target, s.clientAddr, "HTTP")
+		s.handleDialError(err, target, "HTTP")
 		return
 	}
 	defer func() { _ = targetConn.Close() }()
@@ -177,20 +181,13 @@ func (s *ClientSession) relayDirect(req *http.Request, targetConn net.Conn, upst
 		return false
 	}
 	injectVia(resp.Header, resp.Proto, s.cfg.Pseudonym)
-	if writeErr := resp.Write(s.conn); writeErr != nil {
-		_ = resp.Body.Close()
+	if writeErr, derr := writeResponse(s.conn, resp); writeErr != nil {
 		s.logDirectError("noproxy forward response", writeErr, target)
 		return false
-	}
-	// Drain so upstreamReader is aligned for the next iteration. A
-	// drain failure means the reader may be mid-body; reusing it
-	// risks response misframing, so close instead of looping.
-	if _, derr := io.Copy(io.Discard, resp.Body); derr != nil {
-		_ = resp.Body.Close()
+	} else if derr != nil {
 		slog.Debug("noproxy upstream body drain failed, closing connection", "error", derr, "target", target, "client_addr", s.clientAddr)
 		return false
 	}
-	_ = resp.Body.Close()
 	slog.Debug("noproxy HTTP response forwarding done", "target", target, "client_addr", s.clientAddr, "iter", iter)
 	return !connectionWillClose(req, resp)
 }
@@ -203,7 +200,7 @@ func (s *ClientSession) relayDirect(req *http.Request, targetConn net.Conn, upst
 func (s *ClientSession) tunnelDirect(req *http.Request) {
 	targetConn, target, err := dialDirect(req.Host, "443", s.cfg.DialTimeout)
 	if err != nil {
-		handleDialError(s.conn, err, target, s.clientAddr, "CONNECT")
+		s.handleDialError(err, target, "CONNECT")
 		return
 	}
 	defer func() { _ = targetConn.Close() }()
@@ -226,12 +223,5 @@ func (s *ClientSession) tunnelDirect(req *http.Request) {
 	}
 
 	slog.Debug("noproxy CONNECT tunnel established", "target", target, "client_addr", s.clientAddr)
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		forwardHalf(targetConn, s.reqReader, s.conn, s.conn.RemoteAddr(), targetConn.RemoteAddr(), s.cfg.IdleTimeout)
-	})
-	wg.Go(func() {
-		forwardHalf(s.conn, bufio.NewReader(targetConn), targetConn, targetConn.RemoteAddr(), s.conn.RemoteAddr(), s.cfg.IdleTimeout)
-	})
-	wg.Wait()
+	forwardTunnel(s.conn, targetConn, s.reqReader, bufio.NewReader(targetConn), s.cfg.IdleTimeout)
 }
