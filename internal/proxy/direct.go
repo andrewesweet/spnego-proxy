@@ -3,7 +3,6 @@ package proxy
 import (
 	"bufio"
 	"errors"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -176,20 +175,13 @@ func (s *ClientSession) relayDirect(req *http.Request, targetConn net.Conn, upst
 		return false
 	}
 	injectVia(resp.Header, resp.Proto, s.cfg.Pseudonym)
-	if writeErr := resp.Write(s.conn); writeErr != nil {
-		_ = resp.Body.Close()
+	if writeErr, derr := writeResponse(s.conn, resp); writeErr != nil {
 		s.logDirectError("noproxy forward response", writeErr, target)
 		return false
-	}
-	// Drain so upstreamReader is aligned for the next iteration. A
-	// drain failure means the reader may be mid-body; reusing it
-	// risks response misframing, so close instead of looping.
-	if _, derr := io.Copy(io.Discard, resp.Body); derr != nil {
-		_ = resp.Body.Close()
+	} else if derr != nil {
 		slog.Debug("noproxy upstream body drain failed, closing connection", "error", derr, "target", target, "client_addr", s.clientAddr)
 		return false
 	}
-	_ = resp.Body.Close()
 	slog.Debug("noproxy HTTP response forwarding done", "target", target, "client_addr", s.clientAddr, "iter", iter)
 	return !connectionWillClose(req, resp)
 }

@@ -310,22 +310,13 @@ func (s *ClientSession) relayViaUpstream(req *http.Request, iter int) bool {
 		return false
 	}
 
-	if writeErr := resp.Write(s.conn); writeErr != nil {
-		_ = resp.Body.Close()
+	if writeErr, derr := writeResponse(s.conn, resp); writeErr != nil {
 		logForwardError(writeErr, s.proxyConn.RemoteAddr(), s.conn.RemoteAddr())
 		return false
-	}
-	// Drain any unread body so upstreamReader is aligned for the
-	// next iteration; resp.Write already consumed it for well-framed
-	// responses. If the drain fails the reader may be mid-body and
-	// reusing it for the next request risks response misframing —
-	// close the connection instead of continuing the keep-alive loop.
-	if _, derr := io.Copy(io.Discard, resp.Body); derr != nil {
-		_ = resp.Body.Close()
+	} else if derr != nil {
 		slog.Debug("upstream body drain failed, closing connection", "error", derr, "client_addr", s.clientAddr, "upstream_addr", s.cfg.Upstream)
 		return false
 	}
-	_ = resp.Body.Close()
 
 	return !connectionWillClose(req, resp)
 }
@@ -356,4 +347,15 @@ func (s *ClientSession) tunnelViaUpstream(req *http.Request) {
 	}
 
 	handleConnectTunnel(s.conn, proxyConn, s.reqReader, req, s.cfg.Pseudonym, s.clientAddr, s.cfg.IdleTimeout)
+}
+
+// writeResponse writes and drains a response, closing its body before returning.
+// Separate errors let each caller preserve its write and drain diagnostics.
+// A drain failure leaves the peer reader misaligned, so callers must stop reuse.
+func writeResponse(conn net.Conn, resp *http.Response) (writeErr, drainErr error) {
+	if writeErr = resp.Write(conn); writeErr == nil {
+		_, drainErr = io.Copy(io.Discard, resp.Body)
+	}
+	_ = resp.Body.Close()
+	return
 }
