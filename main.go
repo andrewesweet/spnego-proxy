@@ -63,64 +63,11 @@ func main() {
 		os.Exit(1)
 	}
 	pseudonym := proxy.GenerateViaPseudonym()
+	cfg := buildConfig(c, provider, pseudonym)
 
-	connectPorts := proxy.SplitCSV(c.ConnectPorts)
-
-	allowList, err := proxy.ParseAllowList(c.AllowedIPs)
-	if err != nil {
-		slog.Error("invalid -allowed-ips", "error", err)
-		os.Exit(1)
-	}
-
-	noProxyPatterns := proxy.ResolveNoProxy(c.NoProxy)
-	var noProxy *proxy.NoProxyMatcher
-	if noProxyPatterns != "" {
-		noProxy = proxy.NewNoProxyMatcher(noProxyPatterns)
-		source := "flag"
-		if c.NoProxy == "" {
-			source = "env"
-		}
-		slog.Info("noproxy bypass configured", "patterns", noProxyPatterns, "source", source)
-	}
-
-	// Build the upstream TLS config once at startup (avoids re-reading CA file per connection).
-	upstreamTLSCfg := proxy.UpstreamTLSConfig{
-		Enabled:            c.UpstreamTLS,
-		CAFile:             c.UpstreamCA,
-		InsecureSkipVerify: c.UpstreamTLSInsecure,
-		Dialer:             &net.Dialer{Timeout: c.DialTimeout},
-	}
-	if err := upstreamTLSCfg.BuildTLSConfig(); err != nil {
-		slog.Error("failed to build upstream TLS config", "error", err)
-		os.Exit(1)
-	}
-	if c.UpstreamTLSInsecure {
-		slog.Warn("upstream TLS certificate verification is disabled")
-	}
-
-	cfg := proxy.Config{
-		Upstream:     c.Proxy,
-		Provider:     provider,
-		Pseudonym:    pseudonym,
-		DialTimeout:  c.DialTimeout,
-		ReadTimeout:  c.ReadTimeout,
-		KeepAlive:    c.KeepAlive,
-		IdleTimeout:  c.IdleTimeout,
-		ConnectPorts: connectPorts,
-		AllowedIPs:   allowList,
-		NoProxy:      noProxy,
-		Forwarding: proxy.ForwardingConfig{
-			ForwardedEnabled:     c.Forwarded,
-			XForwardedForEnabled: c.XForwardedFor,
-		},
-		UpstreamTLS: upstreamTLSCfg,
-	}
-
-	if c.MaxConns > 0 {
-		l = netutil.LimitListener(l, c.MaxConns)
-	}
 	logArgs := []any{"addr", c.Addr, "proxy", c.Proxy, "via_pseudonym", pseudonym}
 	if c.MaxConns > 0 {
+		l = netutil.LimitListener(l, c.MaxConns)
 		logArgs = append(logArgs, "max_conns", c.MaxConns)
 	}
 	slog.Info("listening", logArgs...)

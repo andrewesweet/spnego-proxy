@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log/slog"
+	"net"
 	"os"
 	"time"
 
@@ -120,4 +122,60 @@ func buildProvider(c *cliConfig) (proxy.TokenProvider, error) {
 		return nil, err
 	}
 	return proxy.NewCircuitBreakerTokenProvider(provider, uint32(c.CBThreshold), c.CBTimeout), nil //nolint:gosec // CLI flag value; overflow not a concern
+}
+
+// buildConfig assembles the proxy.Config that Serve runs with from the parsed
+// CLI flags, the token provider, and the generated Via pseudonym. Every
+// failure here is a startup misconfiguration, so it is logged and exits 1
+// exactly as it did when this wiring was inline in main.
+func buildConfig(c *cliConfig, provider proxy.TokenProvider, pseudonym string) proxy.Config {
+	allowList, err := proxy.ParseAllowList(c.AllowedIPs)
+	if err != nil {
+		slog.Error("invalid -allowed-ips", "error", err)
+		os.Exit(1)
+	}
+
+	noProxyPatterns := proxy.ResolveNoProxy(c.NoProxy)
+	var noProxy *proxy.NoProxyMatcher
+	if noProxyPatterns != "" {
+		noProxy = proxy.NewNoProxyMatcher(noProxyPatterns)
+		source := "flag"
+		if c.NoProxy == "" {
+			source = "env"
+		}
+		slog.Info("noproxy bypass configured", "patterns", noProxyPatterns, "source", source)
+	}
+
+	// Build the upstream TLS config once at startup (avoids re-reading CA file per connection).
+	upstreamTLSCfg := proxy.UpstreamTLSConfig{
+		Enabled:            c.UpstreamTLS,
+		CAFile:             c.UpstreamCA,
+		InsecureSkipVerify: c.UpstreamTLSInsecure,
+		Dialer:             &net.Dialer{Timeout: c.DialTimeout},
+	}
+	if err := upstreamTLSCfg.BuildTLSConfig(); err != nil {
+		slog.Error("failed to build upstream TLS config", "error", err)
+		os.Exit(1)
+	}
+	if c.UpstreamTLSInsecure {
+		slog.Warn("upstream TLS certificate verification is disabled")
+	}
+
+	return proxy.Config{
+		Upstream:     c.Proxy,
+		Provider:     provider,
+		Pseudonym:    pseudonym,
+		DialTimeout:  c.DialTimeout,
+		ReadTimeout:  c.ReadTimeout,
+		KeepAlive:    c.KeepAlive,
+		IdleTimeout:  c.IdleTimeout,
+		ConnectPorts: proxy.SplitCSV(c.ConnectPorts),
+		AllowedIPs:   allowList,
+		NoProxy:      noProxy,
+		Forwarding: proxy.ForwardingConfig{
+			ForwardedEnabled:     c.Forwarded,
+			XForwardedForEnabled: c.XForwardedFor,
+		},
+		UpstreamTLS: upstreamTLSCfg,
+	}
 }
