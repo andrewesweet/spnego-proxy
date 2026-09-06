@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bufio"
-	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -120,14 +119,7 @@ func (s *ClientSession) dialAndAuthUpstream(req *http.Request) net.Conn {
 
 	proxyConn, derr := dialUpstream(s.cfg.Upstream, s.cfg.UpstreamTLS)
 	if derr != nil {
-		var ne net.Error
-		if errors.As(derr, &ne) && ne.Timeout() {
-			slog.Error("failed to connect to proxy", "error", derr, "error_type", errConnectionTimeout.errorType, "client_addr", s.clientAddr, "upstream_addr", s.cfg.Upstream)
-			writeHTTPError(s.conn, errConnectionTimeout)
-		} else {
-			slog.Error("failed to connect to proxy", "error", derr, "error_type", errConnectionRefused.errorType, "client_addr", s.clientAddr, "upstream_addr", s.cfg.Upstream)
-			writeHTTPError(s.conn, errConnectionRefused)
-		}
+		s.handleDialError(derr, s.cfg.Upstream, "")
 		return nil
 	}
 	if s.cfg.KeepAlive > 0 {
