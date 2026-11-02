@@ -9,7 +9,7 @@ permissions: {}
 
 jobs:
   build:
-    uses: ./.github/workflows/build-release.yml
+    uses: $/.github/workflows/build-release.yml
     permissions:
       contents: read
       id-token: write
@@ -17,7 +17,7 @@ jobs:
 
   docker:
     needs: build
-    uses: ./.github/workflows/docker-release.yml
+    uses: $/.github/workflows/docker-release.yml
     permissions:
       contents: read
       packages: write
@@ -112,7 +112,7 @@ jobs:
 
   homebrew:
     needs: release
-    uses: ./.github/workflows/update-homebrew.yml
+    uses: $/.github/workflows/update-homebrew.yml
     with:
       tag_name: ${{ github.ref_name }}
       prerelease: ${{ needs.release.outputs.prerelease == 'true' }}
