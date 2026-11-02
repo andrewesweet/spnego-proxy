@@ -232,8 +232,11 @@ cppcheck \
 
 ### Workflow linting
 
+Use the compatibility flag configured in the
+[Lint Workflows workflow](.github/workflows/lint-workflows.yml):
+
 ```bash
-actionlint
+actionlint -ignore '\$/.github/workflows/'
 ```
 
 ## CI checks
