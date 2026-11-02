@@ -10,7 +10,7 @@
 #include <string.h>
 
 static void append_status_messages(OM_uint32 status_value, int status_type,
-                                   char *buf, size_t buflen, size_t *offset) {
+                                   char* buf, size_t buflen, size_t* offset) {
   OM_uint32 msg_ctx = 0;
   OM_uint32 min_stat;
   gss_buffer_desc msg_buf;
@@ -31,7 +31,7 @@ static void append_status_messages(OM_uint32 status_value, int status_type,
   } while (msg_ctx != 0 && *offset < buflen - 1);
 }
 
-static void format_gss_error(OM_uint32 major, OM_uint32 minor, char *buf,
+static void format_gss_error(OM_uint32 major, OM_uint32 minor, char* buf,
                              size_t buflen) {
   size_t offset = 0;
   append_status_messages(major, GSS_C_GSS_CODE, buf, buflen, &offset);
@@ -41,7 +41,7 @@ static void format_gss_error(OM_uint32 major, OM_uint32 minor, char *buf,
   buf[offset] = '\0';
 }
 
-gss_token_result acquire_spnego_token(const char *spn) {
+gss_token_result acquire_spnego_token(const char* spn) {
   gss_token_result result;
   memset(&result, 0, sizeof(result));
 
@@ -53,15 +53,15 @@ gss_token_result acquire_spnego_token(const char *spn) {
   gss_buffer_desc output_token = GSS_C_EMPTY_BUFFER;
 
   // SPNEGO mechanism OID: 1.3.6.1.5.5.2
-  gss_OID_desc spnego_oid_desc = {6, (void *)"\x2b\x06\x01\x05\x05\x02"};
+  gss_OID_desc spnego_oid_desc = {6, (void*)"\x2b\x06\x01\x05\x05\x02"};
   gss_OID spnego_oid = &spnego_oid_desc;
 
   // Kerberos 5 mechanism OID: 1.2.840.113554.1.2.2
   gss_OID_desc krb5_oid_desc = {9,
-                                (void *)"\x2a\x86\x48\x86\xf7\x12\x01\x02\x02"};
+                                (void*)"\x2a\x86\x48\x86\xf7\x12\x01\x02\x02"};
 
   // Import server name
-  name_buf.value = (void *)spn;
+  name_buf.value = (void*)spn;
   name_buf.length = strlen(spn);
   major = gss_import_name(&minor, &name_buf, GSS_C_NT_HOSTBASED_SERVICE,
                           &server_name);
@@ -150,4 +150,4 @@ gss_token_result acquire_spnego_token(const char *spn) {
   return result;
 }
 
-void free_token_data(void *data) { free(data); }
+void free_token_data(void* data) { free(data); }
