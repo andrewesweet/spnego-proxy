@@ -40,7 +40,7 @@ docker run --rm -p 127.0.0.1:3128:3128 ghcr.io/andrewesweet/spnego-proxy \
 
 Multi-arch images are available for `linux/amd64` and `linux/arm64`.
 
-### From source (requires Go 1.25+)
+### From source (requires Go 1.26+)
 
 ```bash
 go install github.com/andrewesweet/spnego-proxy@latest
