@@ -25,41 +25,19 @@ import (
 // noise while the condition persists.
 const passwordRejectWarnInterval = 5 * time.Minute
 
-// passwordRejectMarkers are the fragments gokrb5 leaves in an error when the
-// KDC rejects the configured password. gokrb5 flattens a KRB-ERROR into a
-// formatted message with no unwrappable cause (krberror.Krberror carries text
-// only), so the message is the only signal available to the caller.
-var passwordRejectMarkers = [...]string{
-	// KDC_ERR_PREAUTH_FAILED (RFC 4120 error 24): the pre-authentication data
-	// derived from the configured password did not verify.
-	"KDC_ERR_PREAUTH_FAILED",
-	// An AS-REP that cannot be decrypted with the configured password: the same
-	// wrong-password condition, reported by a KDC that does not demand
-	// pre-authentication.
-	"client password/keytab incorrect",
-}
-
 // isPasswordRejection reports whether err is the KDC rejecting the configured
 // password, as opposed to a transient failure such as an unreachable KDC.
 func isPasswordRejection(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	for _, marker := range passwordRejectMarkers {
-		if strings.Contains(msg, marker) {
-			return true
-		}
-	}
-	return false
+	return err != nil && strings.Contains(err.Error(), "KDC_ERR_PREAUTH_FAILED")
 }
 
 // Gokrb5TokenProvider uses the pure-Go gokrb5 library for SPNEGO token acquisition.
 // This is the fallback path used on non-macOS platforms or when -user is specified.
 //
 // The provider builds a gokrb5 client for each token acquisition and destroys
-// it before returning, so the password it holds in memory never outlives the
-// call and no background renewal goroutine can log in with it. See GetToken.
+// it before returning. Go does not provide primitives to scrub string-backed
+// memory, so the library's password string cannot be reliably zeroed and may
+// remain in memory after the call. Use a keytab where this is a concern.
 type Gokrb5TokenProvider struct {
 	// Construction inputs, kept so the client can be rebuilt per acquisition.
 	user         string

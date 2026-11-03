@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log"
@@ -14,7 +15,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jcmturner/gofork/encoding/asn1"
+	"github.com/jcmturner/gokrb5/v8/iana/errorcode"
 	"github.com/jcmturner/gokrb5/v8/iana/etypeID"
+	"github.com/jcmturner/gokrb5/v8/iana/patype"
+	"github.com/jcmturner/gokrb5/v8/messages"
+	"github.com/jcmturner/gokrb5/v8/types"
 	"github.com/jcmturner/krb5test"
 )
 
@@ -169,12 +175,72 @@ func TestGokrb5TokenProviderStopsLoginsAfterPasswordRejection(t *testing.T) {
 	pwFile := writePasswordFile(t, "wrong-password", 0o600)
 	p := newLockoutProvider(t, kdc, pwFile)
 	logs := captureSlog(t)
-
-	if _, err := p.GetToken(); err == nil {
-		t.Fatal("expected the KDC to reject the wrong password")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := as.count(); got != 1 {
-		t.Fatalf("KDC served %d AS exchanges for the first rejected login, want 1", got)
+	etypeInfo, err := asn1.Marshal(types.ETypeInfo2{{EType: etypeID.AES256_CTS_HMAC_SHA1_96}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejection := messages.NewKRBError(kdc.SName, kdc.Realm, errorcode.KDC_ERR_PREAUTH_FAILED, "")
+	rejection.EData, err = asn1.Marshal(types.PADataSequence{{PADataType: patype.PA_ETYPE_INFO2, PADataValue: etypeInfo}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err := rejection.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	rejections := make(chan struct{}, 2)
+	go func() {
+		defer close(done)
+		for range 2 {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				t.Error(err)
+				return
+			}
+			var size uint32
+			if err := binary.Read(conn, binary.BigEndian, &size); err != nil {
+				t.Error(err)
+				return
+			}
+			if _, err := io.CopyN(io.Discard, conn, int64(size)); err != nil {
+				t.Error(err)
+				return
+			}
+			rejections <- struct{}{}
+			if err := binary.Write(conn, binary.BigEndian, uint32(len(reply))); err != nil {
+				t.Error(err)
+				return
+			}
+			if _, err := conn.Write(reply); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-done
+	})
+	p.cfg.Realms[0].KDC = []string{ln.Addr().String()}
+
+	if _, err := p.GetToken(); err == nil || !strings.Contains(err.Error(), "KDC_ERR_PREAUTH_FAILED") {
+		t.Fatalf("expected KDC pre-authentication rejection, got %v", err)
+	}
+	if got := len(rejections); got != 2 {
+		t.Fatalf("KDC received %d AS requests, want 2 (initial request and pre-authentication retry)", got)
+	}
+	p.cfg.Realms[0].KDC = []string{kdc.TCPListener.Addr().String()}
+	if err := os.WriteFile(pwFile, []byte("wrong-password\r\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	const refusedCalls = 3
@@ -187,8 +253,8 @@ func TestGokrb5TokenProviderStopsLoginsAfterPasswordRejection(t *testing.T) {
 			t.Errorf("call %d: refusal does not explain that the password was rejected: %v", i+2, err)
 		}
 	}
-	if got := as.count(); got != 1 {
-		t.Errorf("KDC served %d AS exchanges after the password was rejected, want 1: logins continued after the rejection", got)
+	if got := as.count(); got != 0 {
+		t.Errorf("KDC served %d AS exchanges after rejection and a CR/LF-only change, want 0", got)
 	}
 	if got := strings.Count(logs.String(), "refusing Kerberos logins"); got != 1 {
 		t.Errorf("warning logged %d times across %d refused calls, want 1 (rate-limited, not per request)", got, refusedCalls+1)
@@ -202,8 +268,26 @@ func TestGokrb5TokenProviderStopsLoginsAfterPasswordRejection(t *testing.T) {
 	if _, err := p.GetToken(); err != nil {
 		t.Fatalf("GetToken after the password file changed: %v", err)
 	}
+	if got := as.count(); got != 1 {
+		t.Errorf("KDC served %d AS exchanges after the password changed, want 1", got)
+	}
+}
+
+func TestGokrb5TokenProviderRecoversAfterClockSkew(t *testing.T) {
+	kdc, as := startLockoutKDC(t, 0)
+	pwFile := writePasswordFile(t, kdc.Principals[testKDCUser].Password, 0o600)
+	p := newLockoutProvider(t, kdc, pwFile)
+	clockSkew := p.cfg.LibDefaults.Clockskew
+	p.cfg.LibDefaults.Clockskew = -time.Second
+	if _, err := p.GetToken(); err == nil || !strings.Contains(err.Error(), "clock skew with KDC too large") {
+		t.Fatalf("expected clock-skew verification failure, got %v", err)
+	}
+	p.cfg.LibDefaults.Clockskew = clockSkew
+	if token, err := p.GetToken(); err != nil || token == "" {
+		t.Fatalf("GetToken after clock-skew correction: token=%q, error=%v", token, err)
+	}
 	if got := as.count(); got != 2 {
-		t.Errorf("KDC served %d AS exchanges in total, want 2 (the rejected login and the one after the file changed)", got)
+		t.Errorf("KDC served %d AS exchanges, want 2 with the unchanged password", got)
 	}
 }
 
@@ -222,9 +306,14 @@ func TestIsPasswordRejection(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "AS-REP not decryptable with the configured password",
+			name: "generic AS-REP verification wrapper",
 			err:  errors.New("could not acquire client credential: AS Exchange Error: AS_REP is not valid or client password/keytab incorrect"),
-			want: true,
+			want: false,
+		},
+		{
+			name: "clock skew in AS-REP verification wrapper",
+			err:  errors.New("AS Exchange Error: AS_REP is not valid or client password/keytab incorrect: clock skew with KDC too large"),
+			want: false,
 		},
 		{
 			name: "KDC unreachable",

@@ -89,7 +89,7 @@ func parseFlags(args []string) (*cliConfig, *flag.FlagSet, error) {
 	fs.StringVar(&c.CfgFile, "config", "", "kerberos config file")
 	fs.StringVar(&c.User, "user", "", "kerberos user name")
 	fs.StringVar(&c.Realm, "realm", "", "kerberos realm")
-	fs.StringVar(&c.PasswordFile, "password-file", "", "password file path (re-read for each login; logins stop after a KDC password rejection until its content changes)")
+	fs.StringVar(&c.PasswordFile, "password-file", "", "password file path (re-read for each login; logins stop after a KDC password rejection until the password value changes; trailing CR/LF ignored)")
 	fs.BoolVar(&c.ShowVersion, "version", false, "print version information and exit")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "%s\n\n", versionString())

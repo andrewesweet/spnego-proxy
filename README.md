@@ -120,7 +120,7 @@ All flags:
 | `-config` | Kerberos config file path | Password mode only |
 | `-user` | Kerberos username (triggers password-based auth on macOS) | Password mode only |
 | `-realm` | Kerberos realm | Password mode only |
-| `-password-file` | Path to password file (prompts if omitted); re-read for each login, and a KDC password rejection stops logins until its content changes | No |
+| `-password-file` | Path to password file (prompts if omitted); re-read for each login, and a KDC password rejection stops logins until the password value changes (trailing CR/LF ignored) | No |
 | `-cb-threshold` | Consecutive token acquisition failures before the circuit breaker opens; 1–4294967295 (default: `3`) | No |
 | `-cb-timeout` | Circuit breaker cooldown; must be greater than zero (default: `30s`) | No |
 
@@ -239,9 +239,10 @@ link. A custom CA can be provided with `-upstream-ca`.
 
 When using password-based authentication (`-user` flag), the proxy builds
 a Kerberos client for each token acquisition and destroys it before the
-call returns, so no password copy outlives the request and no background
-renewal goroutine holds one. With `-password-file`, the file is re-read
-for every acquisition and the copy read at start-up is zeroed
+call returns. Go cannot reliably scrub string-backed memory, so the
+library's password string may remain in memory after the request.
+With `-password-file`, the file is re-read for every acquisition and the
+copy read at start-up is zeroed
 immediately; a corrected password therefore takes effect without a
 restart, and the file must stay readable with the required permissions
 (0600, or 0400) while the proxy runs. A password typed at the terminal (no `-password-file`) has no
@@ -270,13 +271,14 @@ that:
   logins to escape the breaker.
 - **A rejected password stops logins.** When the KDC rejects the
   configured password, the proxy sends no further logins until the
-  password file's content changes. It re-reads the file on each refused
+  password value in the file changes. Trailing CR/LF characters are stripped
+  before comparing passwords. It re-reads the file on each refused
   attempt, logs a warning at most once every 5 minutes while the rejection
-  stands, and resumes on its own when the content differs. If the password
-  is in fact correct, re-save the file with different content (for example
-  remove a trailing newline) or restart the proxy to allow a retry. A
-  password typed at the terminal cannot change, so logins stay refused
-  until the proxy restarts.
+  stands, and resumes on its own when the effective password differs.
+  Re-saving the same password or adding or removing trailing CR/LF characters
+  does not allow a retry. If the password is correct, restart the proxy to
+  allow a retry. A password typed at the terminal cannot change, so logins
+  stay refused until the proxy restarts.
 
 ### CGo boundary (macOS)
 
