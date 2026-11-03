@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -17,8 +18,144 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
+
+type pacedTLSConn struct {
+	net.Conn
+	interval time.Duration
+}
+
+func (c *pacedTLSConn) Write(p []byte) (int, error) {
+	if c.interval == 0 {
+		return c.Conn.Write(p)
+	}
+	total := 0
+	for len(p) > 0 {
+		n, err := c.Conn.Write(p[:min(128, len(p))])
+		total += n
+		p = p[n:]
+		if err != nil {
+			return total, err
+		}
+		time.Sleep(c.interval)
+	}
+	return total, nil
+}
+
+func TestTunnelTLSRecordProgressAfterHalfClose(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const timeout = 500 * time.Millisecond
+		certPEM, keyPEM := generateTestCert(t)
+		cert, err := tls.X509KeyPair(certPEM, keyPEM)
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(certPEM) {
+			t.Fatal("add test TLS root")
+		}
+		clientRaw, serverRaw := net.Pipe()
+		t.Cleanup(func() { _ = clientRaw.Close() })
+		t.Cleanup(func() { _ = serverRaw.Close() })
+		_ = clientRaw.SetDeadline(time.Now().Add(20 * time.Second))
+		_ = serverRaw.SetDeadline(time.Now().Add(20 * time.Second))
+		transport := &tunnelConn{Conn: clientRaw}
+		client := &upstreamTLSConn{
+			Conn: tls.Client(transport, &tls.Config{
+				RootCAs: roots, ServerName: "127.0.0.1", MinVersion: tls.VersionTLS12,
+			}),
+			transport: transport,
+		}
+		paced := &pacedTLSConn{Conn: serverRaw}
+		server := tls.Server(paced, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+		handshakeDone := make(chan error, 1)
+		go func() { handshakeDone <- server.Handshake() }()
+		if err := client.Handshake(); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-handshakeDone; err != nil {
+			t.Fatal(err)
+		}
+		paced.interval = timeout / 4
+		payload := strings.Repeat("record payload", 256)
+		serverDone := make(chan struct{})
+		var serverErr error
+		go func() {
+			defer close(serverDone)
+			defer func() { _ = server.Close() }()
+			if _, serverErr = io.Copy(io.Discard, server); serverErr != nil {
+				return
+			}
+			_, serverErr = io.WriteString(server, payload)
+		}()
+		defer func() {
+			_ = clientRaw.Close()
+			_ = serverRaw.Close()
+			<-serverDone
+		}()
+		transport.clock.Store(newTunnelClock(timeout))
+		if err := client.CloseWrite(); err != nil {
+			t.Fatal(err)
+		}
+		_ = client.SetReadDeadline(time.Now().Add(timeout))
+		start := time.Now()
+		got, err := io.ReadAll(client)
+		if err != nil || string(got) != payload {
+			t.Fatalf("slow TLS record after half-close: received %d/%d bytes, error %v", len(got), len(payload), err)
+		}
+		if elapsed := time.Since(start); elapsed <= timeout {
+			t.Fatalf("TLS record completed in %v, want longer than %v", elapsed, timeout)
+		}
+		<-serverDone
+		if serverErr != nil {
+			t.Fatalf("TLS record write: %v", serverErr)
+		}
+	})
+}
+
+func TestDialUpstreamTLSHandshakeTimeout(t *testing.T) {
+	for _, limit := range []string{"timeout", "deadline"} {
+		t.Run(limit, func(t *testing.T) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
+			serverDone := make(chan error, 1)
+			go func() {
+				conn, err := ln.Accept()
+				if err != nil {
+					serverDone <- err
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+				_, err = io.Copy(io.Discard, conn)
+				serverDone <- err
+			}()
+			dialer := &net.Dialer{}
+			if limit == "timeout" {
+				dialer.Timeout = 50 * time.Millisecond
+			} else {
+				dialer.Deadline = time.Now().Add(50 * time.Millisecond)
+			}
+			conn, err := dialUpstream(ln.Addr().String(), UpstreamTLSConfig{Enabled: true, Dialer: dialer})
+			if conn != nil {
+				_ = conn.Close()
+				t.Fatal("TLS dial succeeded without a server handshake")
+			}
+			var ne net.Error
+			if !errors.As(err, &ne) || !ne.Timeout() {
+				t.Fatalf("TLS handshake error = %v, want timeout", err)
+			}
+			if err := <-serverDone; err != nil {
+				t.Fatalf("TLS dial did not close the connection on timeout: %v", err)
+			}
+		})
+	}
+}
 
 func generateTestCert(t *testing.T) (certPEM, keyPEM []byte) {
 	t.Helper()

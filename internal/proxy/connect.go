@@ -93,7 +93,6 @@ func idleCopy(dst net.Conn, src io.Reader, srcConn net.Conn, clock *tunnelClock)
 		n, readErr := src.Read(buf)
 		if n > 0 {
 			clock.touch()
-			_ = dst.SetWriteDeadline(time.Now().Add(clock.timeout))
 			nw, writeErr := dst.Write(buf[:n])
 			total += int64(nw)
 			if writeErr != nil {
@@ -107,6 +106,9 @@ func idleCopy(dst net.Conn, src io.Reader, srcConn net.Conn, clock *tunnelClock)
 					continue // the other direction is still moving data
 				}
 				return total, errTunnelIdle
+			}
+			if errors.Is(readErr, io.EOF) {
+				return total, nil
 			}
 			return total, readErr
 		}
@@ -159,24 +161,39 @@ func logForwardError(err error, fromAddr, toAddr net.Addr) {
 // The clock is shared by both halves of the tunnel, so the idle timeout is
 // measured across the tunnel as a whole; a disabled clock turns idleCopy into
 // plain io.Copy.
-func forwardHalf(dst net.Conn, src io.Reader, srcConn net.Conn, fromAddr, toAddr net.Addr, clock *tunnelClock) {
-	defer closeWrite(dst)
+func forwardHalf(dst net.Conn, src io.Reader, srcConn net.Conn, fromAddr, toAddr net.Addr, clock *tunnelClock) error {
 	slog.Debug("forward start", "from", fromAddr, "to", toAddr)
 	defer slog.Debug("forward done", "from", fromAddr, "to", toAddr)
 	_, err := idleCopy(dst, src, srcConn, clock)
 	logForwardError(err, fromAddr, toAddr)
+	if err == nil {
+		closeWrite(dst)
+	}
+	return err
 }
 
 // forwardTunnel copies both directions until both halves finish. Reuse the
 // existing readers so payload buffered while reading HTTP headers is preserved.
 func forwardTunnel(conn, peerConn net.Conn, reqReader, peerReader *bufio.Reader, idleTimeout time.Duration) {
 	clock := newTunnelClock(idleTimeout)
+	conn = trackTunnelActivity(conn, clock)
+	peerConn = trackTunnelActivity(peerConn, clock)
+	forward := func(dst net.Conn, src *bufio.Reader, srcConn net.Conn) {
+		if err := forwardHalf(dst, src, srcConn, srcConn.RemoteAddr(), dst.RemoteAddr(), clock); err != nil {
+			for _, c := range []net.Conn{conn, peerConn} {
+				if tc, ok := c.(*upstreamTLSConn); ok {
+					_ = tc.transport.Close()
+				}
+				_ = c.Close()
+			}
+		}
+	}
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		forwardHalf(peerConn, reqReader, conn, conn.RemoteAddr(), peerConn.RemoteAddr(), clock)
+		forward(peerConn, reqReader, conn)
 	})
 	wg.Go(func() {
-		forwardHalf(conn, peerReader, peerConn, peerConn.RemoteAddr(), conn.RemoteAddr(), clock)
+		forward(conn, peerReader, peerConn)
 	})
 	wg.Wait()
 }
