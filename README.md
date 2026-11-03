@@ -271,9 +271,11 @@ that:
   configured password, the proxy sends no further logins until the
   password file's content changes. It re-reads the file on each refused
   attempt, logs a warning at most once every 5 minutes while the rejection
-  stands, and resumes on its own when the content differs. A password
-  typed at the terminal cannot change, so logins stay refused until the
-  proxy restarts.
+  stands, and resumes on its own when the content differs. If the password
+  is in fact correct, re-save the file with different content (for example
+  remove a trailing newline) or restart the proxy to allow a retry. A
+  password typed at the terminal cannot change, so logins stay refused
+  until the proxy restarts.
 
 ### CGo boundary (macOS)
 
