@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -470,6 +471,52 @@ func TestGokrb5TokenProviderPeriodicRejectionWarnings(t *testing.T) {
 				}
 				if got := as.count(); got != 0 {
 					t.Errorf("warning timer sent %d AS exchanges, want 0", got)
+				}
+			})
+		})
+	}
+}
+
+func TestGokrb5TokenProviderRejectionTicksAfterDelayedDelivery(t *testing.T) {
+	for _, action := range []string{"repeat warning", "password change"} {
+		t.Run(action, func(t *testing.T) {
+			logs := captureSlog(t)
+			synctest.Test(t, func(t *testing.T) {
+				pwFile := writePasswordFile(t, "rejected-password", 0o600)
+				p := &Gokrb5TokenProvider{
+					passwordFile:        pwFile,
+					passwordRejected:    true,
+					rejectedFingerprint: sha256.Sum256([]byte("rejected-password")),
+					rejectWarnTicker:    time.NewTicker(5 * time.Minute),
+					rejectWarnStop:      make(chan struct{}),
+				}
+				defer func() { _ = p.Close() }()
+				time.Sleep(5*time.Minute + 10*time.Millisecond)
+				go p.repeatPasswordRejectionWarnings(p.rejectWarnTicker, p.rejectWarnStop)
+				synctest.Wait()
+				if got := strings.Count(logs.String(), "refusing Kerberos logins"); got != 1 {
+					t.Fatalf("warnings after delayed first tick = %d, want 1", got)
+				}
+				if action == "password change" {
+					if err := os.WriteFile(pwFile, []byte("corrected-password"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				time.Sleep(5*time.Minute - 9*time.Millisecond)
+				synctest.Wait()
+				if action == "repeat warning" {
+					if got := strings.Count(logs.String(), "refusing Kerberos logins"); got != 2 {
+						t.Errorf("warnings at the second scheduled tick = %d, want 2", got)
+					}
+				} else {
+					if !strings.Contains(logs.String(), "password changed; resuming Kerberos logins") {
+						t.Error("second scheduled tick did not detect the corrected password")
+					}
+					time.Sleep(10 * time.Minute)
+					synctest.Wait()
+					if got := strings.Count(logs.String(), "refusing Kerberos logins"); got != 1 {
+						t.Errorf("warnings after correction = %d, want 1", got)
+					}
 				}
 			})
 		})

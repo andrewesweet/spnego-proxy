@@ -61,7 +61,6 @@ type Gokrb5TokenProvider struct {
 	// logins resume as soon as the password no longer matches it.
 	passwordRejected    bool
 	rejectedFingerprint [sha256.Size]byte
-	lastRejectWarn      time.Time
 	rejectWarnTicker    *time.Ticker
 	rejectWarnStop      chan struct{}
 }
@@ -259,7 +258,6 @@ func (p *Gokrb5TokenProvider) rejectPassword(fingerprint [sha256.Size]byte) {
 
 // warnPasswordRejected logs that logins are refused.
 func (p *Gokrb5TokenProvider) warnPasswordRejected() {
-	p.lastRejectWarn = time.Now()
 	slog.Warn("KDC rejected the configured password; refusing Kerberos logins until the password changes",
 		"password_source", p.passwordSource(), "retry_after", passwordRejectWarnInterval.String())
 }
@@ -271,7 +269,7 @@ func (p *Gokrb5TokenProvider) repeatPasswordRejectionWarnings(ticker *time.Ticke
 			return
 		case <-ticker.C:
 			p.mu.Lock()
-			if !p.closed && p.passwordRejected && time.Since(p.lastRejectWarn) >= passwordRejectWarnInterval {
+			if !p.closed && p.passwordRejected {
 				_ = p.checkPasswordRejected()
 				if p.passwordRejected {
 					p.warnPasswordRejected()
