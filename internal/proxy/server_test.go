@@ -510,7 +510,9 @@ func TestWriteResponseObservesCancellation(t *testing.T) {
 		s := &ClientSession{ctx: ctx, conn: conn}
 		cancel()
 
-		if err := s.writeResponse(testResponse()); err != nil {
+		response := testResponse()
+		defer func() { _ = response.Body.Close() }()
+		if err := s.writeResponse(response); err != nil {
 			t.Fatalf("writeResponse: %v", err)
 		}
 		resp, err := http.ReadResponse(bufio.NewReader(strings.NewReader(conn.written.String())), nil)
@@ -529,8 +531,10 @@ func TestWriteResponseObservesCancellation(t *testing.T) {
 		defer cancel()
 		s := &ClientSession{ctx: ctx, conn: conn}
 
+		response := testResponse()
+		defer func() { _ = response.Body.Close() }()
 		writeDone := make(chan error, 1)
-		go func() { writeDone <- s.writeResponse(testResponse()) }()
+		go func() { writeDone <- s.writeResponse(response) }()
 		<-conn.started
 		cancel()
 
