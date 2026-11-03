@@ -236,7 +236,7 @@ Use the compatibility flag configured in the
 [Lint Workflows workflow](.github/workflows/lint-workflows.yml):
 
 ```bash
-actionlint -ignore '\$/.github/workflows/'
+actionlint -ignore '\$/\.github/workflows/'
 ```
 
 ## CI checks

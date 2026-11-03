@@ -26,8 +26,9 @@ jobs:
           # self-repository `uses: $/...` syntax (adopting zizmor's
           # self-repository audit), which actionlint 1.7.12 does not yet parse
           # (rhysd/actionlint#711, #732). Ignore only errors that mention such
-          # a reference; drop this flag once actionlint ships support.
-          flags: -ignore \$/.github/workflows/
+          # a reference (the dot is escaped, so the pattern cannot match an
+          # unrelated path); drop this flag once actionlint ships support.
+          flags: -ignore \$/\.github/workflows/
 
   zizmor:
     name: zizmor
