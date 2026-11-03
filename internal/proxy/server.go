@@ -8,6 +8,34 @@ import (
 	"time"
 )
 
+// Accept-error retry schedule, mirroring net/http.Server.Serve: the first
+// error waits 5ms and each further error doubles the wait, up to 1s. A
+// successful Accept resets the wait. Without the wait a persistent error such
+// as EMFILE (too many open files) spins the loop on a CPU core and writes one
+// log line per attempt.
+const (
+	acceptBackoffInitial = 5 * time.Millisecond
+	acceptBackoffMax     = time.Second
+)
+
+// acceptBackoff computes how long the accept loop waits before retrying after
+// an error.
+type acceptBackoff struct{ delay time.Duration }
+
+// next returns the wait before the next Accept and doubles it for the one
+// after that, capped at acceptBackoffMax.
+func (b *acceptBackoff) next() time.Duration {
+	if b.delay == 0 {
+		b.delay = acceptBackoffInitial
+	} else if b.delay *= 2; b.delay > acceptBackoffMax {
+		b.delay = acceptBackoffMax
+	}
+	return b.delay
+}
+
+// reset restores the initial wait after a successful Accept.
+func (b *acceptBackoff) reset() { b.delay = 0 }
+
 // Serve runs the accept loop until ctx is cancelled, then drains in-flight
 // connections. On cancellation the listener is closed and the function waits
 // up to drainTimeout for active handleClient goroutines to finish before
@@ -18,6 +46,7 @@ func Serve(ctx context.Context, l net.Listener, cfg Config, drainTimeout time.Du
 	acceptDone := make(chan struct{})
 	go func() {
 		defer close(acceptDone)
+		var backoff acceptBackoff
 		for {
 			conn, err := l.Accept()
 			if err != nil {
@@ -26,9 +55,18 @@ func Serve(ctx context.Context, l net.Listener, cfg Config, drainTimeout time.Du
 					return
 				default:
 				}
-				slog.Error("accept error", "error", err)
+				delay := backoff.next()
+				slog.Error("accept error", "error", err, "retry_in", delay)
+				timer := time.NewTimer(delay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
 				continue
 			}
+			backoff.reset()
 			wg.Go(func() {
 				handleClient(conn, cfg)
 			})
