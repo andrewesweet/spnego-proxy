@@ -13,6 +13,9 @@
 \*       writes the request on the bound connection.
 \* Hosts are compared after sameHost's canonical form (24-42); the parsing
 \* itself is out of scope here (fuzzed separately).
+\* The model covers plain-HTTP requests only. nextDirectRequest also answers a
+\* CONNECT on a bound direct connection with 400 errMismatchedTarget; that
+\* refusal is not modelled, so a regression in it would not show here.
 EXTENDS Naturals, Sequences
 
 CONSTANTS

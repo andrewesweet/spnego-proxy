@@ -25,6 +25,10 @@ fi
 
 arg=${1:-all}
 out=${2:-${TMPDIR:-/tmp}/spnego-formal-runs/$(date -u +%Y%m%dT%H%M%SZ)}
+if ! mkdir -p "$out"; then
+  echo "run-model.sh: cannot create the output directory $out." >&2
+  exit 2
+fi
 set --
 for d in "$here"/m*/; do
   [ -d "$d" ] || continue
@@ -41,10 +45,21 @@ if [ "$#" -eq 0 ]; then
   exit 2
 fi
 
-mkdir -p "$out"
+expected=$here/expected.txt
+records=$(grep -v '^[[:space:]]*#' "$expected" | awk 'NF {print $1}')
+dups=$(printf '%s\n' "$records" | sort | uniq -d)
+if [ -n "$dups" ]; then
+  echo "run-model.sh: expected.txt records a config twice:" >&2
+  printf '  %s\n' "$dups" >&2
+  exit 1
+fi
+
 rc=0
+seen=
+selected=
 for dir in "$@"; do
   model=$(basename "$dir")
+  selected="$selected $model"
   spec=
   for f in "$dir"/*.tla; do
     [ -f "$f" ] && spec=$f && break
@@ -52,6 +67,7 @@ for dir in "$@"; do
   echo "$model"
   for cfg in "$dir"/*.cfg; do
     name=$(basename "$cfg" .cfg)
+    seen="$seen $model/$name"
     set -- "$spec" --config "$cfg"
     [ -f "$dir/view.mjs" ] && set -- "$@" --view "$dir/view.mjs"
     "$sc" "$@" --out "$out/$name" >"$out/$name.log" 2>&1
@@ -64,13 +80,20 @@ for dir in "$@"; do
         continue
         ;;
     esac
+    # A run that reported no verdict checked nothing, whatever its exit status.
+    if [ ! -s "$out/$name/report.md" ] ||
+      ! grep -qE '^## (Rules that hold|Rules not checked|.+ breaks)$' "$out/$name.log"; then
+      echo "  $name: no verdict in $out/$name.log (missing or empty report.md); treating as a checker error"
+      [ $rc -lt 2 ] && rc=2
+      continue
+    fi
     breaks=$(sed -n 's/^## \(.*\) breaks$/\1/p' "$out/$name.log" | sort | paste -sd, -)
     unchecked=$(awk '/^## Rules not checked$/{getline; gsub(/[[:space:]]/, ""); print; exit}' \
       "$out/$name.log" | tr ',' '\n' | sort | paste -sd, -)
     [ -z "$breaks" ] && breaks=-
     [ -z "$unchecked" ] && unchecked=-
     actual="breaks=$breaks unchecked=$unchecked"
-    want=$(grep "^$model/$name " "$here/expected.txt" | head -n 1 | cut -d' ' -f2-)
+    want=$(grep "^$model/$name " "$expected" | head -n 1 | cut -d' ' -f2-)
     if [ -z "$want" ]; then
       echo "  $name: no line in expected.txt, actual $actual"
       [ $rc -eq 0 ] && rc=1
@@ -84,5 +107,23 @@ for dir in "$@"; do
     fi
   done
 done
+
+# Every record for a model this run selected must describe a config it actually
+# checked, so a deleted config cannot leave a stale expectation behind.
+for key in $records; do
+  model=${key%%/*}
+  case " $selected " in
+    *" $model "*) ;;
+    *) continue ;;
+  esac
+  case " $seen " in
+    *" $key "*) ;;
+    *)
+      echo "run-model.sh: expected.txt records $key, which no config produced." >&2
+      [ $rc -eq 0 ] && rc=1
+      ;;
+  esac
+done
+
 echo "outputs: $out"
 exit $rc

@@ -29,6 +29,20 @@ The checks need Node, Java and TLC. Install them once:
 
 Check the toolchain with `node --version` and `mise ls java http:tla2tools`.
 
+When Java and TLC are installed but not on `PATH`, the checker still finds them
+if `TLA2TOOLS` and `JAVA` name them, so a machine that has run the checker once
+can run it again without a shell that has mise activated:
+
+```bash
+STATECHART=/path/to/statechart \
+TLA2TOOLS="$HOME/.local/share/mise/installs/http-tla2tools/1.7.4/tla2tools.jar" \
+JAVA="$(mise which java --tool java@temurin-25)" \
+formal/run-model.sh all
+```
+
+Do not install a tool to get past a missing one; find the installed copy with
+`mise where http:tla2tools` and `mise which java --tool java@temurin-25`.
+
 ## Run
 
 From the repository root:
@@ -54,11 +68,19 @@ prints one line per config:
 - `MISMATCH` — the verdict changed. Read the next section before touching
   anything.
 - `no line in expected.txt` — a config was added without recording its verdict.
+- `no verdict` — the checker exited without writing a report or a verdict
+  section, so it checked nothing; the run counts as a checker error.
 - `statechart error` — the checker itself failed; read the named log.
 
+`expected.txt` and the configs must match one to one. The runner refuses to
+start when a config is recorded twice, and fails when a record names a config
+this run did not produce, so a deleted config cannot leave a stale expectation
+behind.
+
 Exit status: `0` all matched, `1` a verdict differs or is missing from
-`expected.txt`, `2` the checker is unavailable, a model name is invalid, or a
-checker run errored.
+`expected.txt`, or the records and configs do not match one to one; `2` the
+checker is unavailable, the output directory cannot be created, a model name is
+invalid, or a checker run errored or reported no verdict.
 
 ## Read a result
 
@@ -94,7 +116,8 @@ Keep-alive relay of plain-HTTP requests through the upstream proxy. One action
 is one blocking I/O call of the session goroutine, or one message from the
 client or the upstream; dialling, the SPNEGO token and header rewriting are
 folded into the forwarding step because they do not change which response is
-paired with which request.
+paired with which request. A request may receive up to two 1xx messages before
+its final response, so the fix direction reads past a 1xx more than once.
 
 Covers `internal/proxy/forward.go` (`run`, `readNextRequest`,
 `relayViaUpstream`, `writeResponse`), `internal/proxy/response.go`
@@ -150,18 +173,25 @@ open → half-open → open), `BreakerSabotageMaxRequests.cfg` (deliberately bro
 An established CONNECT tunnel with `-idle-timeout` enabled. Time is abstract: a
 direction's read deadline may pass whenever its source is quiet, and
 `otherActive` records whether the other direction moved data since that deadline
-was set.
+was set. `timeoutReArms` counts the fix direction's deadlines that passed while
+the other direction was active and were re-armed; `cutWhileFlowing` counts
+every cut. In the fix direction the guard makes a cut while the other direction
+is active impossible by construction, so `Tunnel.cfg` is the config that makes
+`IdleCutOnlyWhenIdle` a check rather than a tautology.
 
 Covers `internal/proxy/connect.go` (`idleCopy`, `forwardHalf`,
 `forwardTunnel`), `internal/proxy/forward.go` (`handleClient`, which closes both
 connections after the tunnel returns), and the `-idle-timeout` help text in
 `cli.go`.
 
-- `IdleCutOnlyWhenIdle` — the idle timeout fires only when no data moved in
-  either direction. Break: a long one-way transfer (a download where the client
-  sends nothing) loses its other direction at the timeout. **breaks**
-- `NoDataDroppedWhileOpen` — while the tunnel is open, data either side sends is
-  forwarded. **breaks**
+- `IdleCutOnlyWhenIdle` — a read deadline never cuts a direction, and never
+  closes the tunnel, while the other direction moved data in that read window.
+  Break: a long one-way transfer (a download where the client sends nothing)
+  loses its other direction at the timeout. **breaks**
+- `NoDataDroppedWhileOpen` — while the tunnel is open, data a side sends reaches
+  a sink that is still reading. Data a stalled sink never read is abandoned by
+  the write deadline and recorded separately (`abandoned`), so a pass cannot
+  claim that such data reached the peer. **breaks**
 - `NoDeadlock` — an open tunnel never reaches a state with no enabled step.
   Break: a tunnel whose reader stops reading can become stuck without closing.
   This checks for dead ends, not eventual termination. **breaks**
@@ -195,7 +225,10 @@ wait removed, where `NoAddAfterWait` must break).
 
 One client connection's keep-alive loop, through the upstream proxy and after a
 request matched `-noproxy`. Hosts are compared in `sameHost`'s canonical form;
-host parsing itself is out of scope (the fuzz targets cover it).
+host parsing itself is out of scope (the fuzz targets cover it). The model
+covers plain-HTTP requests only: the 400 that `nextDirectRequest` answers for a
+CONNECT on a bound direct connection is not modelled, so a regression there
+would not show.
 
 Covers `internal/proxy/forward.go` (`run`, `routeNoProxy`),
 `internal/proxy/direct.go` (`forwardDirect`, `nextDirectRequest`, `relayDirect`,
@@ -248,8 +281,9 @@ Run them when a change touches a machine above:
 
 - a file or function listed under a model — especially if the function moved or
   was renamed, which is the strongest signal that the model needs a look;
-- a constant, default or semantic of `-cb-threshold`, `-cb-timeout`,
-  `-idle-timeout`, `-timeout` or `-noproxy`;
+- a constant, default or semantic of a flag the models read: `-read-timeout`,
+  `-dial-timeout`, `-keepalive`, `-drain-timeout`, `-idle-timeout`,
+  `-cb-threshold`, `-cb-timeout`, `-noproxy` or `-connect-ports`;
 - a model or config under `formal/` itself.
 
 A change that only touches tests, docs, CI or the fuzz targets does not need

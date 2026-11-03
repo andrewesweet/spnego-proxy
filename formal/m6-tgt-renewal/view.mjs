@@ -20,7 +20,9 @@ export const step = (action, from, to) => {
       return "the cached service ticket expires";
     case "LoopRefreshes":
       if (to.failedAS > from.failedAS) return "the renewal goroutine logs in with the old password; the KDC rejects it";
-      return to.tries === 0 && from.tries > 0 ? "the renewal goroutine logs in again" : "the renewal goroutine refreshes the TGT";
+      return to.tries === 0 && from.tries > 0
+        ? "the renewal goroutine logs in again"
+        : "the renewal goroutine gets a fresh TGT: a renewal, or a password login when the TGT is not renewable";
     case "Call":
       if (from.br === "open") return "the open breaker rejects a GetToken call";
       return to.failedAS > from.failedAS ? "a GetToken call logs in with the old password and fails" : "a GetToken call succeeds";

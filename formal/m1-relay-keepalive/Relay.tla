@@ -16,6 +16,8 @@
 \* keep-alive, so connectionWillClose (forward.go 95-100) is always false.
 \* Dial, SPNEGO token and header rewriting are folded into ProxyForwardsRequest:
 \* they do not change which response the proxy pairs with which request.
+\* Each request may receive up to MaxInterim 1xx messages before its final
+\* response, so the fixed config reads past a 1xx more than once.
 EXTENDS Naturals, Sequences
 
 CONSTANTS
@@ -36,12 +38,14 @@ VARIABLES
   toClient,   \* messages the proxy has written that the client has not read
   upReqs,     \* requests the upstream has read and not yet finished answering
   upstream,   \* messages in the upstream connection's read buffer (upstreamReader)
-  interimed,  \* requests the upstream has already sent a 1xx for
+  interims,   \* per request: how many 1xx messages the upstream has sent for it
   closedOnBody \* the proxy closed the connection right after relaying a body
 
-vars == <<pc, cur, resp, toProxy, sent, answered, toClient, upReqs, upstream, interimed, closedOnBody>>
+vars == <<pc, cur, resp, toProxy, sent, answered, toClient, upReqs, upstream, interims, closedOnBody>>
 
 Ids == 1..N
+\* 1xx messages one request may receive before its final response.
+MaxInterim == 2
 None == [kind |-> "none", for |-> 0, body |-> FALSE]
 Interim(i) == [kind |-> "interim", for |-> i, body |-> FALSE]
 Final(i, b) == [kind |-> "final", for |-> i, body |-> b]
@@ -63,7 +67,7 @@ TypeOK ==
   /\ toClient \in Seq(Msg)
   /\ upReqs \in Seq(Ids)
   /\ upstream \in Seq(Msg)
-  /\ interimed \subseteq Ids
+  /\ interims \in [Ids -> 0..MaxInterim]
 
 Init ==
   /\ pc = "read_request"
@@ -75,7 +79,7 @@ Init ==
   /\ toClient = <<>>
   /\ upReqs = <<>>
   /\ upstream = <<>>
-  /\ interimed = {}
+  /\ interims = [i \in Ids |-> 0]
   /\ closedOnBody = FALSE
 
 \* ---- Client: an HTTP/1.1 user agent. It may pipeline. As RFC 9110 section 15.2
@@ -86,20 +90,20 @@ ClientSendsRequest ==
   /\ sent < N
   /\ sent' = sent + 1
   /\ toProxy' = Append(toProxy, sent + 1)
-  /\ UNCHANGED <<pc, cur, resp, answered, toClient, upReqs, upstream, interimed, closedOnBody>>
+  /\ UNCHANGED <<pc, cur, resp, answered, toClient, upReqs, upstream, interims, closedOnBody>>
 
 ClientSkipsInterim ==
   /\ toClient # <<>>
   /\ Head(toClient).kind = "interim"
   /\ toClient' = Tail(toClient)
-  /\ UNCHANGED <<pc, cur, resp, toProxy, sent, answered, upReqs, upstream, interimed, closedOnBody>>
+  /\ UNCHANGED <<pc, cur, resp, toProxy, sent, answered, upReqs, upstream, interims, closedOnBody>>
 
 ClientReadsFinal ==
   /\ toClient # <<>>
   /\ Head(toClient).kind = "final"
   /\ answered' = answered + 1
   /\ toClient' = Tail(toClient)
-  /\ UNCHANGED <<pc, cur, resp, toProxy, sent, upReqs, upstream, interimed, closedOnBody>>
+  /\ UNCHANGED <<pc, cur, resp, toProxy, sent, upReqs, upstream, interims, closedOnBody>>
 
 \* ---- Session goroutine (ClientSession.run).
 
@@ -110,7 +114,7 @@ ProxyReadsRequest ==
   /\ cur' = Head(toProxy)
   /\ toProxy' = Tail(toProxy)
   /\ pc' = "write_request"
-  /\ UNCHANGED <<resp, sent, answered, toClient, upReqs, upstream, interimed, closedOnBody>>
+  /\ UNCHANGED <<resp, sent, answered, toClient, upReqs, upstream, interims, closedOnBody>>
 
 \* readNextRequest fails on a later iteration: the ReadTimeout deadline passes,
 \* or the client hangs up. run returns and handleClient closes the connection.
@@ -118,14 +122,14 @@ ProxyStopsWaiting ==
   /\ pc = "read_request"
   /\ toProxy = <<>>
   /\ pc' = "closed"
-  /\ UNCHANGED <<cur, resp, toProxy, sent, answered, toClient, upReqs, upstream, interimed, closedOnBody>>
+  /\ UNCHANGED <<cur, resp, toProxy, sent, answered, toClient, upReqs, upstream, interims, closedOnBody>>
 
 \* relayViaUpstream: dialAndAuthUpstream on first use, then req.WriteProxy.
 ProxyForwardsRequest ==
   /\ pc = "write_request"
   /\ upReqs' = Append(upReqs, cur)
   /\ pc' = "read_response"
-  /\ UNCHANGED <<cur, resp, toProxy, sent, answered, toClient, upstream, interimed, closedOnBody>>
+  /\ UNCHANGED <<cur, resp, toProxy, sent, answered, toClient, upstream, interims, closedOnBody>>
 
 \* readUpstreamResponse: one http.ReadResponse call. It returns whatever message
 \* is next in upstreamReader, 1xx included.
@@ -139,7 +143,7 @@ ProxyReadsResponse ==
        ELSE /\ resp' = Head(upstream)
             /\ pc' = "write_response"
             /\ UNCHANGED toClient
-  /\ UNCHANGED <<cur, toProxy, sent, answered, upReqs, interimed, closedOnBody>>
+  /\ UNCHANGED <<cur, toProxy, sent, answered, upReqs, interims, closedOnBody>>
 
 \* writeResponse, then return !connectionWillClose(req, resp), which is true
 \* here unless the body drain failed.
@@ -152,23 +156,27 @@ ProxyRelaysResponse ==
             /\ closedOnBody' = TRUE
        ELSE /\ pc' = "read_request"
             /\ UNCHANGED closedOnBody
-  /\ UNCHANGED <<cur, toProxy, sent, answered, upReqs, upstream, interimed>>
+  /\ UNCHANGED <<cur, toProxy, sent, answered, upReqs, upstream, interims>>
 
 \* ---- Upstream proxy (and the origin behind it): answers requests in order,
-\* optionally with one 1xx (100 Continue, 103 Early Hints) before the final one.
+\* with up to MaxInterim 1xx messages (103 Early Hints, 100 Continue) before
+\* the final one.
 
+\* UpstreamSendsInterim is bounded so that the read-until-final loop is
+\* exercised more than once per request: a real upstream may send several 1xx
+\* (103 Early Hints, then 100 Continue) before the final response.
 UpstreamSendsInterim ==
   /\ upReqs # <<>>
-  /\ Head(upReqs) \notin interimed
+  /\ interims[Head(upReqs)] < MaxInterim
   /\ upstream' = Append(upstream, Interim(Head(upReqs)))
-  /\ interimed' = interimed \cup {Head(upReqs)}
+  /\ interims' = [interims EXCEPT ![Head(upReqs)] = @ + 1]
   /\ UNCHANGED <<pc, cur, resp, toProxy, sent, answered, toClient, upReqs, closedOnBody>>
 
 UpstreamSendsFinal ==
   /\ upReqs # <<>>
   /\ \E b \in BOOLEAN : upstream' = Append(upstream, Final(Head(upReqs), b))
   /\ upReqs' = Tail(upReqs)
-  /\ UNCHANGED <<pc, cur, resp, toProxy, sent, answered, toClient, interimed, closedOnBody>>
+  /\ UNCHANGED <<pc, cur, resp, toProxy, sent, answered, toClient, interims, closedOnBody>>
 
 Done ==
   /\ pc = "closed"

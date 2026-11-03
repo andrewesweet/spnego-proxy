@@ -36,10 +36,17 @@ VARIABLES
   srcFin,         \* per direction: the source closed its sending side
   sinkOK,         \* per direction: the sink still reads (FALSE: it stalled for good)
   otherActive,    \* per direction: the other direction moved data during this read
-  cutWhileFlowing,\* an idle timeout fired while the other direction carried data
+  cutWhileFlowing,\* a read deadline ended a direction, or closed the tunnel,
+                  \* while the other direction had moved data in this read window
+  timeoutReArms,  \* read deadlines that passed while the other direction was
+                  \* active and were re-armed instead of ending anything
+                  \* (fix direction only)
+  abandoned,      \* the write deadline closed the tunnel while the stalled sink
+                  \* still had data in flight or queued
   dropped         \* a side sent data that nothing will read, while the tunnel is open
 
-vars == <<phase, half, ended, avail, sentN, srcFin, sinkOK, otherActive, cutWhileFlowing, dropped>>
+vars == <<phase, half, ended, avail, sentN, srcFin, sinkOK, otherActive,
+         cutWhileFlowing, timeoutReArms, abandoned, dropped>>
 
 TypeOK ==
   /\ phase \in {"open", "closed"}
@@ -58,6 +65,8 @@ Init ==
   /\ sinkOK = [d \in Dirs |-> TRUE]
   /\ otherActive = [d \in Dirs |-> FALSE]
   /\ cutWhileFlowing = FALSE
+  /\ timeoutReArms = 0
+  /\ abandoned = FALSE
   /\ dropped = FALSE
 
 \* ---- The two peers (the client application, and the upstream proxy with the
@@ -70,13 +79,15 @@ PeerSends(d) ==
   /\ sentN' = [sentN EXCEPT ![d] = @ + 1]
   /\ avail' = [avail EXCEPT ![d] = @ + 1]
   /\ dropped' = (dropped \/ half[d] = "done")
-  /\ UNCHANGED <<phase, half, ended, srcFin, sinkOK, otherActive, cutWhileFlowing>>
+  /\ UNCHANGED <<phase, half, ended, srcFin, sinkOK, otherActive, cutWhileFlowing,
+                timeoutReArms, abandoned>>
 
 PeerFinishesSending(d) ==
   /\ phase = "open"
   /\ ~srcFin[d]
   /\ srcFin' = [srcFin EXCEPT ![d] = TRUE]
-  /\ UNCHANGED <<phase, half, ended, avail, sentN, sinkOK, otherActive, cutWhileFlowing, dropped>>
+  /\ UNCHANGED <<phase, half, ended, avail, sentN, sinkOK, otherActive,
+                cutWhileFlowing, timeoutReArms, abandoned, dropped>>
 
 \* The receiving application stops reading for good (suspended, hung, or a
 \* zero TCP window that never opens).
@@ -84,7 +95,8 @@ SinkStalls(d) ==
   /\ phase = "open"
   /\ sinkOK[d]
   /\ sinkOK' = [sinkOK EXCEPT ![d] = FALSE]
-  /\ UNCHANGED <<phase, half, ended, avail, sentN, srcFin, otherActive, cutWhileFlowing, dropped>>
+  /\ UNCHANGED <<phase, half, ended, avail, sentN, srcFin, otherActive,
+                cutWhileFlowing, timeoutReArms, abandoned, dropped>>
 
 \* ---- forwardHalf / idleCopy for direction d.
 
@@ -95,7 +107,8 @@ HalfReads(d) ==
   /\ avail' = [avail EXCEPT ![d] = @ - 1]
   /\ half' = [half EXCEPT ![d] = "writing"]
   /\ otherActive' = [otherActive EXCEPT ![Other(d)] = TRUE]
-  /\ UNCHANGED <<phase, ended, sentN, srcFin, sinkOK, cutWhileFlowing, dropped>>
+  /\ UNCHANGED <<phase, ended, sentN, srcFin, sinkOK, cutWhileFlowing,
+                timeoutReArms, abandoned, dropped>>
 
 \* dst.Write returns; the loop sets a fresh read deadline and reads again.
 HalfWrites(d) ==
@@ -104,7 +117,8 @@ HalfWrites(d) ==
   /\ sinkOK[d]
   /\ half' = [half EXCEPT ![d] = "reading"]
   /\ otherActive' = [otherActive EXCEPT ![d] = FALSE]
-  /\ UNCHANGED <<phase, ended, avail, sentN, srcFin, sinkOK, cutWhileFlowing, dropped>>
+  /\ UNCHANGED <<phase, ended, avail, sentN, srcFin, sinkOK, cutWhileFlowing,
+                timeoutReArms, abandoned, dropped>>
 
 \* src.Read returns io.EOF: the copy ends and closeWrite(dst) passes the FIN on.
 HalfSeesEOF(d) ==
@@ -114,11 +128,19 @@ HalfSeesEOF(d) ==
   /\ srcFin[d]
   /\ half' = [half EXCEPT ![d] = "done"]
   /\ ended' = [ended EXCEPT ![d] = "eof"]
-  /\ UNCHANGED <<phase, avail, sentN, srcFin, sinkOK, otherActive, cutWhileFlowing, dropped>>
+  /\ UNCHANGED <<phase, avail, sentN, srcFin, sinkOK, otherActive,
+                cutWhileFlowing, timeoutReArms, abandoned, dropped>>
 
 \* src.Read fails with the read deadline. The code ends this half only, and
 \* closeWrite(dst) sends a FIN to the sink. The fix re-arms when the other
 \* direction moved data, and otherwise closes the whole tunnel.
+\*
+\* Both ways of reacting to the deadline are recorded, so the promise below is
+\* about the deadline itself and not only about the code's way of cutting:
+\* timeoutReArms counts the fix's re-arms, and cutWhileFlowing counts every
+\* cut. In the fix direction the guard makes the close branch reachable only
+\* when the other direction is idle, which is what the promise asks for; the
+\* code direction is the config that breaks it.
 HalfTimesOut(d) ==
   /\ phase = "open"
   /\ half[d] = "reading"
@@ -128,16 +150,23 @@ HalfTimesOut(d) ==
        THEN /\ half' = [half EXCEPT ![d] = "done"]
             /\ ended' = [ended EXCEPT ![d] = "idle"]
             /\ cutWhileFlowing' = (cutWhileFlowing \/ otherActive[d])
+            /\ timeoutReArms' = timeoutReArms
             /\ UNCHANGED <<phase, otherActive>>
        ELSE IF otherActive[d]
          THEN /\ otherActive' = [otherActive EXCEPT ![d] = FALSE]
+              /\ timeoutReArms' = timeoutReArms + 1
               /\ UNCHANGED <<phase, half, ended, cutWhileFlowing>>
          ELSE /\ phase' = "closed"
               /\ ended' = [x \in Dirs |-> IF half[x] = "done" THEN ended[x] ELSE "idle"]
+              /\ timeoutReArms' = timeoutReArms
               /\ UNCHANGED <<half, otherActive, cutWhileFlowing>>
-  /\ UNCHANGED <<avail, sentN, srcFin, sinkOK, dropped>>
+  /\ UNCHANGED <<avail, sentN, srcFin, sinkOK, abandoned, dropped>>
 
-\* Fix direction only: a write deadline ends a write to a stalled sink.
+\* Fix direction only: a write deadline ends a write to a stalled sink. The
+\* chunk in flight, and any chunk still queued for that direction, is never
+\* read, so the model records the loss as abandoned rather than dropped:
+\* giving up on a peer that stopped reading is what the write deadline is for,
+\* and the promise below covers data a live peer would have received.
 WriteTimesOut(d) ==
   /\ ConnectionIdle
   /\ phase = "open"
@@ -145,14 +174,17 @@ WriteTimesOut(d) ==
   /\ ~sinkOK[d]
   /\ phase' = "closed"
   /\ ended' = [x \in Dirs |-> IF half[x] = "done" THEN ended[x] ELSE "idle"]
-  /\ UNCHANGED <<half, avail, sentN, srcFin, sinkOK, otherActive, cutWhileFlowing, dropped>>
+  /\ abandoned' = TRUE
+  /\ UNCHANGED <<half, avail, sentN, srcFin, sinkOK, otherActive,
+                cutWhileFlowing, timeoutReArms, dropped>>
 
 \* wg.Wait returns in forwardTunnel; handleClient closes both connections.
 TunnelCloses ==
   /\ phase = "open"
   /\ \A d \in Dirs : half[d] = "done"
   /\ phase' = "closed"
-  /\ UNCHANGED <<half, ended, avail, sentN, srcFin, sinkOK, otherActive, cutWhileFlowing, dropped>>
+  /\ UNCHANGED <<half, ended, avail, sentN, srcFin, sinkOK, otherActive,
+                cutWhileFlowing, timeoutReArms, abandoned, dropped>>
 
 Done ==
   /\ phase = "closed"
@@ -171,11 +203,15 @@ Spec == Init /\ [][Next]_vars
 \* ---- Promises. TLC's NoDeadlock also checks for open tunnels with no enabled
 \* step: Done covers each closed tunnel. It does not prove eventual termination.
 
-\* The idle timeout fires only when no data flowed in either direction.
-\* Breaking it: a long one-way transfer (a download where the client sends
-\* nothing) loses its other direction at the timeout.
+\* A read deadline never cuts a direction, and never closes the tunnel, while
+\* the other direction moved data in this read window. Breaking it: a long
+\* one-way transfer (a download where the client sends nothing) loses its
+\* other direction at the timeout.
 IdleCutOnlyWhenIdle == ~cutWhileFlowing
 
-\* While the tunnel is open, data either side sends is forwarded.
+\* While the tunnel is open, data a side sends is forwarded to a sink that is
+\* still reading. Data a stalled sink never read is abandoned by the write
+\* deadline instead, which is recorded separately, so a pass cannot claim that
+\* such data reached the peer.
 NoDataDroppedWhileOpen == ~dropped
 ====

@@ -36,10 +36,9 @@ export const step = (action, from, to) => {
       }
       return `the read deadline for data from the ${side(dirOf(from, to, "otherActive"))} passes and is set again`;
     }
-    case "WriteTimesOut": {
-      const d = ["up", "down"].find((x) => from.half[x] === "writing" && !from.sinkOK[x]) ?? "up";
-      return `the write deadline for data to the ${receiver(d)} passes`;
-    }
+    case "WriteTimesOut":
+      // Either direction can be the stalled one, so the label never names a side.
+      return "the write deadline passes for data a peer stopped reading; the proxy gives up and closes the tunnel";
     case "TunnelCloses":
       return "both directions end and the proxy closes both connections";
     case "SinkStalls":
