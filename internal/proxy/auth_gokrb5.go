@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
@@ -58,9 +60,11 @@ type Gokrb5TokenProvider struct {
 	closed        bool
 
 	// passwordRejected records that the KDC rejected the configured password.
-	// rejectedFingerprint is the SHA-256 of the password that was rejected;
-	// logins resume as soon as the password no longer matches it.
+	// rejectedFingerprint is a keyed HMAC of the rejected password. A random
+	// per-provider key prevents offline guessing from the fingerprint alone;
+	// this is a transient change detector, not a stored password verifier.
 	passwordRejected    bool
+	fingerprintKey      [sha256.Size]byte
 	rejectedFingerprint [sha256.Size]byte
 	rejectWarnTicker    *time.Ticker
 	rejectWarnStop      chan struct{}
@@ -146,6 +150,7 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 		passwordFile: passwordFile,
 		settings:     settings,
 	}
+	rand.Read(p.fingerprintKey[:])
 	if passwordFile == "" {
 		// Nothing to re-read: keep the typed password for the per-call client.
 		p.stdinPassword = passwd
@@ -184,9 +189,9 @@ func (p *Gokrb5TokenProvider) GetToken() (string, error) {
 
 	passwd, err := p.readPassword()
 	if err != nil {
-		return "", &CredentialError{authError{msg: fmt.Sprintf("failed to get password: %v", err), cause: err}}
+		return "", &CredentialError{authError{msg: "failed to get password: check password input and file permissions"}}
 	}
-	fingerprint := sha256.Sum256(passwd)
+	fingerprint := p.passwordFingerprint(passwd)
 	krbClient, err := p.acquireCredential(passwd)
 	if err != nil {
 		if isPasswordRejection(err) {
@@ -245,7 +250,15 @@ func (p *Gokrb5TokenProvider) acquireCredential(passwd []byte) (*client.Client, 
 	return client.NewFromCCache(cache, p.cfg, p.settings...)
 }
 
-// rejectPassword records that the KDC rejected the password whose SHA-256 is
+// passwordFingerprint detects password changes without keeping the password
+// or an unkeyed digest that could be tested against a password dictionary.
+func (p *Gokrb5TokenProvider) passwordFingerprint(passwd []byte) [sha256.Size]byte {
+	mac := hmac.New(sha256.New, p.fingerprintKey[:])
+	_, _ = mac.Write(passwd)
+	return [sha256.Size]byte(mac.Sum(nil))
+}
+
+// rejectPassword records that the KDC rejected the password whose HMAC is
 // fingerprint, starts periodic warnings, and stops further logins until the
 // effective password changes.
 func (p *Gokrb5TokenProvider) rejectPassword(fingerprint [sha256.Size]byte) {
@@ -296,11 +309,10 @@ func (p *Gokrb5TokenProvider) checkPasswordRejected() error {
 	passwd, err := p.readPassword()
 	if err != nil {
 		return &CredentialError{authError{
-			msg:   fmt.Sprintf("KDC rejected the configured password and the password cannot be re-read to check for a correction: %v", err),
-			cause: err,
+			msg: "KDC rejected the configured password and the password cannot be re-read to check for a correction; check password input and file permissions",
 		}}
 	}
-	fingerprint := sha256.Sum256(passwd)
+	fingerprint := p.passwordFingerprint(passwd)
 	clear(passwd)
 	if fingerprint != p.rejectedFingerprint {
 		p.passwordRejected = false
@@ -318,7 +330,7 @@ func (p *Gokrb5TokenProvider) passwordSource() string {
 	if p.passwordFile == "" {
 		return "terminal input at start-up"
 	}
-	return p.passwordFile
+	return "password file"
 }
 
 // Close stops further token acquisition and zeroes any password typed at a
@@ -335,5 +347,7 @@ func (p *Gokrb5TokenProvider) Close() error {
 	}
 	clear(p.stdinPassword)
 	p.stdinPassword = nil
+	clear(p.fingerprintKey[:])
+	clear(p.rejectedFingerprint[:])
 	return nil
 }

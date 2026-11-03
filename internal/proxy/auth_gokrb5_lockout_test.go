@@ -2,14 +2,15 @@ package proxy
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
 	"math"
 	"net"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
@@ -287,6 +288,63 @@ func TestGokrb5TokenProviderStopsLoginsAfterPasswordRejection(t *testing.T) {
 	if got := as.count(); got != 1 {
 		t.Errorf("KDC served %d AS exchanges after the password changed, want 1", got)
 	}
+	for _, sensitive := range []string{pwFile, "wrong-password", kdc.Principals[testKDCUser].Password} {
+		if strings.Contains(logs.String(), sensitive) {
+			t.Error("credential diagnostics disclosed a password or its file path")
+		}
+	}
+}
+
+// Runtime password-read failures reach the forwarding logger. That public log
+// output must explain the failure without exposing the credential file path,
+// both before a login and while a rejected password is latched.
+func TestGokrb5TokenProviderReadFailureLogsExcludeCredentialPath(t *testing.T) {
+	for _, rejected := range []bool{false, true} {
+		t.Run(fmt.Sprint(rejected), func(t *testing.T) {
+			p := newTestGokrb5TokenProvider(t)
+			t.Cleanup(func() { _ = p.Close() })
+			logs := captureSlog(t)
+			if rejected {
+				p.rejectPassword(p.passwordFingerprint([]byte("pass")))
+			}
+			if err := os.Remove(p.passwordFile); err != nil {
+				t.Fatal(err)
+			}
+			resp, requests := proxyRawRoundTrip(t, "GET http://example.test/ HTTP/1.1\r\nHost: example.test\r\n\r\n", func(proxy *ProxyUnderTest) {
+				proxy.mu.Lock()
+				defer proxy.mu.Unlock()
+				proxy.cfg.Provider = p
+			})
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadGateway || len(requests) != 0 {
+				t.Fatalf("password read failure: status=%d, upstream requests=%d", resp.StatusCode, len(requests))
+			}
+			if !strings.Contains(logs.String(), "failed to get SPNEGO token") {
+				t.Fatal("forwarding did not log the credential failure")
+			}
+			if strings.Contains(logs.String(), p.passwordFile) {
+				t.Error("credential failure log disclosed the password file path")
+			}
+		})
+	}
+}
+
+func TestGokrb5TokenProviderPasswordFingerprint(t *testing.T) {
+	// RFC 4231, test case 1. HMAC pads this 20-byte key with zero bytes to
+	// its block size, so storing it in a zero-filled 32-byte array is equivalent.
+	p := newTestGokrb5TokenProvider(t)
+	t.Cleanup(func() { _ = p.Close() })
+	other := newTestGokrb5TokenProvider(t)
+	t.Cleanup(func() { _ = other.Close() })
+	if p.passwordFingerprint([]byte("Hi There")) == other.passwordFingerprint([]byte("Hi There")) {
+		t.Fatal("providers produced identical fingerprints: expected independent random keys")
+	}
+	clear(p.fingerprintKey[:])
+	copy(p.fingerprintKey[:], bytes.Repeat([]byte{0x0b}, 20))
+	const want = "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+	if got := fmt.Sprintf("%x", p.passwordFingerprint([]byte("Hi There"))); got != want {
+		t.Fatalf("HMAC-SHA256 fingerprint = %s, want RFC 4231 value %s", got, want)
+	}
 }
 
 func startDelayedKDC(t *testing.T, upstream string, phase int) (string, <-chan struct{}, chan<- struct{}) {
@@ -490,12 +548,12 @@ func TestGokrb5TokenProviderRejectionTicksAfterDelayedDelivery(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				pwFile := writePasswordFile(t, "rejected-password", 0o600)
 				p := &Gokrb5TokenProvider{
-					passwordFile:        pwFile,
-					passwordRejected:    true,
-					rejectedFingerprint: sha256.Sum256([]byte("rejected-password")),
-					rejectWarnTicker:    time.NewTicker(5 * time.Minute),
-					rejectWarnStop:      make(chan struct{}),
+					passwordFile:     pwFile,
+					passwordRejected: true,
+					rejectWarnTicker: time.NewTicker(5 * time.Minute),
+					rejectWarnStop:   make(chan struct{}),
 				}
+				p.rejectedFingerprint = p.passwordFingerprint([]byte("rejected-password"))
 				defer func() { _ = p.Close() }()
 				time.Sleep(5*time.Minute + 10*time.Millisecond)
 				go p.repeatPasswordRejectionWarnings(p.rejectWarnTicker, p.rejectWarnStop)
