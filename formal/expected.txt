@@ -4,18 +4,8 @@
 #
 # Rule names and sets are sorted, so the line is compared as a whole string.
 #
-# A config whose name ends in "Fixed" or "Reroute" states the fix direction and
-# must hold every rule. A config named after the code as it stands today breaks
-# the rules of the defects it encodes; those defects are tracked as GitHub
-# issues, so a break here is a known result, not a new finding. The "Sabotage"
-# configs are deliberately broken copies of the code: they exist so that every
-# promise fails on at least one config, which is what shows a passing config is
-# not passing for want of a rule that can never fail.
-#
-# When a run disagrees with this file, the model no longer describes the code or
-# the code moved under it. Decide which, then either fix the model or move the
-# sync commit in .agents/skills/verify-state-machines/SKILL.md and update the
-# line here. Never edit a rule or a line here only to make a run pass.
+# For config purposes, known defects, and the procedure when a verdict differs,
+# see .agents/skills/verify-state-machines/SKILL.md.
 
 m1-relay-keepalive/Relay breaks=EveryRequestAnswered,KeepAliveKept,ProxyReadsOwnResponse unchecked=-
 m1-relay-keepalive/RelayDrainFixed breaks=EveryRequestAnswered,ProxyReadsOwnResponse unchecked=-

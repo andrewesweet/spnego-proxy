@@ -6,18 +6,14 @@
 #
 # MODEL is an exact model folder name under formal/ (m1-relay-keepalive and
 # so on). With no argument, or "all", every folder named m* under formal/
-# runs. Each config's report.md, chart.mmd and log land in OUT_ROOT/<config>/;
-# OUT_ROOT defaults to ${TMPDIR:-/tmp}/spnego-formal-runs/<UTC time>, so a run
-# never overwrites an earlier one and never writes into the repository.
+# runs. OUT_ROOT selects the output directory; see
+# .agents/skills/verify-state-machines/SKILL.md for defaults and output layout.
 #
 # The check runs through the pstack /statechart command. Set STATECHART to that
-# command's executable path when it is not on PATH. The
-# command runs on Node 22.18 to 22.x or 23.6 or later, and installs TLC 1.7.4
-# with Java 25 (temurin-25) through mise on its first run.
+# command's executable path, or put statechart on PATH. See the skill above
+# for toolchain prerequisites.
 #
-# Exit status: 0 when every config ran and matched expected.txt, 1 when a
-# config's verdict differs from expected.txt, 2 when the statechart command
-# reported an error for any config.
+# See the skill above for exit statuses and verdict handling.
 set -u
 here=$(cd "$(dirname "$0")" && pwd -P)
 

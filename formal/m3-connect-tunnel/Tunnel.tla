@@ -168,9 +168,8 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
-\* ---- Promises. The third promise, that every tunnel ends, is TLC's
-\* NoDeadlock: Done covers each closed tunnel, so a state with no step out is a
-\* tunnel that stays open for good.
+\* ---- Promises. TLC's NoDeadlock also checks for open tunnels with no enabled
+\* step: Done covers each closed tunnel. It does not prove eventual termination.
 
 \* The idle timeout fires only when no data flowed in either direction.
 \* Breaking it: a long one-way transfer (a download where the client sends

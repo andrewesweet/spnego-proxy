@@ -42,11 +42,13 @@ formal/run-model.sh m5-direct-loop /tmp/my-run
 The first argument accepts only `all` or an exact model folder name under
 `formal/`. Omitting it runs every model. Paths to model folders are not accepted.
 
-The runner writes each config's `report.md`, `chart.mmd` and log under
-`OUT_ROOT/<config>/`, where `OUT_ROOT` defaults to
-`${TMPDIR:-/tmp}/spnego-formal-runs/<UTC time>`. It never writes inside the
-repository. It then compares each config's verdict with `formal/expected.txt`
-and prints one line per config:
+The runner writes each config's `report.md` and `chart.mmd` under
+`OUT_ROOT/<config>/`, and its log to `OUT_ROOT/<config>.log`. `OUT_ROOT` defaults
+to `${TMPDIR:-/tmp}/spnego-formal-runs/<UTC time>`; the second argument selects
+another directory. Existing output paths are reused and logs are overwritten,
+so choose a fresh directory to preserve earlier runs.
+The runner then compares each config's verdict with `formal/expected.txt` and
+prints one line per config:
 
 - `ok` — the verdict is the one recorded.
 - `MISMATCH` — the verdict changed. Read the next section before touching
@@ -54,7 +56,9 @@ and prints one line per config:
 - `no line in expected.txt` — a config was added without recording its verdict.
 - `statechart error` — the checker itself failed; read the named log.
 
-Exit status: `0` all matched, `1` a verdict differs, `2` the checker errored.
+Exit status: `0` all matched, `1` a verdict differs or is missing from
+`expected.txt`, `2` the checker is unavailable, a model name is invalid, or a
+checker run errored.
 
 ## Read a result
 
@@ -98,8 +102,8 @@ Covers `internal/proxy/forward.go` (`run`, `readNextRequest`,
 `Response.Write` closing the body it sent.
 
 - `EveryRequestAnswered` — the proxy closes a client connection only after every
-  request it read has a final answer. Break: the client's request fails after
-  the read timeout instead of being answered. **breaks**
+  request the client sent has a final answer. Break: the client's request fails
+  after the read timeout instead of being answered. **breaks**
 - `ProxyReadsOwnResponse` — the proxy relays the final response belonging to the
   request it just forwarded, never an interim (1xx) message. Break: a 1xx is
   relayed as the answer and a later message is framed against the wrong request.
@@ -158,8 +162,9 @@ connections after the tunnel returns), and the `-idle-timeout` help text in
   sends nothing) loses its other direction at the timeout. **breaks**
 - `NoDataDroppedWhileOpen` — while the tunnel is open, data either side sends is
   forwarded. **breaks**
-- `NoDeadlock` — the tunnel always ends. Break: a tunnel whose reader stops
-  reading is never closed. **breaks**
+- `NoDeadlock` — an open tunnel never reaches a state with no enabled step.
+  Break: a tunnel whose reader stops reading can become stuck without closing.
+  This checks for dead ends, not eventual termination. **breaks**
 
 Configs: `Tunnel.cfg` (today's code: one read deadline per direction, no write
 deadline), `TunnelFixed.cfg` (a deadline that sees both directions, plus a write
@@ -252,7 +257,8 @@ them.
 
 ## When a verdict differs
 
-`MISMATCH` means the model and the code disagree. Decide which one moved:
+`MISMATCH` means the checked verdict differs from `formal/expected.txt`.
+Compare the model with the code to decide which one moved:
 
 1. Read the config's `report.md` path and ask whether the code can do that. The
    models describe behaviour, so replay the path against the real code as a Go
