@@ -175,11 +175,6 @@ func startInterimOrigin(t *testing.T, interim string) string {
 
 // startBodylessInterimOrigin starts a raw origin whose final response is a
 // bodyless 200 that names the request path in X-Request-Path.
-//
-// The body is omitted on purpose: a test that reuses the client connection
-// needs the relayed response to leave the connection reusable, and on the
-// current base draining a response with a body after resp.Write fails and ends
-// the connection (a separate defect, not this one).
 func startBodylessInterimOrigin(t *testing.T, interim string) string {
 	t.Helper()
 	return startRawInterimOrigin(t, interim, func(req *http.Request) string {
@@ -394,36 +389,58 @@ func TestF2_InterimResponsesDroppedForHTTP10Client(t *testing.T) {
 	}
 }
 
-// TestF2_EachRequestGetsOwnFinalResponse verifies that reading past an interim
-// response keeps the upstream reader aligned: after one exchange that carried a
-// 1xx, the next request on the same client connection is answered by its own
-// final response and not by the previous request's.
+// TestF2_EachRequestGetsOwnFinalResponse checks HTTP/1.1 persistence: sequential
+// and pipelined requests on one connection must each receive their own complete
+// final response body, with or without preceding interim responses.
 func TestF2_EachRequestGetsOwnFinalResponse(t *testing.T) {
 	for _, path := range interimPaths {
-		t.Run(path.name, func(t *testing.T) {
-			origin := startBodylessInterimOrigin(t, "HTTP/1.1 100 Continue\r\n\r\n")
-			proxyAddr := startInterimProxy(t, origin, path.direct)
-			conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
-			if err != nil {
-				t.Fatalf("dial proxy: %v", err)
-			}
-			defer func() { _ = conn.Close() }()
-			br := bufio.NewReader(conn)
+		for _, tc := range []struct {
+			name      string
+			interim   string
+			pipelined bool
+		}{
+			{"sequential interim", "HTTP/1.1 100 Continue\r\n\r\n", false},
+			{"pipelined interim", "HTTP/1.1 100 Continue\r\n\r\n", true},
+			{"sequential final only", "", false},
+			{"pipelined final only", "", true},
+		} {
+			t.Run(path.name+"/"+tc.name, func(t *testing.T) {
+				origin := startInterimOrigin(t, tc.interim)
+				proxyAddr := startInterimProxy(t, origin, path.direct)
+				conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+				if err != nil {
+					t.Fatalf("dial proxy: %v", err)
+				}
+				defer func() { _ = conn.Close() }()
+				br := bufio.NewReader(conn)
+				paths := []string{"/first", "/second"}
+				if tc.pipelined {
+					var requests strings.Builder
+					for _, wantPath := range paths {
+						requests.WriteString(forwardRequest(path.direct, origin, "GET", wantPath, "HTTP/1.1", ""))
+					}
+					if _, werr := io.WriteString(conn, requests.String()); werr != nil {
+						t.Fatalf("write pipelined requests: %v", werr)
+					}
+				}
 
-			for _, wantPath := range []string{"/first", "/second"} {
-				if _, werr := io.WriteString(conn, forwardRequest(path.direct, origin, "GET", wantPath, "HTTP/1.1", "")); werr != nil {
-					t.Fatalf("write request %s: %v", wantPath, werr)
+				for _, wantPath := range paths {
+					if !tc.pipelined {
+						if _, werr := io.WriteString(conn, forwardRequest(path.direct, origin, "GET", wantPath, "HTTP/1.1", "")); werr != nil {
+							t.Fatalf("write request %s: %v", wantPath, werr)
+						}
+					}
+					msgs := readThroughFinal(t, conn, br)
+					last := msgs[len(msgs)-1]
+					if last.statusCode != http.StatusOK {
+						t.Errorf("request %s: want final 200, got %d", wantPath, last.statusCode)
+					}
+					if got := last.body; got != wantPath {
+						t.Errorf("request %s was answered by the final response for %q", wantPath, got)
+					}
 				}
-				msgs := readThroughFinal(t, conn, br)
-				last := msgs[len(msgs)-1]
-				if last.statusCode != http.StatusOK {
-					t.Errorf("request %s: want final 200, got %d", wantPath, last.statusCode)
-				}
-				if got := last.header.Get("X-Request-Path"); got != wantPath {
-					t.Errorf("request %s was answered by the final response for %q", wantPath, got)
-				}
-			}
-		})
+			})
+		}
 	}
 }
 
