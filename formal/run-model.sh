@@ -36,15 +36,13 @@ if [ ! -x "$sc" ]; then
 fi
 
 arg=${1:-all}
-dirs=
+out=${2:-${TMPDIR:-/tmp}/spnego-formal-runs/$(date -u +%Y%m%dT%H%M%SZ)}
 if [ "$arg" = all ]; then
-  for d in "$here"/m*/; do
-    [ -d "$d" ] && dirs="$dirs $d"
-  done
+  set -- "$here"/m*/
 elif [ -d "$arg" ]; then
-  dirs=$arg
+  set -- "$arg"
 elif [ -d "$here/$arg" ]; then
-  dirs=$here/$arg
+  set -- "$here/$arg"
 else
   echo "run-model.sh: no model folder $arg; one of:" >&2
   for d in "$here"/m*/; do
@@ -52,27 +50,25 @@ else
   done
   exit 2
 fi
-if [ -z "$dirs" ]; then
+if [ ! -d "$1" ]; then
   echo "run-model.sh: no model folders under $here" >&2
   exit 2
 fi
 
-out=${2:-${TMPDIR:-/tmp}/spnego-formal-runs/$(date -u +%Y%m%dT%H%M%SZ)}
 mkdir -p "$out"
 rc=0
-for dir in $dirs; do
+for dir in "$@"; do
   model=$(basename "$dir")
   spec=
   for f in "$dir"/*.tla; do
     [ -f "$f" ] && spec=$f && break
   done
-  view=
-  [ -f "$dir/view.mjs" ] && view="--view $dir/view.mjs"
   echo "$model"
   for cfg in "$dir"/*.cfg; do
     name=$(basename "$cfg" .cfg)
-    # shellcheck disable=SC2086
-    "$sc" "$spec" --config "$cfg" $view --out "$out/$name" >"$out/$name.log" 2>&1
+    set -- "$spec" --config "$cfg"
+    [ -f "$dir/view.mjs" ] && set -- "$@" --view "$dir/view.mjs"
+    "$sc" "$@" --out "$out/$name" >"$out/$name.log" 2>&1
     code=$?
     case $code in
       0|1) ;;

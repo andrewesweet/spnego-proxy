@@ -227,9 +227,13 @@ Covers `internal/proxy/circuit_breaker.go` (`GetToken`), `internal/proxy/auth_go
 - `RejectedLoginsBounded` — the KDC sees at most `-cb-threshold` rejected
   logins plus one per half-open probe. **breaks** with a non-renewable TGT
 
-Configs: `RenewalNonRenewable.cfg` and `RenewalRenewable.cfg` (today's code with
-each kind of TGT; a renewable TGT holds both rules), `RenewalFixed.cfg` (every
-password login runs inside `GetToken`; all rules hold).
+Configs: `RenewalNonRenewable.cfg` (today's code with a non-renewable TGT),
+`RenewalRenewable.cfg` (today's code only while every refresh occurs before
+`renewTill`; both rules hold within that scope), `RenewalFixed.cfg` (every
+password login runs inside `GetToken`; all rules hold). `RenewTillAhead` is a
+constant scenario assumption, not the ticket's renewable flag. The model does
+not cover a renewable TGT reaching `renewTill`: a delayed timer can then call
+`refreshSession`, which falls back to password login outside the breaker.
 
 ## When to run the checks
 

@@ -30,7 +30,7 @@
 EXTENDS Naturals
 
 CONSTANTS
-  Renewable,          \* the KDC issued a renewable TGT (renew-till ahead)
+  RenewTillAhead,     \* renew-till stays ahead of every refresh in this scenario
   R,                  \* failed refreshes the goroutine makes before expiry
   Threshold,          \* -cb-threshold
   Calls,              \* GetToken calls
@@ -95,7 +95,7 @@ LoopRefreshes ==
   /\ ~ProviderOwnsRefresh
   /\ tgt = "last_sixth"
   /\ tries < R
-  /\ IF Renewable
+  /\ IF RenewTillAhead
        THEN /\ tgt' = "fresh"
             /\ UNCHANGED <<tries, failedAS>>
        ELSE IF stale
@@ -116,7 +116,7 @@ Call ==
        ELSE LET probe == br = "half_open"
                 needLogin == tgt = "expired"
                 needRefresh == ~cached /\ tgt = "last_sixth"
-                usesPassword == needLogin \/ (needRefresh /\ ~Renewable)
+                usesPassword == needLogin \/ (needRefresh /\ ~RenewTillAhead)
                 ok == ~(usesPassword /\ stale)
             IN /\ probes' = IF probe THEN probes + 1 ELSE probes
                /\ failedAS' = IF ok THEN failedAS ELSE failedAS + 1
