@@ -2,7 +2,7 @@
 
 ## Project
 
-spnego-proxy is a Go 1.25 SPNEGO/Kerberos HTTP proxy.
+spnego-proxy is a Go 1.26 SPNEGO/Kerberos HTTP proxy.
 
 ## Versioning
 
@@ -107,7 +107,7 @@ Prepare a release changelog:
 
 ## Go Version
 
-Go 1.25. Use modern Go idioms (wg.Go, SplitSeq, t.Context).
+Go 1.26. Use modern Go idioms (wg.Go, SplitSeq, t.Context).
 
 ## Testing
 

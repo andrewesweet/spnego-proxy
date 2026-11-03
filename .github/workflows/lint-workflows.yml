@@ -22,6 +22,13 @@ jobs:
         uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
         with:
           shellcheck: true
+          # release.yml refers to its reusable workflows with GitHub's
+          # self-repository `uses: $/...` syntax (adopting zizmor's
+          # self-repository audit), which actionlint 1.7.12 does not yet parse
+          # (rhysd/actionlint#711, #732). Ignore only errors that mention such
+          # a reference (the dot is escaped, so the pattern cannot match an
+          # unrelated path); drop this flag once actionlint ships support.
+          flags: -ignore \$/\.github/workflows/
 
   zizmor:
     name: zizmor
@@ -34,7 +41,7 @@ jobs:
           persist-credentials: false
 
       - name: Run zizmor
-        uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
+        uses: zizmorcore/zizmor-action@53290badfa369cb0bf7ad16342cb62c2fa47ac7b # v0.8.0
         with:
           advanced-security: false
 
