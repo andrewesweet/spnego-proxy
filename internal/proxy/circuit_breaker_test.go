@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -125,14 +126,52 @@ func TestCircuitBreakerOpenRejectsWithoutCallingInner(t *testing.T) {
 	}
 }
 
-func TestCircuitBreakerHalfOpenRejectsConcurrentRequests(t *testing.T) {
+// TestCircuitBreakerSerialisesConcurrentCallersWhileClosed pins the guarantee
+// the breaker exists for: while the circuit is Closed, a burst of callers must
+// not each reach the credential backend. gobreaker admits every caller in the
+// Closed state and only records a result afterwards, so without serialisation
+// a burst of N callers sends N failed logins even when the threshold is far
+// smaller than N.
+func TestCircuitBreakerSerialisesConcurrentCallersWhileClosed(t *testing.T) {
+	const concurrency = 10
+	inner := &stubTokenProvider{
+		err:   errors.New("KDC rejected pre-authentication"),
+		delay: 20 * time.Millisecond,
+	}
+	cb := NewCircuitBreakerTokenProvider(inner, CBConsecutiveFailures, CBTimeout)
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	var rejected atomic.Int64
+	for range concurrency {
+		wg.Go(func() {
+			<-start
+			_, err := cb.GetToken()
+			var cbErr *CircuitBreakerError
+			if errors.As(err, &cbErr) {
+				rejected.Add(1)
+			}
+		})
+	}
+	close(start)
+	wg.Wait()
+
+	if got := inner.calls.Load(); got != int64(CBConsecutiveFailures) {
+		t.Errorf("credential backend saw %d login attempts, want %d (the breaker threshold)", got, CBConsecutiveFailures)
+	}
+	if got := rejected.Load(); got != concurrency-CBConsecutiveFailures {
+		t.Errorf("breaker rejected %d of %d callers, want %d", got, concurrency, concurrency-CBConsecutiveFailures)
+	}
+}
+
+func TestCircuitBreakerSerialisesConcurrentCallersWhileHalfOpen(t *testing.T) {
 	// Use a single stub that starts in "fail" mode to trip the breaker, then
 	// switches to "slow success" mode for the half-open probe. This avoids
 	// directly mutating cb.inner and keeps the test decoupled from field names.
 	inner := &stubTokenProvider{
 		err:   errors.New("fail"),
 		token: "recovered",
-		delay: 200 * time.Millisecond,
+		delay: 100 * time.Millisecond,
 	}
 	cb := newCircuitBreakerTokenProvider(inner, gobreaker.Settings{
 		Name:        "test-concurrent",
@@ -172,21 +211,20 @@ func TestCircuitBreakerHalfOpenRejectsConcurrentRequests(t *testing.T) {
 	}
 	wg.Wait()
 
-	var successes, tooMany int
+	// Callers that arrive while a probe is in flight queue behind it instead
+	// of being rejected, so every caller gets a token.
 	for i := range concurrency {
-		if errs[i] == nil {
-			successes++
-			if tokens[i] != "recovered" {
-				t.Errorf("expected token 'recovered', got %q", tokens[i])
-			}
-		} else if strings.Contains(errs[i].Error(), "circuit breaker half-open") {
-			tooMany++
+		if errs[i] != nil {
+			t.Errorf("caller %d was rejected while a probe was in flight: %v", i, errs[i])
+			continue
+		}
+		if tokens[i] != "recovered" {
+			t.Errorf("expected token 'recovered', got %q", tokens[i])
 		}
 	}
-	if successes != 1 {
-		t.Errorf("expected exactly 1 successful probe, got %d", successes)
-	}
-	if tooMany != concurrency-1 {
-		t.Errorf("expected %d ErrTooManyRequests rejections, got %d", concurrency-1, tooMany)
+	// Serialisation is the property that bounds failed logins: the credential
+	// backend never runs two acquisitions at once.
+	if got := inner.maxInFlight.Load(); got != 1 {
+		t.Errorf("credential backend ran %d acquisitions at once, want 1", got)
 	}
 }

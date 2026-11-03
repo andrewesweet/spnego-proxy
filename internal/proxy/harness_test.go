@@ -597,10 +597,23 @@ type stubTokenProvider struct {
 	token  string        // returned on success
 	delay  time.Duration // artificial latency before returning
 	closed atomic.Bool
+
+	// inFlight and maxInFlight record how many GetToken calls the stub ran at
+	// once, so tests can assert that a caller never overlaps another.
+	inFlight    atomic.Int64
+	maxInFlight atomic.Int64
 }
 
 func (s *stubTokenProvider) GetToken() (string, error) {
 	s.calls.Add(1)
+	current := s.inFlight.Add(1)
+	defer s.inFlight.Add(-1)
+	for {
+		max := s.maxInFlight.Load()
+		if current <= max || s.maxInFlight.CompareAndSwap(max, current) {
+			break
+		}
+	}
 	if s.delay > 0 {
 		time.Sleep(s.delay)
 	}
