@@ -101,7 +101,7 @@ func bodyRequest(t *testing.T, conn net.Conn, path string) {
 
 // TestServeClosesIdleKeepAliveConnectionOnShutdown verifies that a connection
 // idle between requests does not hold shutdown until its read deadline
-// (defect D8): with a 30 s read timeout and a 10 s drain timeout, Serve
+// (defect D8): with a 30 s read timeout and a 20 s drain timeout, Serve
 // returns as soon as the connection is closed rather than waiting for either.
 func TestServeClosesIdleKeepAliveConnectionOnShutdown(t *testing.T) {
 	// A bodyless response keeps this regression independent of D2: before

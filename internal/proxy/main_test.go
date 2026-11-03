@@ -1116,8 +1116,8 @@ func TestHandleClientConnectionCloseTerminatesLoop(t *testing.T) {
 // dialled for.
 func TestHandleDirectHTTPReroutesSecondHost(t *testing.T) {
 	respond := func(_ int, _ *http.Request) string {
-		// 204 keeps the keep-alive loop alive on its own: a response with a
-		// body ends it, so this test isolates the reroute decision.
+		// The 204-only origin keeps the loop alive without depending on the
+		// pre-fix body-drain defect, so this test isolates the reroute decision.
 		return "HTTP/1.1 204 No Content\r\n\r\n"
 	}
 
