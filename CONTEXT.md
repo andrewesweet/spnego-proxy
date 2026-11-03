@@ -55,9 +55,12 @@ decisions crystallise; record decisions as ADRs under `docs/adr/`.
   HTTP/1.0 client (RFC 9112 §9.3), or `Connection: close` on either side.
 
 - **Frozen Seam** — `handleClient(conn, cfg)`: the stable entry point
-  called by `Serve` and the test harness. Its signature is deliberately
-  held constant so internal refactors do not ripple into callers or
-  tests; see [ADR-0001](docs/adr/0001-introduce-client-session-handling-layer.md).
+  called by the test harness, whose signature is deliberately held
+  constant so internal refactors do not ripple into callers or tests.
+  `Serve` calls `handleClientCtx(ctx, conn, cfg)`, which adds only the
+  shutdown context and lets a shutting-down proxy close an idle client
+  connection; `handleClient` is that call with a background context.
+  See [ADR-0001](docs/adr/0001-introduce-client-session-handling-layer.md).
 
 - **CLI Contract Surface** — the SemVer-relevant public API: CLI flags
   (names, types, defaults), exit codes, stdout/stderr behaviour, HTTP
