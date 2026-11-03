@@ -298,12 +298,12 @@ func TestValidateFlagsAcceptsDefaults(t *testing.T) {
 // produce a clear range error and exit 1, rather than a flag parse error (2).
 func TestCLIRejectsOutOfRangeThresholds(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "spnego-proxy.exe")
-	if out, err := exec.CommandContext(t.Context(), "go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(t.Context(), "go", "build", "-o", bin, ".").CombinedOutput(); err != nil { //nolint:gosec // G204: fixed build command; output path comes from t.TempDir().
 		t.Fatalf("build CLI: %v\n%s", err, out)
 	}
 	for _, value := range []string{"-1", "0", "4294967296"} {
 		t.Run(value, func(t *testing.T) {
-			cmd := exec.CommandContext(t.Context(), bin, "-proxy", "proxy.example:3128", "-cb-threshold", value)
+			cmd := exec.CommandContext(t.Context(), bin, "-proxy", "proxy.example:3128", "-cb-threshold", value) //nolint:gosec // G204: binary built above in t.TempDir(); arguments are fixed test values.
 			out, err := cmd.CombinedOutput()
 			var exitErr *exec.ExitError
 			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
