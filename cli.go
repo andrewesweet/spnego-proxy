@@ -28,7 +28,7 @@ type cliConfig struct {
 	ConnectPorts string
 	AllowedIPs   string
 	NoProxy      string
-	CBThreshold  uint
+	CBThreshold  int64
 	CBTimeout    time.Duration
 
 	Forwarded     bool
@@ -70,7 +70,7 @@ func parseFlags(args []string) (*cliConfig, *flag.FlagSet, error) {
 		"comma-separated list of allowed client IPs or CIDR ranges (empty = allow all; recommended when binding to non-loopback)")
 	fs.StringVar(&c.NoProxy, "noproxy", "",
 		"comma-separated list of hosts/domains/IPs/CIDRs to bypass upstream proxy (supports *.domain, .domain, CIDR, * for all; also reads NO_PROXY/no_proxy env vars)")
-	fs.UintVar(&c.CBThreshold, "cb-threshold", uint(proxy.CBConsecutiveFailures),
+	fs.Int64Var(&c.CBThreshold, "cb-threshold", int64(proxy.CBConsecutiveFailures),
 		"consecutive failures before circuit breaker opens")
 	fs.DurationVar(&c.CBTimeout, "cb-timeout", proxy.CBTimeout,
 		"circuit breaker cooldown duration")
@@ -113,7 +113,7 @@ const cbThresholdMax = 1<<32 - 1
 // the breaker opens on the first failure when the threshold is 0 because
 // ConsecutiveFailures >= 0 always holds.
 func validateFlags(c *cliConfig) error {
-	if c.CBThreshold == 0 || c.CBThreshold > cbThresholdMax {
+	if c.CBThreshold <= 0 || c.CBThreshold > cbThresholdMax {
 		return fmt.Errorf("-cb-threshold must be between 1 and %d, got %d", cbThresholdMax, c.CBThreshold)
 	}
 	if c.CBTimeout <= 0 {

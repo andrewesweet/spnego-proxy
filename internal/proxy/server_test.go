@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -14,7 +15,6 @@ import (
 // so a test can measure the delay between retries.
 type failingListener struct {
 	net.Listener
-	calls  atomic.Int64
 	stamps chan time.Time
 }
 
@@ -29,7 +29,6 @@ func newFailingListener(t *testing.T) *failingListener {
 }
 
 func (f *failingListener) Accept() (net.Conn, error) {
-	f.calls.Add(1)
 	select {
 	case f.stamps <- time.Now():
 	default:
@@ -70,29 +69,48 @@ func TestAcceptBackoffDoublesToMaxAndResets(t *testing.T) {
 
 // TestServeBacksOffOnPersistentAcceptError is the regression test for the
 // accept-loop spin: with a listener that always fails, the loop must keep
-// retrying but at a bounded rate. Before the fix the loop retried with no wait
-// at all and managed ~160,000 Accept calls and log lines per 100 ms.
+// retrying on the specified doubling schedule. Before the fix the loop retried
+// with no wait at all and managed ~160,000 Accept calls and log lines per 100 ms.
+// Cancellation must also interrupt the capped 1 s wait. Virtual time makes both
+// assertions independent of scheduler load.
 func TestServeBacksOffOnPersistentAcceptError(t *testing.T) {
-	l := newFailingListener(t)
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
-	go func() { Serve(ctx, l, Config{}, time.Second); close(done) }()
+	synctest.Test(t, func(t *testing.T) {
+		l := newFailingListener(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() { Serve(ctx, l, Config{}, time.Second); close(done) }()
+		defer func() {
+			cancel()
+			<-done
+		}()
 
-	time.Sleep(150 * time.Millisecond)
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Serve did not return within 5s of cancellation")
-	}
+		previous := <-l.stamps
+		for i, want := range []time.Duration{
+			5 * time.Millisecond, 10 * time.Millisecond, 20 * time.Millisecond,
+			40 * time.Millisecond, 80 * time.Millisecond, 160 * time.Millisecond,
+			320 * time.Millisecond, 640 * time.Millisecond, time.Second, time.Second,
+		} {
+			select {
+			case stamp := <-l.stamps:
+				if got := stamp.Sub(previous); got != want {
+					t.Fatalf("retry %d interval = %v, want %v", i+1, got, want)
+				}
+				previous = stamp
+			case <-time.After(2 * time.Second):
+				t.Fatalf("Serve stopped retrying before retry %d", i+1)
+			}
+		}
 
-	calls := l.calls.Load()
-	if calls < 3 {
-		t.Fatalf("%d Accept calls in 150ms, want the loop to keep retrying (at least 3)", calls)
-	}
-	if calls > 40 {
-		t.Fatalf("%d Accept calls in 150ms, want a backed-off rate (5ms doubling to 1s), not a spin", calls)
-	}
+		// Ensure the accept loop is blocked in its capped retry wait before
+		// cancelling; cancellation at the next Accept would miss this path.
+		synctest.Wait()
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("Serve did not interrupt the 1s retry wait within 100ms of cancellation")
+		}
+	})
 }
 
 // TestServeResetsAcceptBackoffAfterSuccess pins the reset half of the

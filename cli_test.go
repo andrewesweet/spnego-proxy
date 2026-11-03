@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -69,7 +70,7 @@ func TestParseFlagsDefaults(t *testing.T) {
 		{"connect-ports", c.ConnectPorts, "443"},
 		{"allowed-ips", c.AllowedIPs, ""},
 		{"noproxy", c.NoProxy, ""},
-		{"cb-threshold", c.CBThreshold, uint(proxy.CBConsecutiveFailures)},
+		{"cb-threshold", c.CBThreshold, int64(proxy.CBConsecutiveFailures)},
 		{"cb-timeout", c.CBTimeout, proxy.CBTimeout},
 		{"forwarded", c.Forwarded, false},
 		{"x-forwarded-for", c.XForwardedFor, false},
@@ -249,6 +250,7 @@ func TestValidateFlagsRejectsCircuitBreakerValues(t *testing.T) {
 		cfg      cliConfig
 		wantFlag string
 	}{
+		{"threshold negative", cliConfig{CBThreshold: -1, CBTimeout: time.Second}, "-cb-threshold"},
 		{"threshold zero", cliConfig{CBThreshold: 0, CBTimeout: time.Second}, "-cb-threshold"},
 		{"threshold above uint32", cliConfig{CBThreshold: 1 << 32, CBTimeout: time.Second}, "-cb-threshold"},
 		{"timeout zero", cliConfig{CBThreshold: 1, CBTimeout: 0}, "-cb-timeout"},
@@ -289,5 +291,28 @@ func TestValidateFlagsAcceptsDefaults(t *testing.T) {
 	}
 	if err := validateFlags(c); err != nil {
 		t.Fatalf("validateFlags(defaults) = %v, want nil", err)
+	}
+}
+
+// TestCLIRejectsOutOfRangeThresholds checks the CLI contract: invalid ranges
+// produce a clear range error and exit 1, rather than a flag parse error (2).
+func TestCLIRejectsOutOfRangeThresholds(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "spnego-proxy.exe")
+	if out, err := exec.CommandContext(t.Context(), "go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build CLI: %v\n%s", err, out)
+	}
+	for _, value := range []string{"-1", "0", "4294967296"} {
+		t.Run(value, func(t *testing.T) {
+			cmd := exec.CommandContext(t.Context(), bin, "-proxy", "proxy.example:3128", "-cb-threshold", value)
+			out, err := cmd.CombinedOutput()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+				t.Fatalf("CLI error = %v, want exit 1\n%s", err, out)
+			}
+			want := "-cb-threshold must be between 1 and 4294967295, got " + value
+			if !strings.Contains(string(out), want) {
+				t.Fatalf("CLI output = %s, want range error %q", out, want)
+			}
+		})
 	}
 }
