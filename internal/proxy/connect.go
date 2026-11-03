@@ -124,7 +124,13 @@ func forwardTunnel(conn, peerConn net.Conn, reqReader, peerReader *bufio.Reader,
 // forwarding only after a 2xx is confirmed.
 func handleConnectTunnel(conn, proxyConn net.Conn, reqReader *bufio.Reader, req *http.Request, pseudonym, clientAddr string, idleTimeout time.Duration) {
 	upstreamReader := bufio.NewReader(proxyConn)
-	resp, err := readUpstreamResponse(upstreamReader, req, pseudonym) //nolint:bodyclose // S3: resp.Body is the raw tunnel stream; closing it would shut down the TCP connection we forward below.
+	resp, clientErr, err := readThroughInterim(conn, req, func() (*http.Response, error) { //nolint:bodyclose // S3: resp.Body is the raw tunnel stream; closing it would shut down the TCP connection we forward below.
+		return readUpstreamResponse(upstreamReader, req, pseudonym)
+	})
+	if clientErr != nil {
+		logForwardError(clientErr, proxyConn.RemoteAddr(), conn.RemoteAddr())
+		return
+	}
 	if err != nil {
 		handleUpstreamResponseError(conn, proxyConn, err, clientAddr)
 		return
