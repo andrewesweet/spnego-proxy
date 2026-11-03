@@ -23,6 +23,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -621,6 +622,37 @@ func TestConnectTunnelIdleTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected connection to be closed due to idle timeout")
 	}
+}
+
+func TestTunnelClockElapsedOffsets(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const timeout = 5 * time.Second
+		clock := newTunnelClock(timeout)
+		if got := clock.remaining(); got != timeout {
+			t.Fatalf("initial idle budget = %v, want %v", got, timeout)
+		}
+
+		clock.last.Store(-int64(2 * time.Second))
+		if got := clock.quietFor(); got != 2*time.Second {
+			t.Fatalf("activity two seconds before tunnel origin: quiet for %v, want 2s", got)
+		}
+		time.Sleep(time.Second)
+		if got := clock.remaining(); got != 2*time.Second || clock.idle() {
+			t.Fatalf("after three seconds of inactivity: remaining = %v, idle = %v", got, clock.idle())
+		}
+
+		clock.touch()
+		if got := clock.quietFor(); got != 0 {
+			t.Fatalf("activity reset: quiet for %v, want 0", got)
+		}
+		if got := clock.remaining(); got != timeout || clock.idle() {
+			t.Fatalf("activity reset: remaining = %v, idle = %v", got, clock.idle())
+		}
+		time.Sleep(timeout)
+		if got := clock.remaining(); got != 0 || !clock.idle() {
+			t.Fatalf("idle timeout reached: remaining = %v, idle = %v", got, clock.idle())
+		}
+	})
 }
 
 // TestConnectTunnelIdleTimeoutResetOnData verifies that active tunnels that

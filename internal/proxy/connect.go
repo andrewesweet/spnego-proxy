@@ -40,23 +40,22 @@ var errTunnelIdle = errors.New("tunnel idle timeout")
 // a direction that is quiet while the other one is busy is not cut off.
 type tunnelClock struct {
 	timeout time.Duration
-	last    atomic.Int64 // UnixNano of the last byte moved in either direction
+	origin  time.Time
+	last    atomic.Int64 // Nanoseconds since origin of the last byte moved in either direction
 }
 
 // newTunnelClock returns a clock measuring idleness against timeout. A timeout
 // of zero disables the idle check.
 func newTunnelClock(timeout time.Duration) *tunnelClock {
-	c := &tunnelClock{timeout: timeout}
-	c.touch()
-	return c
+	return &tunnelClock{timeout: timeout, origin: time.Now()}
 }
 
 // touch records that the tunnel moved data.
-func (c *tunnelClock) touch() { c.last.Store(time.Now().UnixNano()) }
+func (c *tunnelClock) touch() { c.last.Store(int64(time.Since(c.origin))) }
 
 // quietFor reports how long the tunnel as a whole has gone without moving data.
 func (c *tunnelClock) quietFor() time.Duration {
-	return time.Since(time.Unix(0, c.last.Load()))
+	return time.Since(c.origin) - time.Duration(c.last.Load())
 }
 
 // idle reports whether the tunnel has moved no data for the whole timeout.
