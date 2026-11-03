@@ -965,6 +965,90 @@ func TestHandleClientKeepAliveForwardsSecondRequest(t *testing.T) {
 	}
 }
 
+// TestHandleClientKeepAliveAfterResponseWithBody verifies that a response
+// carrying a body does not end the client connection (defect D2): two
+// requests on one client connection are both answered, over one upstream
+// connection and one SPNEGO token, on the upstream path and on the -noproxy
+// direct path.
+func TestHandleClientKeepAliveAfterResponseWithBody(t *testing.T) {
+	// echo answers with a body, so every response has one and the answers
+	// stay distinguishable.
+	echo := func(_ int, req *http.Request) string {
+		path := req.URL.Path
+		return "HTTP/1.1 200 OK\r\nContent-Length: " + strconv.Itoa(len(path)) + "\r\n\r\n" + path
+	}
+
+	cases := []struct {
+		name string
+		// noproxy selects the routing path under test; empty means the
+		// request goes through the upstream proxy.
+		noproxy string
+	}{
+		{name: "via the upstream proxy"},
+		{name: "direct through -noproxy", noproxy: "127.0.0.1"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			serverAddr, serverReqs := keepAliveUpstream(t, 2, echo)
+			provider := &stubTokenProvider{token: "tok"}
+			host := "example.test"
+			cfg := defaultTestConfig(serverAddr, provider)
+			if c.noproxy != "" {
+				// The direct path dials the host itself; the upstream is unused.
+				host = serverAddr
+				cfg = defaultTestConfig("127.0.0.1:1", provider)
+				cfg.NoProxy = NewNoProxyMatcher(c.noproxy)
+			}
+			addr, done := acceptOneAndHandle(t, cfg)
+
+			client, err := net.Dial("tcp", addr)
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer func() { _ = client.Close() }()
+
+			pipeline := "GET http://" + host + "/one HTTP/1.1\r\nHost: " + host + "\r\n\r\n" +
+				"GET http://" + host + "/two HTTP/1.1\r\nHost: " + host + "\r\n\r\n"
+			if _, err := io.WriteString(client, pipeline); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+
+			reader := bufio.NewReader(client)
+			for _, want := range []string{"/one", "/two"} {
+				resp, err := http.ReadResponse(reader, nil)
+				if err != nil {
+					t.Fatalf("response for %s on the same connection: %v (a response with a body must not end keep-alive)", want, err)
+				}
+				body, _ := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("response for %s: status %d, want 200", want, resp.StatusCode)
+				}
+				if string(body) != want {
+					t.Errorf("response body = %q, want %q", body, want)
+				}
+			}
+
+			_ = client.Close()
+			waitForDone(t, done)
+
+			// keepAliveUpstream accepts a single connection, so two requests
+			// reaching it prove the upstream connection was reused as well.
+			for i, want := range []string{"/one", "/two"} {
+				if got := singleTestRequest(t, serverReqs, "the server"); got.URL.Path != want {
+					t.Errorf("request[%d] reached the server as %q, want %q", i, got.URL.Path, want)
+				}
+			}
+			if c.noproxy == "" {
+				if n := provider.calls.Load(); n != 1 {
+					t.Errorf("GetToken called %d times, want 1 (per-connection auth reused for the second request)", n)
+				}
+			}
+		})
+	}
+}
+
 // TestHandleClientConnectionCloseTerminatesLoop verifies that a
 // Connection: close response terminates the keep-alive loop; a pipelined
 // second request must NOT be forwarded.
