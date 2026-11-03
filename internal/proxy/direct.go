@@ -139,11 +139,13 @@ func (s *ClientSession) forwardDirect(req *http.Request) (*http.Request, bool) {
 // returned with reroute set: the caller closes this connection and routes the
 // request again, so the binding is never widened.
 func (s *ClientSession) nextDirectRequest(boundHost, target string, iter int) (req *http.Request, reroute bool) {
-	_ = s.conn.SetReadDeadline(time.Now().Add(s.cfg.ReadTimeout))
-	req, rerr := http.ReadRequest(s.reqReader)
-	_ = s.conn.SetReadDeadline(time.Time{})
+	req, rerr := s.readRequest()
 	if rerr != nil {
-		slog.Debug("noproxy keep-alive loop ended", "error", rerr, "target", target, "iter", iter, "client_addr", s.clientAddr)
+		if errors.Is(rerr, errSessionShutdown) {
+			slog.Debug("shutdown, closing idle noproxy connection", "target", target, "client_addr", s.clientAddr)
+		} else {
+			slog.Debug("noproxy keep-alive loop ended", "error", rerr, "target", target, "iter", iter, "client_addr", s.clientAddr)
+		}
 		return nil, false
 	}
 	// A direct TCP connection is bound to a single target host: a request
@@ -202,6 +204,7 @@ func (s *ClientSession) relayDirect(req *http.Request, targetConn net.Conn, upst
 		s.logDirectError("noproxy read response", rerr, target)
 		return false
 	}
+	s.endAfterResponse(resp)
 	if writeErr := writeResponse(s.conn, resp); writeErr != nil {
 		s.logDirectError("noproxy forward response", writeErr, target)
 		return false

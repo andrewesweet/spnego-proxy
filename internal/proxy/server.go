@@ -68,7 +68,7 @@ func Serve(ctx context.Context, l net.Listener, cfg Config, drainTimeout time.Du
 			}
 			backoff.reset()
 			wg.Go(func() {
-				handleClient(conn, cfg)
+				handleClientCtx(ctx, conn, cfg)
 			})
 		}
 	}()

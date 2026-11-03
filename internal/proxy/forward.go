@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -142,6 +144,14 @@ func (s *ClientSession) dialAndAuthUpstream(req *http.Request) net.Conn {
 // ClientSession.run. All per-connection handlers are methods on
 // ClientSession; cfg is no longer threaded through them individually.
 func handleClient(conn net.Conn, cfg Config) {
+	handleClientCtx(context.Background(), conn, cfg)
+}
+
+// handleClientCtx is handleClient with the shutdown context Serve owns. Its
+// cancellation closes a connection that is idle between requests at once and
+// ends a busy connection after the response it is sending (D8). Everything
+// else about the lifecycle is unchanged from handleClient.
+func handleClientCtx(ctx context.Context, conn net.Conn, cfg Config) {
 	defer func() { _ = conn.Close() }()
 	// Half-close the write half before the full close so the client
 	// reads EOF on the response stream rather than receiving a RST that
@@ -177,8 +187,22 @@ func handleClient(conn net.Conn, cfg Config) {
 		conn:       conn,
 		cfg:        cfg,
 		clientAddr: clientAddr,
+		ctx:        ctx,
 		reqReader:  bufio.NewReader(conn),
 	}
+	// Shutdown closes a connection that is idle between requests at once: the
+	// blocked request read would otherwise hold the drain for its whole
+	// read-timeout. A busy connection is left alone so the request in flight
+	// still gets an answer.
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.beginShutdown()
+		case <-stopWatch:
+		}
+	}()
 	defer func() {
 		if s.proxyConn != nil {
 			_ = s.proxyConn.Close()
@@ -255,19 +279,74 @@ func (s *ClientSession) routeRequest(req *http.Request, iter int) (*http.Request
 	return nil, true
 }
 
+// errSessionShutdown reports that the session stopped waiting for the next
+// request because shutdown started.
+var errSessionShutdown = errors.New("proxy: shutdown")
+
+// readRequest reads the next request from the client under the read timeout.
+// The session counts as idle while it waits, which lets shutdown close the
+// connection at once instead of waiting for the deadline (D8).
+func (s *ClientSession) readRequest() (*http.Request, error) {
+	_ = s.conn.SetReadDeadline(time.Now().Add(s.cfg.ReadTimeout))
+	// Publish the idle wait and check for shutdown in one step: beginShutdown
+	// either sees idle and closes the connection, or this sees shutdown and
+	// returns without waiting for a request that will never be served.
+	s.mu.Lock()
+	if s.shutdown {
+		s.mu.Unlock()
+		return nil, errSessionShutdown
+	}
+	s.idle = true
+	s.mu.Unlock()
+	req, err := http.ReadRequest(s.reqReader)
+	s.mu.Lock()
+	s.idle = false
+	shutdown := s.shutdown
+	s.mu.Unlock()
+	_ = s.conn.SetReadDeadline(time.Time{})
+	if err != nil && shutdown {
+		// beginShutdown closed the connection under this wait.
+		return nil, errSessionShutdown
+	}
+	return req, err
+}
+
+// beginShutdown records that Serve is shutting down and closes the client
+// connection when the session is idle between requests. A busy session is
+// left open so the request in flight still gets its answer; its response is
+// marked Connection: close so the connection ends after it (D8).
+func (s *ClientSession) beginShutdown() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.shutdown = true
+	if s.idle {
+		_ = s.conn.Close()
+	}
+}
+
+// endAfterResponse marks a response as the last one on this connection when
+// shutdown has started: Response.Write emits Connection: close and the
+// keep-alive loop stops, so a busy connection is not kept past the request it
+// is answering (D8).
+func (s *ClientSession) endAfterResponse(resp *http.Response) {
+	if s.ctx.Err() != nil {
+		resp.Close = true
+	}
+}
+
 // readNextRequest reads the next request from the client connection under
 // the read timeout. It returns nil when no further request will arrive:
 // iteration 0 distinguishes an expected close from a malformed request (and
 // answers the latter with a 400), while a failure on a later iteration just
 // ends the keep-alive loop.
 func (s *ClientSession) readNextRequest(iter int) *http.Request {
-	_ = s.conn.SetReadDeadline(time.Now().Add(s.cfg.ReadTimeout))
-	req, err := http.ReadRequest(s.reqReader)
-	_ = s.conn.SetReadDeadline(time.Time{})
+	req, err := s.readRequest()
 	if err == nil {
 		return req
 	}
 	switch {
+	case errors.Is(err, errSessionShutdown):
+		slog.Debug("shutdown, closing idle connection", "iter", iter, "client_addr", s.clientAddr)
 	case iter > 0:
 		slog.Debug("keep-alive loop ended", "error", err, "iter", iter, "client_addr", s.clientAddr)
 	case isExpectedCloseError(err):
@@ -315,6 +394,7 @@ func (s *ClientSession) relayViaUpstream(req *http.Request, iter int) bool {
 		handleUpstreamResponseError(s.conn, s.proxyConn, rerr, s.clientAddr)
 		return false
 	}
+	s.endAfterResponse(resp)
 
 	if writeErr := writeResponse(s.conn, resp); writeErr != nil {
 		logForwardError(writeErr, s.proxyConn.RemoteAddr(), s.conn.RemoteAddr())

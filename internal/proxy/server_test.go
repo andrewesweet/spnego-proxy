@@ -1,14 +1,198 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
+	"io"
 	"net"
+	"net/http"
+	"strconv"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
 )
+
+// startShutdownOrigin answers every request with 200 and a body naming the
+// request path, so keep-alive survives a response and the next request can be
+// observed. before, when non-nil, runs between reading a request and writing
+// its response.
+func startShutdownOrigin(t *testing.T, before func(*http.Request)) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				br := bufio.NewReader(conn)
+				for {
+					req, err := http.ReadRequest(br)
+					if err != nil {
+						return
+					}
+					_, _ = io.Copy(io.Discard, req.Body)
+					_ = req.Body.Close()
+					if before != nil {
+						before(req)
+					}
+					body := req.URL.Path
+					_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+				}
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// startServeForTest runs the real Serve on a loopback listener with the given
+// drain timeout and returns its address, a shutdown function and a channel
+// closed when Serve returns.
+func startServeForTest(t *testing.T, cfg Config, drainTimeout time.Duration) (addr string, shutdown func(), served <-chan struct{}) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	servedCh := make(chan struct{})
+	go func() {
+		defer close(servedCh)
+		Serve(ctx, ln, cfg, drainTimeout)
+	}()
+	var once sync.Once
+	shutdown = func() { once.Do(cancel) }
+	t.Cleanup(func() {
+		shutdown()
+		_ = ln.Close()
+	})
+	return ln.Addr().String(), shutdown, servedCh
+}
+
+// waitServe waits for Serve to return within d, reporting how long it took.
+func waitServe(t *testing.T, served <-chan struct{}, d time.Duration) time.Duration {
+	t.Helper()
+	start := time.Now()
+	select {
+	case <-served:
+		return time.Since(start)
+	case <-time.After(d):
+		t.Fatalf("Serve did not return within %v", d)
+		return 0
+	}
+}
+
+// bodyRequest writes one absolute-form GET to the client connection.
+func bodyRequest(t *testing.T, conn net.Conn, path string) {
+	t.Helper()
+	if _, err := io.WriteString(conn, "GET http://example.test"+path+" HTTP/1.1\r\nHost: example.test\r\n\r\n"); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// TestServeClosesIdleKeepAliveConnectionOnShutdown verifies that a connection
+// idle between requests does not hold shutdown until its read deadline
+// (defect D8): with a 30 s read timeout and a 10 s drain timeout, Serve
+// returns as soon as the connection is closed rather than waiting for either.
+func TestServeClosesIdleKeepAliveConnectionOnShutdown(t *testing.T) {
+	cfg := defaultTestConfig(startShutdownOrigin(t, nil), &stubTokenProvider{token: "tok"})
+	cfg.ReadTimeout = 30 * time.Second
+	addr, shutdown, served := startServeForTest(t, cfg, 20*time.Second)
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	bodyRequest(t, conn, "/one")
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("response: %v", err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if string(got) != "/one" {
+		t.Fatalf("response body = %q, want /one", got)
+	}
+
+	// The connection is now idle between requests: no request in flight.
+	shutdown()
+	if elapsed := waitServe(t, served, 5*time.Second); elapsed > time.Second {
+		t.Errorf("Serve returned %v after shutdown with only an idle connection; want it to close the idle connection at once", elapsed)
+	}
+}
+
+// TestServeEndsBusyConnectionWithConnectionClose verifies that a connection
+// with a request in flight when shutdown starts is ended after that
+// response, and that the response tells the client so with Connection: close
+// (defect D8), instead of serving further requests until the drain timeout.
+func TestServeEndsBusyConnectionWithConnectionClose(t *testing.T) {
+	seen := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	cfg := defaultTestConfig(startShutdownOrigin(t, func(*http.Request) {
+		once.Do(func() { close(seen) })
+		<-release
+	}), &stubTokenProvider{token: "tok"})
+	cfg.ReadTimeout = 30 * time.Second
+	addr, shutdown, served := startServeForTest(t, cfg, 20*time.Second)
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	bodyRequest(t, conn, "/slow")
+	select {
+	case <-seen:
+	case <-time.After(5 * time.Second):
+		t.Fatal("origin did not receive the request")
+	}
+
+	// The request is in flight at the origin, so the session is busy when
+	// shutdown starts.
+	shutdown()
+	close(release)
+
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("response in flight: %v", err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if string(got) != "/slow" {
+		t.Errorf("response body = %q, want /slow (the request in flight must be answered)", got)
+	}
+	if !resp.Close {
+		// http.ReadResponse reports a wire "Connection: close" as
+		// Response.Close on an HTTP/1.1 response with a Content-Length, and
+		// strips the header, so this asserts the header reached the client.
+		t.Errorf("the response sent during shutdown does not end the connection: want Connection: close")
+	}
+
+	// The connection must end after that response, and a later request on it
+	// must not be served.
+	bodyRequest(t, conn, "/after")
+	if late, err := http.ReadResponse(br, nil); err == nil {
+		_ = late.Body.Close()
+		t.Errorf("served %s on a connection shut down mid-request; want the connection closed", late.Status)
+	}
+	if elapsed := waitServe(t, served, 5*time.Second); elapsed > time.Second {
+		t.Errorf("Serve returned %v after shutdown with one request in flight; want it to end that connection after its response", elapsed)
+	}
+}
 
 // failingListener fails every Accept with EMFILE, as accept(2) does when the
 // process has run out of file descriptors. It records the time of every call
