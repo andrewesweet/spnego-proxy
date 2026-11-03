@@ -103,7 +103,7 @@ func TestTunnelTLSRecordProgressAfterHalfClose(t *testing.T) {
 		start := time.Now()
 		got, err := io.ReadAll(client)
 		if err != nil || string(got) != payload {
-			t.Fatalf("slow TLS record after half-close: received %d/%d bytes, error %v", len(got), len(payload), err)
+			t.Fatalf("TLS record with transport progress after half-close: received %d/%d bytes, error %v", len(got), len(payload), err)
 		}
 		if elapsed := time.Since(start); elapsed <= timeout {
 			t.Fatalf("TLS record completed in %v, want longer than %v", elapsed, timeout)

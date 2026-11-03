@@ -626,6 +626,62 @@ func TestConnectTunnelIdleTimeout(t *testing.T) {
 	}
 }
 
+func TestTunnelClockKeepsLatestProgress(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const timeout = 2 * time.Second
+		clock := newTunnelClock(timeout)
+		time.Sleep(time.Second)
+		sampled := make(chan struct{})
+		resume := make(chan struct{})
+		published := make(chan struct{})
+		go func() {
+			elapsed := time.Since(clock.origin)
+			close(sampled)
+			<-resume
+			clock.touchAt(elapsed)
+			close(published)
+		}()
+		<-sampled
+		time.Sleep(time.Second)
+		clock.touch()
+		close(resume)
+		<-published
+		if got := clock.quietFor(); got != 0 {
+			t.Fatalf("late publication replaced newer progress: quiet for %v, want 0", got)
+		}
+		time.Sleep(time.Second)
+		if got := clock.remaining(); got != time.Second || clock.idle() {
+			t.Fatalf("latest progress lost: remaining = %v, idle = %v", got, clock.idle())
+		}
+		time.Sleep(time.Second)
+		if got := clock.remaining(); got != 0 || !clock.idle() {
+			t.Fatalf("latest progress should expire: remaining = %v, idle = %v", got, clock.idle())
+		}
+	})
+}
+
+func TestTunnelClockConcurrentProgressHasNonnegativeInactivity(t *testing.T) {
+	clock := newTunnelClock(time.Second)
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	for range 2 {
+		workers.Go(func() {
+			<-start
+			for range 20000 {
+				clock.touch()
+			}
+		})
+	}
+	close(start)
+	for range 20000 {
+		if quiet := clock.quietFor(); quiet < 0 {
+			t.Errorf("observed progress lies in the future: inactivity = %v", quiet)
+			break
+		}
+	}
+	workers.Wait()
+}
+
 func TestTunnelClockElapsedOffsets(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const timeout = 5 * time.Second
@@ -657,9 +713,8 @@ func TestTunnelClockElapsedOffsets(t *testing.T) {
 	})
 }
 
-// TestConnectTunnelIdleTimeoutResetOnData verifies that active tunnels that
-// continuously exchange data are NOT interrupted by the idle timeout, because
-// each successful read resets the deadline.
+// TestConnectTunnelIdleTimeoutResetOnData verifies that observed transport
+// progress within each idle window keeps the tunnel open.
 func TestConnectTunnelIdleTimeoutResetOnData(t *testing.T) {
 	// Mock upstream that echoes data back.
 	connectUpstream := newMockConnectUpstream(t, func(_ context.Context, conn net.Conn) {
@@ -718,9 +773,9 @@ func TestConnectTunnelIdleTimeoutResetOnData(t *testing.T) {
 }
 
 // TestConnectTunnelOneWayTransferOutlastsIdleTimeout verifies that the idle
-// timeout measures the tunnel as a whole rather than each direction. A client
-// that keeps uploading while the upstream stays silent must not lose its read
-// side, so the upstream's reply sent after the upload still reaches it.
+// timeout measures the tunnel as a whole rather than each direction. Observed
+// upload progress within each idle window keeps the silent reverse direction
+// available for the upstream's reply.
 func TestConnectTunnelOneWayTransferOutlastsIdleTimeout(t *testing.T) {
 	const (
 		idleTimeout = 500 * time.Millisecond
@@ -788,10 +843,9 @@ func TestConnectTunnelOneWayTransferOutlastsIdleTimeout(t *testing.T) {
 }
 
 // TestConnectTunnelOneWayDownloadOutlastsIdleTimeout is the mirror of
-// TestConnectTunnelOneWayTransferOutlastsIdleTimeout: while the upstream keeps
-// sending and the client sends nothing, the proxy must not half-close the
-// quiet direction. An upstream that reads EOF treats it as a disconnect and
-// stops sending.
+// TestConnectTunnelOneWayTransferOutlastsIdleTimeout: observed download progress
+// within each idle window keeps the silent upload direction open. An upstream
+// that reads EOF treats it as a disconnect and stops sending.
 func TestConnectTunnelOneWayDownloadOutlastsIdleTimeout(t *testing.T) {
 	const (
 		idleTimeout = 500 * time.Millisecond
@@ -1043,7 +1097,7 @@ func newTunnelTestConnections(t *testing.T, transport string) (client, conn, pee
 	return
 }
 
-func TestForwardTunnelSlowReaderKeepsBothDirectionsOpen(t *testing.T) {
+func TestForwardTunnelTransportProgressWithinTimeoutKeepsBothDirectionsOpen(t *testing.T) {
 	for _, transport := range []string{"pipe", "tcp", "tls"} {
 		for _, direction := range []string{"upload", "download"} {
 			t.Run(transport+"/"+direction, func(t *testing.T) {
@@ -1085,10 +1139,10 @@ func TestForwardTunnelSlowReaderKeepsBothDirectionsOpen(t *testing.T) {
 					for got.Len() < len(payload) {
 						n, err := dst.Read(buf)
 						if err != nil {
-							t.Fatalf("slow reader received %d/%d bytes: %v", got.Len(), len(payload), err)
+							t.Fatalf("transfer with transport progress delivered %d/%d bytes: %v", got.Len(), len(payload), err)
 						}
 						if gap := time.Since(lastRead); gap >= timeout {
-							t.Fatalf("test reader stopped receiving bytes for %v, idle timeout %v", gap, timeout)
+							t.Fatalf("test fixture paused byte delivery for %v, idle timeout %v", gap, timeout)
 						}
 						lastRead = time.Now()
 						_, _ = got.Write(buf[:n])
@@ -1102,7 +1156,7 @@ func TestForwardTunnelSlowReaderKeepsBothDirectionsOpen(t *testing.T) {
 						time.Sleep(interval)
 					}
 					if got.String() != payload {
-						t.Fatal("slow transfer changed the payload")
+						t.Fatal("transfer with transport progress changed the payload")
 					}
 					if elapsed := time.Since(start); elapsed <= timeout {
 						t.Fatalf("transfer lasted %v, want longer than %v", elapsed, timeout)

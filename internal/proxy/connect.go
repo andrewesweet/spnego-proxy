@@ -32,16 +32,16 @@ func closeWrite(conn net.Conn) {
 }
 
 // errTunnelIdle reports that a CONNECT tunnel was closed because neither of
-// its directions moved data for the whole idle timeout.
+// its directions made observable transport progress for the whole idle timeout.
 var errTunnelIdle = errors.New("tunnel idle timeout")
 
 // tunnelClock measures idleness for a whole CONNECT tunnel rather than for a
-// single direction: both halves record their traffic in the same timestamp, so
-// a direction that is quiet while the other one is busy is not cut off.
+// single direction: both halves record observed transport progress in the same
+// timestamp.
 type tunnelClock struct {
 	timeout time.Duration
 	origin  time.Time
-	last    atomic.Int64 // Nanoseconds since origin of the last byte moved in either direction
+	last    atomic.Int64 // Nanoseconds since origin of the latest observed transport progress
 }
 
 // newTunnelClock returns a clock measuring idleness against timeout. A timeout
@@ -50,15 +50,25 @@ func newTunnelClock(timeout time.Duration) *tunnelClock {
 	return &tunnelClock{timeout: timeout, origin: time.Now()}
 }
 
-// touch records that the tunnel moved data.
-func (c *tunnelClock) touch() { c.last.Store(int64(time.Since(c.origin))) }
+// touch records observed transport progress.
+func (c *tunnelClock) touch() { c.touchAt(time.Since(c.origin)) }
 
-// quietFor reports how long the tunnel as a whole has gone without moving data.
-func (c *tunnelClock) quietFor() time.Duration {
-	return time.Since(c.origin) - time.Duration(c.last.Load())
+func (c *tunnelClock) touchAt(elapsed time.Duration) {
+	now := int64(elapsed)
+	for last := c.last.Load(); now > last; last = c.last.Load() {
+		if c.last.CompareAndSwap(last, now) {
+			return
+		}
+	}
 }
 
-// idle reports whether the tunnel has moved no data for the whole timeout.
+// quietFor reports how long the tunnel has had no observed transport progress.
+func (c *tunnelClock) quietFor() time.Duration {
+	last := c.last.Load()
+	return time.Since(c.origin) - time.Duration(last)
+}
+
+// idle reports whether neither direction made observed progress for the timeout.
 func (c *tunnelClock) idle() bool { return c.quietFor() >= c.timeout }
 
 // remaining reports how much of the idle budget is left before the tunnel is
@@ -70,12 +80,14 @@ func (c *tunnelClock) remaining() time.Duration { return c.timeout - c.quietFor(
 //
 // Before each read it arms the read deadline on srcConn from the tunnel's
 // remaining idle budget, and after each successful read it records the traffic
-// in clock. A read that times out therefore only ends the copy when neither
-// direction has moved data for the timeout; otherwise the loop rearms the
-// deadline and keeps waiting, so a one-way transfer is never cut. Before each
-// write it arms a write deadline on dst for the same budget, so a peer that
-// stops reading cannot block the copy forever once the socket buffers fill. A
-// zero timeout disables the idle check and falls back to plain io.Copy.
+// in clock. A read that times out only ends the copy when neither direction
+// has made observable transport progress within the timeout; otherwise the
+// loop rearms the deadline. Destination connections arm a deadline before each
+// transport write and record bytes accepted for writing. A one-way transfer
+// stays open while this progress occurs within the timeout. TCP window
+// withholding beyond the timeout counts as inactivity even if the remote
+// application continues reading. A zero timeout disables the idle check and
+// falls back to plain io.Copy.
 func idleCopy(dst net.Conn, src io.Reader, srcConn net.Conn, clock *tunnelClock) (int64, error) {
 	if clock.timeout <= 0 {
 		return io.Copy(dst, src)

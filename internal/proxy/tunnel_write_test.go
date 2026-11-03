@@ -82,7 +82,7 @@ func (c *pacedTLSReadConn) Read(p []byte) (int, error) {
 	return c.Conn.Read(p)
 }
 
-func TestTunnelBufferedWritePreservesSlowTLSRecord(t *testing.T) {
+func TestTunnelBufferedWritePreservesTLSRecordWithTransportProgress(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const timeout = 500 * time.Millisecond
 		certPEM, keyPEM := generateTestCert(t)
@@ -131,7 +131,7 @@ func TestTunnelBufferedWritePreservesSlowTLSRecord(t *testing.T) {
 		}()
 		start := time.Now()
 		if n, err := client.Write(payload); err != nil || n != len(payload) {
-			t.Fatalf("slow TLS record write: %d/%d bytes, %v", n, len(payload), err)
+			t.Fatalf("TLS record write with transport progress: %d/%d bytes, %v", n, len(payload), err)
 		}
 		if err := <-readDone; err != nil {
 			t.Fatal(err)
@@ -143,7 +143,7 @@ func TestTunnelBufferedWritePreservesSlowTLSRecord(t *testing.T) {
 			t.Fatalf("TLS record completed in %v, want longer than %v", elapsed, timeout)
 		}
 		if calls := counted.writes.Load(); calls == 0 || calls > 64 {
-			t.Fatalf("1 KiB slow TLS record used %d writes, want at most 64", calls)
+			t.Fatalf("1 KiB TLS record used %d writes, want at most 64", calls)
 		}
 	})
 }
