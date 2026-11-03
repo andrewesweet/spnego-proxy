@@ -416,6 +416,9 @@ func (s *ClientSession) tunnelViaUpstream(req *http.Request) {
 // it, so no separate drain follows: a read or close failure on the body comes
 // back from Write as the error, and callers treat it as fatal because a failed
 // write leaves the client stream misaligned (D2).
+// Shutdown is checked against the context before serialization, independently
+// of the idle-connection watcher. Do not hold s.mu across Write: cancellation
+// must not block on or alter a response whose serialization has already begun.
 func (s *ClientSession) writeResponse(resp *http.Response) error {
 	select {
 	case <-s.ctx.Done():

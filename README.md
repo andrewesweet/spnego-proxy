@@ -156,8 +156,10 @@ for the direct-connection safety invariant.
 
 On SIGINT or SIGTERM, the proxy stops accepting connections and closes idle
 HTTP keep-alive connections immediately. Requests in flight can finish within
-`-drain-timeout`; responses prepared after shutdown starts
-include `Connection: close`, ending reuse after that response.
+`-drain-timeout`. Responses whose header serialization begins after shutdown
+starts include `Connection: close`, ending reuse after that response. A response
+already being written finishes as it started. Requests read after shutdown
+starts are not routed, including requests buffered on the client connection.
 
 ## Standards compliance
 
