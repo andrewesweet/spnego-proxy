@@ -261,9 +261,12 @@ func relayInterimResponse(client net.Conn, req *http.Request, resp *http.Respons
 // its own response.
 //
 // readOne returns one parsed response with the proxy's Via header already
-// injected. The returned clientWriteErr reports a failed write of an interim
-// response to the client; err reports any other failure. Both are nil on
-// success.
+// injected. Every interim response it returns is validated here before it is
+// serialized, so a readOne on a path with no wider response validation (the
+// -noproxy direct path) cannot relay forbidden header bytes. The returned
+// clientWriteErr reports a failed write of an interim response to the client;
+// err reports any other failure, including a rejected interim response header.
+// Both are nil on success.
 func readThroughInterim(client net.Conn, req *http.Request, readOne func() (*http.Response, error)) (resp *http.Response, clientWriteErr, err error) {
 	for {
 		resp, readErr := readOne()
@@ -272,6 +275,17 @@ func readThroughInterim(client net.Conn, req *http.Request, readOne func() (*htt
 		}
 		if !isInterimResponse(resp) {
 			return resp, nil, nil
+		}
+		// The interim response is serialized to the client by hand
+		// (relayInterimResponse), so its header field names and values must be
+		// safe before that happens: a bare CR, LF, or NUL would be written to
+		// the client verbatim (RFC 9110 §5.5, RFC 9112 §11.1). The upstream
+		// path has already checked in readUpstreamResponse; the -noproxy path
+		// has no wider response validation, so the check belongs at this shared
+		// seam, before any byte is serialized.
+		if pe := validateResponseHeaderBytes(resp); pe != nil {
+			_ = resp.Body.Close()
+			return nil, nil, errMalformedResponse
 		}
 		if werr := relayInterimResponse(client, req, resp); werr != nil {
 			return nil, werr, nil
