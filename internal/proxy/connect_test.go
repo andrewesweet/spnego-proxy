@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -688,9 +689,9 @@ func TestConnectTunnelIdleTimeoutResetOnData(t *testing.T) {
 // side, so the upstream's reply sent after the upload still reaches it.
 func TestConnectTunnelOneWayTransferOutlastsIdleTimeout(t *testing.T) {
 	const (
-		idleTimeout = 200 * time.Millisecond
+		idleTimeout = 500 * time.Millisecond
 		chunk       = "chunk\n"
-		chunks      = 20 // 5x the idle timeout at one chunk per idleTimeout/4.
+		chunks      = 30 // 3x the idle timeout at one chunk per idleTimeout/10.
 		reply       = "done\n"
 	)
 
@@ -728,12 +729,16 @@ func TestConnectTunnelOneWayTransferOutlastsIdleTimeout(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	assertStatusCode(t, resp, http.StatusOK)
 
-	// Upload for 5x the idle timeout while the upstream sends nothing.
+	// Upload for 3x the idle timeout while the upstream sends nothing.
+	uploadStart := time.Now()
 	for range chunks {
 		if _, err := conn.Write([]byte(chunk)); err != nil {
 			t.Fatalf("upload through tunnel: %v", err)
 		}
-		time.Sleep(idleTimeout / 4)
+		time.Sleep(idleTimeout / 10)
+	}
+	if elapsed := time.Since(uploadStart); elapsed <= idleTimeout {
+		t.Fatalf("upload lasted %v, want longer than the idle timeout %v", elapsed, idleTimeout)
 	}
 
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -744,7 +749,91 @@ func TestConnectTunnelOneWayTransferOutlastsIdleTimeout(t *testing.T) {
 	}
 	if string(got) != reply {
 		t.Fatalf("client read %q, want the upstream reply %q after a one-way upload lasting %v (idle timeout %v)",
-			got, reply, chunks*idleTimeout/4, idleTimeout)
+			got, reply, chunks*idleTimeout/10, idleTimeout)
+	}
+}
+
+// TestConnectTunnelOneWayDownloadOutlastsIdleTimeout is the mirror of
+// TestConnectTunnelOneWayTransferOutlastsIdleTimeout: while the upstream keeps
+// sending and the client sends nothing, the proxy must not half-close the
+// quiet direction. An upstream that reads EOF treats it as a disconnect and
+// stops sending.
+func TestConnectTunnelOneWayDownloadOutlastsIdleTimeout(t *testing.T) {
+	const (
+		idleTimeout = 500 * time.Millisecond
+		chunk       = "chunk\n"
+		chunks      = 30 // 3x the idle timeout at one chunk per idleTimeout/10.
+	)
+
+	var mu sync.Mutex
+	sent := 0
+	readReturned := make(chan int, 1)
+	downloadDone := make(chan struct{})
+	connectUpstream := newMockConnectUpstream(t, func(_ context.Context, conn net.Conn) {
+		defer close(downloadDone)
+		// Report how much had been sent when the client side of the tunnel
+		// first reads EOF, i.e. when the proxy half-closes the quiet direction.
+		go func() {
+			_, _ = conn.Read(make([]byte, 1))
+			mu.Lock()
+			n := sent
+			mu.Unlock()
+			readReturned <- n
+		}()
+		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		for range chunks {
+			if _, err := io.WriteString(conn, chunk); err != nil {
+				return
+			}
+			mu.Lock()
+			sent++
+			mu.Unlock()
+			time.Sleep(idleTimeout / 10)
+		}
+	})
+
+	proxy := NewProxyUnderTest(t, connectUpstream.Addr().String())
+	proxy.SetIdleTimeout(idleTimeout)
+	t.Cleanup(proxy.Close)
+
+	raw := "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	assertStatusCode(t, resp, http.StatusOK)
+
+	// Read the whole download without sending anything back.
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got, err := io.ReadAll(br)
+	<-downloadDone
+	if err != nil {
+		t.Fatalf("read download: %v", err)
+	}
+	if want := strings.Repeat(chunk, chunks); string(got) != want {
+		t.Fatalf("client read %d bytes, want %d", len(got), len(want))
+	}
+
+	var stalledAt int
+	select {
+	case stalledAt = <-readReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream never saw its client side of the tunnel close")
+	}
+	if stalledAt < chunks {
+		t.Fatalf("upstream read returned EOF after %d of %d chunks: the proxy half-closed the quiet direction while data was still flowing",
+			stalledAt, chunks)
 	}
 }
 
@@ -753,7 +842,7 @@ func TestConnectTunnelOneWayTransferOutlastsIdleTimeout(t *testing.T) {
 // proxy blocks in dst.Write once the socket buffers fill, and nothing ends the
 // tunnel until the stalled peer closes its socket.
 func TestConnectTunnelStalledReaderCloses(t *testing.T) {
-	const idleTimeout = 200 * time.Millisecond
+	const idleTimeout = 500 * time.Millisecond
 
 	connectUpstream := newMockConnectUpstream(t, func(_ context.Context, conn net.Conn) {
 		chunk := make([]byte, 64*1024)
@@ -804,7 +893,7 @@ func TestConnectTunnelStalledReaderCloses(t *testing.T) {
 
 	// Never read the tunnel body again: the proxy's writes to this client must
 	// eventually stall and the idle timeout must end the session.
-	const closeBudget = 25 * idleTimeout
+	const closeBudget = 10 * idleTimeout
 	select {
 	case <-sessionDone:
 	case <-time.After(closeBudget):
