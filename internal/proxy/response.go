@@ -3,6 +3,8 @@ package proxy
 import (
 	"bufio"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -236,7 +238,18 @@ func relayInterimResponse(client net.Conn, req *http.Request, resp *http.Respons
 	if clientCannotParseInterim(req) {
 		return nil
 	}
-	return resp.Write(client)
+	var buf strings.Builder
+	fmt.Fprintf(&buf, "%s %s\r\n", resp.Proto, resp.Status)
+	if err := resp.Header.WriteSubset(&buf, map[string]bool{
+		headerContentLength: true,
+		"Transfer-Encoding": true,
+		headerTrailer:       true,
+	}); err != nil {
+		return err
+	}
+	buf.WriteString("\r\n")
+	_, err := io.WriteString(client, buf.String())
+	return err
 }
 
 // readThroughInterim reads responses with readOne until the final response

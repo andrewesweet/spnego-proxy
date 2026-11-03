@@ -18,6 +18,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/textproto"
 	"strings"
 	"sync"
 	"testing"
@@ -295,6 +296,64 @@ func TestF2_InterimResponsesRelayedBeforeFinal(t *testing.T) {
 				}
 				if last.body != "/upload" {
 					t.Errorf("final response body: want %q, got %q", "/upload", last.body)
+				}
+			})
+		}
+	}
+}
+
+func TestF2_InterimResponsesHaveNoBodyFraming(t *testing.T) {
+	const interim = "HTTP/1.1 100 Continue\r\n\r\n" +
+		"HTTP/1.1 102 Processing\r\n\r\n" +
+		"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n" +
+		"HTTP/1.1 199 Custom\r\n\r\n"
+	for _, path := range interimPaths {
+		for _, method := range []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"} {
+			t.Run(path.name+"/"+method, func(t *testing.T) {
+				origin := startBodylessInterimOrigin(t, interim)
+				proxyAddr := startInterimProxy(t, origin, path.direct)
+				conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+				if err != nil {
+					t.Fatalf("dial proxy: %v", err)
+				}
+				defer func() { _ = conn.Close() }()
+				body := ""
+				if method == "POST" || method == "PUT" || method == "PATCH" {
+					body = "hello"
+				}
+				if _, err := io.WriteString(conn, forwardRequest(path.direct, origin, method, "/upload", "HTTP/1.1", body)); err != nil {
+					t.Fatalf("write request: %v", err)
+				}
+				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+				br := bufio.NewReader(conn)
+				reader := textproto.NewReader(br)
+				for _, wantStatus := range []string{"100 Continue", "102 Processing", "103 Early Hints", "199 Custom"} {
+					status, err := reader.ReadLine()
+					if err != nil {
+						t.Fatalf("read interim status: %v", err)
+					}
+					if status != "HTTP/1.1 "+wantStatus {
+						t.Fatalf("interim status: got %q, want %q", status, "HTTP/1.1 "+wantStatus)
+					}
+					header, err := reader.ReadMIMEHeader()
+					if err != nil {
+						t.Fatalf("read interim headers: %v", err)
+					}
+					for _, name := range []string{"Content-Length", "Transfer-Encoding", "Trailer"} {
+						if values, ok := header[name]; ok {
+							t.Errorf("%s: forbidden interim framing %s: %v (RFC 9110 section 8.6; RFC 9112 sections 6.1, 6.3)", status, name, values)
+						}
+					}
+					if via := header.Get("Via"); !strings.Contains(via, testPseudonym) {
+						t.Errorf("%s: missing proxy Via: %q", status, via)
+					}
+					if wantStatus == "103 Early Hints" && header.Get("Link") != "</style.css>; rel=preload" {
+						t.Errorf("Early Hints Link: got %q", header.Get("Link"))
+					}
+				}
+				msgs := readThroughFinal(t, conn, br)
+				if len(msgs) != 1 || msgs[0].statusCode != http.StatusOK || msgs[0].header.Get("X-Request-Path") != "/upload" {
+					t.Fatalf("final response: got %v, want one 200 for /upload", msgs)
 				}
 			})
 		}
