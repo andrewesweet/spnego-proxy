@@ -223,7 +223,6 @@ func (s *ClientSession) run() {
 	var pending *http.Request
 	for iter := 0; ; iter++ {
 		req := pending
-		pending = nil
 		if req == nil {
 			req = s.readNextRequest(iter)
 			if req == nil {
