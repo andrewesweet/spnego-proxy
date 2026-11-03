@@ -38,7 +38,7 @@ func (b *acceptBackoff) reset() { b.delay = 0 }
 
 // Serve runs the accept loop until ctx is cancelled, then drains in-flight
 // connections. On cancellation the listener is closed and the function waits
-// up to drainTimeout for active handleClient goroutines to finish before
+// up to drainTimeout for active session goroutines to finish before
 // returning. The listener is assumed to already have any concurrency limit
 // (netutil.LimitListener) applied by the caller.
 func Serve(ctx context.Context, l net.Listener, cfg Config, drainTimeout time.Duration) {

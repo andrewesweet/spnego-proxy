@@ -136,21 +136,20 @@ func (s *ClientSession) dialAndAuthUpstream(req *http.Request) net.Conn {
 // timeouts, CONNECT port restrictions (D4, RFC 9110 §9.3.6), and
 // forwarding header injection (RFC 7239 Forwarded, X-Forwarded-For, etc.).
 //
-// handleClient is the stable seam called by Serve and the test harness;
-// its signature is deliberately unchanged. It performs the connection-level
-// guards (pseudonym, IP allowlist), owns the conn close / closeWrite and
-// proxyConn cleanup defers (issue #75 LIFO ordering), constructs the
-// per-connection ClientSession, and delegates the request lifecycle to
-// ClientSession.run. All per-connection handlers are methods on
-// ClientSession; cfg is no longer threaded through them individually.
+// handleClient is the stable test-harness seam. It delegates to handleClientCtx
+// with a background context, so callers retain the same signature without
+// participating in Serve's shutdown lifecycle.
 func handleClient(conn net.Conn, cfg Config) {
 	handleClientCtx(context.Background(), conn, cfg)
 }
 
-// handleClientCtx is handleClient with the shutdown context Serve owns. Its
-// cancellation closes a connection that is idle between requests at once and
-// ends a busy connection after the response it is sending (D8). Everything
-// else about the lifecycle is unchanged from handleClient.
+// handleClientCtx is Serve's session entry point. It performs the connection-level
+// guards (pseudonym, IP allowlist), owns the conn close / closeWrite and proxyConn
+// cleanup defers (issue #75 LIFO ordering), constructs the per-connection
+// ClientSession, and delegates the request lifecycle to ClientSession.run.
+// Context cancellation closes an idle connection immediately and ends a busy
+// HTTP connection after its response. When endAfterResponse observes cancellation
+// before the response is written, it marks that response Connection: close (D8).
 func handleClientCtx(ctx context.Context, conn net.Conn, cfg Config) {
 	defer func() { _ = conn.Close() }()
 	// Half-close the write half before the full close so the client
@@ -215,9 +214,8 @@ func handleClientCtx(ctx context.Context, conn net.Conn, cfg Config) {
 // run executes the client-facing keep-alive loop: read a request, run the
 // validation pipeline, route it (noproxy bypass, CONNECT-via-upstream, or
 // plain HTTP through the upstream proxy), and repeat until either side
-// signals close or an error occurs. The session's conn close / closeWrite
-// and proxyConn cleanup defers stay in handleClient and fire when run
-// returns, preserving the issue #75 LIFO ordering.
+// signals close or an error occurs. Connection cleanup follows handleClientCtx's
+// ownership rules when run returns.
 func (s *ClientSession) run() {
 	// pending carries a request that arrived on a direct (noproxy) connection
 	// which is bound to another host: it has already been read and must now

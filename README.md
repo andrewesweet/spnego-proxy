@@ -142,6 +142,23 @@ password-based path instead of the native GSS-API:
     -password-file /path/to/password
 ```
 
+### HTTP connection reuse and shutdown
+
+HTTP/1.1 client connections can carry successive requests, including after
+responses with bodies. Reuse ends when either peer signals close or an error
+occurs; HTTP/1.0 client connections close after each response.
+
+With `-noproxy`, a request for another host on the same client connection
+goes through the routing decision again: matching hosts are dialled directly,
+and other hosts use the upstream proxy. See the
+[per-request validation requirements](docs/http-proxy-standards-requirements.md#k4-per-request-validation-on-persistent-connections)
+for the direct-connection safety invariant.
+
+On SIGINT or SIGTERM, the proxy stops accepting connections and closes idle
+HTTP keep-alive connections immediately. Requests in flight can finish within
+`-drain-timeout`; responses prepared after shutdown starts
+include `Connection: close`, ending reuse after that response.
+
 ## Standards compliance
 
 `spnego-proxy` implements RFC 9110 (HTTP Semantics) and RFC 9209

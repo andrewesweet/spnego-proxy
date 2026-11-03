@@ -525,11 +525,9 @@ and RFC 9112 §11.2 are not yet explicitly implemented or tested.
 > **Note**: The implementation and testing details below are suggestions. The
 > assignee is free to vary the approach as long as the same goal is reached.
 
-1. **D5 (Close on rejection)**: Currently, `handleClient` already closes the
-   connection via `defer conn.Close()` at line 83. But the RFC specifically says
-   no further requests should be processed on the connection. Since the proxy
-   handles one request per connection (no persistent connection support yet), this
-   may already be satisfied. Verify with a test.
+1. **D5 (Close on rejection)**: After rejecting CONNECT, process no further
+   requests on that client connection. For persistent-connection handling, see
+   [per-request validation requirements](http-proxy-standards-requirements.md#k4-per-request-validation-on-persistent-connections).
 
 2. **D6 (Wait for 2xx before forwarding)**: The current flow is:
    - Read client request (line 97)

@@ -698,13 +698,13 @@ Syntax constraints:
 **Level**: MUST
 **Details**: When a client sends HTTP requests on a persistent connection (HTTP/1.1 keep-alive), the proxy MUST parse and validate every request independently. Bytes pipelined behind a validated first request MUST NOT be raw-copied onto an already-authenticated upstream connection; they MUST be re-parsed and run through the full hop-by-hop sanitisation and per-request policy pipeline (Via loop, connect-ports, Max-Forwards, forwarding-header injection).
 
-Implemented in `handleClient` (non-CONNECT branch) and `handleDirectHTTP` as of v1.2.5 (PR #216, fix #215). Hop-by-hop sanitisation runs every iteration so a smuggled `Proxy-Authorization` cannot ride an already-authenticated upstream connection (RFC 4559 §5 connection-bound auth context). `handleDirectHTTP` additionally binds the direct TCP connection to the first request's target host; pipelined requests for any other host are rejected with `errMismatchedTarget`.
+Implemented in `ClientSession.run` and `ClientSession.nextDirectRequest`. Hop-by-hop sanitisation runs every iteration so a smuggled `Proxy-Authorization` cannot ride an already-authenticated upstream connection (RFC 4559 §5 connection-bound auth context). `ClientSession.forwardDirect` binds each direct TCP connection to the host and port it was dialled for. A request for another target closes that direct connection and returns to the normal validation and routing pipeline; it must never be sent over the connection bound to the previous target.
 
 **Testing strategy**:
 
 - **PoC reproduction**: `TestHandleClientRejectsSmuggledRequest` — client pipelines a forbidden CONNECT behind a valid GET; assert upstream receives only the GET.
 - **Header stripping**: `TestRFC4559_ConnectionBoundAuthSingleTokenAcquisition` — pipelined request with attacker `Proxy-Authorization` is stripped; SPNEGO token acquired once.
-- **Host binding**: `TestHandleDirectHTTPRejectsHostMismatch`.
+- **Host binding and rerouting**: `TestHandleDirectHTTPReroutesSecondHost` checks both direct and upstream routing and asserts that the second request never reaches the first target.
 - **CONNECT smuggle**: `TestHandleDirectHTTPRejectsSmuggledConnect`.
 - **Loop exit signals**: `TestHandleClientConnectionCloseTerminatesLoop`, `TestI2_RFC9112_RequestConnectionCloseTerminatesKeepAliveLoop`, `TestI1I2_ConnectionClosedAfterResponse`.
 - **Traceability**: RFC 9112 §11.2, RFC 4559 §5, RFC 9110 §11.7.1.

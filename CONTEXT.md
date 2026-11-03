@@ -57,9 +57,8 @@ decisions crystallise; record decisions as ADRs under `docs/adr/`.
 - **Frozen Seam** — `handleClient(conn, cfg)`: the stable entry point
   called by the test harness, whose signature is deliberately held
   constant so internal refactors do not ripple into callers or tests.
-  `Serve` calls `handleClientCtx(ctx, conn, cfg)`, which adds only the
-  shutdown context and lets a shutting-down proxy close an idle client
-  connection; `handleClient` is that call with a background context.
+  See the [entry-point comments](internal/proxy/forward.go) for session
+  construction and cleanup ownership.
   See [ADR-0001](docs/adr/0001-introduce-client-session-handling-layer.md).
 
 - **CLI Contract Surface** — the SemVer-relevant public API: CLI flags

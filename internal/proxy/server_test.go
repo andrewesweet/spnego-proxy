@@ -104,7 +104,13 @@ func bodyRequest(t *testing.T, conn net.Conn, path string) {
 // (defect D8): with a 30 s read timeout and a 10 s drain timeout, Serve
 // returns as soon as the connection is closed rather than waiting for either.
 func TestServeClosesIdleKeepAliveConnectionOnShutdown(t *testing.T) {
-	cfg := defaultTestConfig(startShutdownOrigin(t, nil), &stubTokenProvider{token: "tok"})
+	// A bodyless response keeps this regression independent of D2: before
+	// that fix, a response with a body already closed the client connection
+	// and let this shutdown test pass without closing an idle connection.
+	origin, _ := keepAliveUpstream(t, 2, func(_ int, _ *http.Request) string {
+		return "HTTP/1.1 204 No Content\r\n\r\n"
+	})
+	cfg := defaultTestConfig(origin, &stubTokenProvider{token: "tok"})
 	cfg.ReadTimeout = 30 * time.Second
 	addr, shutdown, served := startServeForTest(t, cfg, 20*time.Second)
 
@@ -119,10 +125,9 @@ func TestServeClosesIdleKeepAliveConnectionOnShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("response: %v", err)
 	}
-	got, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if string(got) != "/one" {
-		t.Fatalf("response body = %q, want /one", got)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("response status = %d, want 204", resp.StatusCode)
 	}
 
 	// The connection is now idle between requests: no request in flight.

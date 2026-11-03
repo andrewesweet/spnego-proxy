@@ -32,6 +32,10 @@ issue-#75 LIFO close defers.
 
 ## Decision
 
+The entry-point arrangement below records the original refactor. For current
+session construction and cleanup ownership, see the
+[entry-point comments](../../internal/proxy/forward.go).
+
 Introduce `ClientSession{conn, cfg, clientAddr, reqReader, proxyConn,
 upstreamReader}`, constructed **inside `handleClient`** — not in `Serve`'s
 goroutine — so `handleClient(conn net.Conn, cfg Config)` remains a
