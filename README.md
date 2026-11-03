@@ -120,7 +120,7 @@ All flags:
 | `-config` | Kerberos config file path | Password mode only |
 | `-user` | Kerberos username (triggers password-based auth on macOS) | Password mode only |
 | `-realm` | Kerberos realm | Password mode only |
-| `-password-file` | Path to password file (prompts if omitted) | No |
+| `-password-file` | Path to password file (prompts if omitted); re-read for each login, and a KDC password rejection stops logins until its content changes | No |
 | `-cb-threshold` | Consecutive token acquisition failures before the circuit breaker opens; 1–4294967295 (default: `3`) | No |
 | `-cb-timeout` | Circuit breaker cooldown; must be greater than zero (default: `30s`) | No |
 
@@ -237,10 +237,43 @@ link. A custom CA can be provided with `-upstream-ca`.
 
 ### Password handling
 
-When using password-based authentication (`-user` flag), the password
-bytes are zeroed in memory immediately after being passed to the
-Kerberos client. The Kerberos library retains its own copy for TGT
-re-authentication; use a keytab in environments where this is a concern.
+When using password-based authentication (`-user` flag), the proxy builds
+a Kerberos client for each token acquisition and destroys it before the
+call returns, so no password copy outlives the request and no background
+renewal goroutine holds one. With `-password-file`, the file is re-read
+for every acquisition and the copy read at start-up is zeroed
+immediately; a corrected password therefore takes effect without a
+restart. A password typed at the terminal (no `-password-file`) has no
+file to re-read, so the proxy keeps one copy in memory for the lifetime
+of the process. Use a keytab in environments where this is a concern.
+
+### Kerberos account lockout protection
+
+A wrong or stale password can make the proxy send failed logins to the
+KDC, and enough of them can lock the directory account. Three rules bound
+that:
+
+- **Serialised attempts.** Token acquisition is serialised, so a burst of
+  concurrent client requests cannot send more logins than `-cb-threshold`
+  (default 3) before the circuit breaker opens. While the circuit is open
+  no login is attempted; after `-cb-timeout` (default 30s) a single probe
+  is allowed.
+- **Every login is counted.** The proxy never lets the Kerberos library
+  renew a ticket with the password in the background: each acquisition
+  builds a fresh client, logs in inside the request path, and destroys
+  the client before returning. A login that fails is therefore counted by
+  the circuit breaker, and no login happens without client traffic. The
+  cost is a KDC exchange per token acquisition where a cached ticket would
+  otherwise have been reused; the alternative, letting the library renew
+  tickets with the password in the background, is what allowed failed
+  logins to escape the breaker.
+- **A rejected password stops logins.** When the KDC rejects the
+  configured password, the proxy sends no further logins until the
+  password file's content changes. It re-reads the file on each refused
+  attempt, logs a warning at most once every 5 minutes while the rejection
+  stands, and resumes on its own when the content differs. A password
+  typed at the terminal cannot change, so logins stay refused until the
+  proxy restarts.
 
 ### CGo boundary (macOS)
 

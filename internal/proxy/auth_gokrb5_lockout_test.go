@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"errors"
 	"log"
 	"log/slog"
 	"os"
@@ -198,5 +199,40 @@ func TestGokrb5TokenProviderStopsLoginsAfterPasswordRejection(t *testing.T) {
 	}
 	if got := as.count(); got != 2 {
 		t.Errorf("KDC served %d AS exchanges in total, want 2 (the rejected login and the one after the file changed)", got)
+	}
+}
+
+// TestIsPasswordRejection pins which failures the provider treats as a KDC
+// password rejection. A transient failure must not stop logins, because that
+// would leave the proxy unable to recover from a KDC restart.
+func TestIsPasswordRejection(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "pre-authentication failed",
+			err:  errors.New("[Root cause: KDC_Error] AS Exchange Error: kerberos error response from KDC: KRB Error: KDC_ERR_PREAUTH_FAILED Pre-authentication information was invalid"),
+			want: true,
+		},
+		{
+			name: "AS-REP not decryptable with the configured password",
+			err:  errors.New("could not acquire client credential: AS Exchange Error: AS_REP is not valid or client password/keytab incorrect"),
+			want: true,
+		},
+		{
+			name: "KDC unreachable",
+			err:  errors.New("dial tcp 127.0.0.1:88: connect: connection refused"),
+			want: false,
+		},
+		{name: "nil", err: nil, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isPasswordRejection(tt.err); got != tt.want {
+				t.Errorf("isPasswordRejection(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }

@@ -5,10 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/jcmturner/gokrb5/v8/client"
-	"github.com/jcmturner/gokrb5/v8/config"
-	"github.com/jcmturner/gokrb5/v8/spnego"
 )
 
 // minimalKrb5Conf is a minimal krb5.conf sufficient to construct a client
@@ -21,19 +17,16 @@ const minimalKrb5Conf = `[libdefaults]
   }
 `
 
-// newTestGokrb5TokenProvider creates a Gokrb5TokenProvider backed by a real
-// (but unconfigured) gokrb5 client, suitable for testing lifecycle methods.
+// newTestGokrb5TokenProvider creates a Gokrb5TokenProvider configured against
+// a local-only krb5.conf with no reachable KDC, suitable for testing lifecycle
+// and error paths without a KDC.
 func newTestGokrb5TokenProvider(t *testing.T) *Gokrb5TokenProvider {
 	t.Helper()
-	cfg, err := config.NewFromString(minimalKrb5Conf)
+	p, err := NewGokrb5TokenProvider("user", "TEST.REALM", writeTempKrb5Conf(t), writePasswordFile(t, "pass", 0o600), "proxy.test:3128", "HTTP/proxy.test", false)
 	if err != nil {
-		t.Fatalf("failed to parse krb5 config: %v", err)
+		t.Fatalf("create token provider: %v", err)
 	}
-	cli := client.NewWithPassword("user", "TEST.REALM", "pass", cfg)
-	return &Gokrb5TokenProvider{
-		krbClient:    cli,
-		spnegoClient: spnego.SPNEGOClient(cli, "HTTP/proxy.test"),
-	}
+	return p
 }
 
 // writePasswordFile creates a temporary file with the given content and
@@ -270,11 +263,10 @@ func TestNewGokrb5TokenProviderInfersSPN(t *testing.T) {
 			defer func() { _ = p.Close() }()
 
 			// The provider should have been created successfully with the
-			// inferred SPN. We can't directly inspect the SPN, but
-			// successful construction proves extractHost + SPN inference
-			// worked without error.
-			if p.spnegoClient == nil {
-				t.Fatal("expected non-nil spnegoClient")
+			// inferred SPN.
+			wantSPN := "HTTP/" + tt.wantHost
+			if p.spn != wantSPN {
+				t.Errorf("inferred SPN = %q, want %q", p.spn, wantSPN)
 			}
 		})
 	}
@@ -292,8 +284,8 @@ func TestNewGokrb5TokenProviderNormalizesExplicitSPN(t *testing.T) {
 	}
 	defer func() { _ = p.Close() }()
 
-	if p.spnegoClient == nil {
-		t.Fatal("expected non-nil spnegoClient")
+	if want := "HTTP/proxy.example.com"; p.spn != want {
+		t.Errorf("normalized SPN = %q, want %q", p.spn, want)
 	}
 }
 
@@ -307,11 +299,11 @@ func TestNewGokrb5TokenProviderSucceeds(t *testing.T) {
 	}
 	defer func() { _ = p.Close() }()
 
-	if p.krbClient == nil {
-		t.Fatal("expected non-nil krbClient")
+	if p.user != "user" || p.realm != "TEST.REALM" {
+		t.Errorf("provider holds user %q realm %q, want %q %q", p.user, p.realm, "user", "TEST.REALM")
 	}
-	if p.spnegoClient == nil {
-		t.Fatal("expected non-nil spnegoClient")
+	if p.cfg == nil {
+		t.Error("expected the parsed kerberos config to be retained for rebuilds")
 	}
 }
 
@@ -358,16 +350,13 @@ func TestGetPasswordBytesCanBeZeroed(t *testing.T) {
 // Close tests (pre-existing)
 // ---------------------------------------------------------------------------
 
-func TestGokrb5TokenProviderCloseDestroysClient(t *testing.T) {
+func TestGokrb5TokenProviderCloseStopsAcquisition(t *testing.T) {
 	p := newTestGokrb5TokenProvider(t)
-	if p.krbClient == nil {
-		t.Fatal("expected non-nil krbClient before Close")
-	}
 	if err := p.Close(); err != nil {
 		t.Fatalf("Close() returned error: %v", err)
 	}
-	if p.krbClient != nil {
-		t.Error("expected krbClient to be nil after Close")
+	if _, err := p.GetToken(); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Errorf("GetToken after Close = %v, want a 'closed' error", err)
 	}
 }
 
@@ -382,5 +371,19 @@ func TestGokrb5TokenProviderCloseIsIdempotent(t *testing.T) {
 	// Second close must not panic or return an error.
 	if err := p.Close(); err != nil {
 		t.Fatalf("second Close() returned error: %v", err)
+	}
+}
+
+// TestGokrb5TokenProviderCloseZeroesTypedPassword pins that the password kept
+// for a rebuild from terminal input is cleared by Close.
+func TestGokrb5TokenProviderCloseZeroesTypedPassword(t *testing.T) {
+	p := newTestGokrb5TokenProvider(t)
+	p.passwordFile = ""
+	p.stdinPassword = []byte("typed-secret")
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close() returned error: %v", err)
+	}
+	if p.stdinPassword != nil {
+		t.Errorf("typed password retained after Close: %q", p.stdinPassword)
 	}
 }
