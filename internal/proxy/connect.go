@@ -73,8 +73,10 @@ func (c *tunnelClock) remaining() time.Duration { return c.timeout - c.quietFor(
 // remaining idle budget, and after each successful read it records the traffic
 // in clock. A read that times out therefore only ends the copy when neither
 // direction has moved data for the timeout; otherwise the loop rearms the
-// deadline and keeps waiting, so a one-way transfer is never cut. A zero
-// timeout disables the idle check and falls back to plain io.Copy.
+// deadline and keeps waiting, so a one-way transfer is never cut. Before each
+// write it arms a write deadline on dst for the same budget, so a peer that
+// stops reading cannot block the copy forever once the socket buffers fill. A
+// zero timeout disables the idle check and falls back to plain io.Copy.
 func idleCopy(dst net.Conn, src io.Reader, srcConn net.Conn, clock *tunnelClock) (int64, error) {
 	if clock.timeout <= 0 {
 		return io.Copy(dst, src)
@@ -92,6 +94,7 @@ func idleCopy(dst net.Conn, src io.Reader, srcConn net.Conn, clock *tunnelClock)
 		n, readErr := src.Read(buf)
 		if n > 0 {
 			clock.touch()
+			_ = dst.SetWriteDeadline(time.Now().Add(clock.timeout))
 			nw, writeErr := dst.Write(buf[:n])
 			total += int64(nw)
 			if writeErr != nil {
