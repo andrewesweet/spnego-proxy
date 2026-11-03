@@ -243,7 +243,8 @@ call returns, so no password copy outlives the request and no background
 renewal goroutine holds one. With `-password-file`, the file is re-read
 for every acquisition and the copy read at start-up is zeroed
 immediately; a corrected password therefore takes effect without a
-restart. A password typed at the terminal (no `-password-file`) has no
+restart, and the file must stay readable with the required permissions
+(0600, or 0400) while the proxy runs. A password typed at the terminal (no `-password-file`) has no
 file to re-read, so the proxy keeps one copy in memory for the lifetime
 of the process. Use a keytab in environments where this is a concern.
 
