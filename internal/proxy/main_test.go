@@ -1020,73 +1020,128 @@ func TestHandleClientConnectionCloseTerminatesLoop(t *testing.T) {
 	}
 }
 
-// TestHandleDirectHTTPRejectsHostMismatch verifies that a pipelined
-// request targeting a different host than the direct connection was opened
-// to is rejected with errMismatchedTarget. Prevents smuggling a request to
-// a different target through the bound direct TCP connection.
-func TestHandleDirectHTTPRejectsHostMismatch(t *testing.T) {
-	targetAddr, targetReqs := keepAliveUpstream(t, 2, func(_ int, _ *http.Request) string {
-		return "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
-	})
-
-	// noproxy must match BOTH the bound target host and the "other"
-	// pipelined target — otherwise the second request would be routed
-	// through the upstream proxy and the test would not exercise
-	// handleDirectHTTP's host-binding check. Use a bare "*" wildcard.
-	matcher := NewNoProxyMatcher("*")
-
-	provider := &stubTokenProvider{token: "tok"}
-	cfg := defaultTestConfig("127.0.0.1:1", provider) // upstream unused on noproxy path
-	cfg.NoProxy = matcher
-	addr, done := acceptOneAndHandle(t, cfg)
-
-	client, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer func() { _ = client.Close() }()
-
-	// First request to bound host; second to a DIFFERENT host.
-	pipeline := "GET http://" + targetAddr + "/a HTTP/1.1\r\nHost: " + targetAddr + "\r\n\r\n" +
-		"GET http://other-host.invalid/b HTTP/1.1\r\nHost: other-host.invalid\r\n\r\n"
-	if _, err := io.WriteString(client, pipeline); err != nil {
-		t.Fatalf("write: %v", err)
+// TestHandleDirectHTTPReroutesSecondHost verifies that a pipelined request
+// for a different host on a -noproxy keep-alive connection is not refused:
+// it ends the direct loop and goes through the routing decision again — on a
+// new direct connection when the host matches -noproxy, or through the
+// upstream proxy when it does not (defect D6). A client of an HTTP proxy may
+// send requests for different hosts on one proxy connection.
+//
+// The request must never travel on the direct connection bound to the first
+// host: that would let a request reach a target the connection was not
+// dialled for.
+func TestHandleDirectHTTPReroutesSecondHost(t *testing.T) {
+	respond := func(_ int, _ *http.Request) string {
+		// 204 keeps the keep-alive loop alive on its own: a response with a
+		// body ends it, so this test isolates the reroute decision.
+		return "HTTP/1.1 204 No Content\r\n\r\n"
 	}
 
-	reader := bufio.NewReader(client)
-	resp1, err := http.ReadResponse(reader, nil)
-	if err != nil {
-		t.Fatalf("resp1: %v", err)
-	}
-	_, _ = io.Copy(io.Discard, resp1.Body)
-	_ = resp1.Body.Close()
-	if resp1.StatusCode != http.StatusOK {
-		t.Fatalf("resp1 status %d, want 200", resp1.StatusCode)
-	}
-
-	resp2, err := http.ReadResponse(reader, nil)
-	if err != nil {
-		t.Fatalf("resp2: %v", err)
-	}
-	body, _ := io.ReadAll(resp2.Body)
-	_ = resp2.Body.Close()
-	if resp2.StatusCode != http.StatusBadRequest {
-		t.Fatalf("resp2 status %d, want 400 (host mismatch); body=%q", resp2.StatusCode, body)
-	}
-	if !strings.Contains(string(body), "incompatible") {
-		t.Errorf("resp2 body does not mention mismatch: %q", body)
+	cases := []struct {
+		name string
+		// secondHost is the host the pipelined request targets; noproxy
+		// decides whether it is dialled directly or sent to the upstream.
+		viaUpstream   bool
+		noproxyMatch  string
+		wantSecondURI string
+	}{
+		{
+			name:          "another noproxy host is dialled directly",
+			viaUpstream:   false,
+			noproxyMatch:  "127.0.0.1",
+			wantSecondURI: "/b",
+		},
+		{
+			name:          "a host outside noproxy is sent to the upstream",
+			viaUpstream:   true,
+			noproxyMatch:  "127.0.0.1",
+			wantSecondURI: "/b",
+		},
 	}
 
-	_ = client.Close()
-	waitForDone(t, done)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			firstAddr, firstReqs := keepAliveUpstream(t, 2, respond)
+			secondAddr, secondReqs := keepAliveUpstream(t, 2, respond)
+			upstreamAddr, upstreamReqs := keepAliveUpstream(t, 2, respond)
 
-	close(targetReqs)
-	count := 0
-	for range targetReqs {
-		count++
+			cfg := defaultTestConfig(upstreamAddr, &stubTokenProvider{token: "tok"})
+			cfg.NoProxy = NewNoProxyMatcher(c.noproxyMatch)
+			addr, done := acceptOneAndHandle(t, cfg)
+
+			secondHost := secondAddr
+			if c.viaUpstream {
+				// example.test matches no noproxy pattern, so the reroute must
+				// go through the upstream proxy.
+				secondHost = "example.test"
+			}
+
+			client, err := net.Dial("tcp", addr)
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer func() { _ = client.Close() }()
+
+			pipeline := "GET http://" + firstAddr + "/a HTTP/1.1\r\nHost: " + firstAddr + "\r\n\r\n" +
+				"GET http://" + secondHost + c.wantSecondURI + " HTTP/1.1\r\nHost: " + secondHost + "\r\n\r\n"
+			if _, err := io.WriteString(client, pipeline); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+
+			reader := bufio.NewReader(client)
+			for i := 1; i <= 2; i++ {
+				resp, err := http.ReadResponse(reader, nil)
+				if err != nil {
+					t.Fatalf("resp%d: %v", i, err)
+				}
+				body, _ := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				if resp.StatusCode != http.StatusNoContent {
+					t.Fatalf("resp%d status %d, want 204 (request for another host must be rerouted, not refused); body=%q", i, resp.StatusCode, body)
+				}
+			}
+
+			_ = client.Close()
+			waitForDone(t, done)
+
+			if got := singleTestRequest(t, firstReqs, "first host"); got.URL.Path != "/a" {
+				t.Errorf("first host received %q, want /a", got.URL.Path)
+			}
+			served := secondReqs
+			if c.viaUpstream {
+				served = upstreamReqs
+			}
+			if got := singleTestRequest(t, served, "the rerouted request's host"); got.URL.Path != c.wantSecondURI {
+				t.Errorf("rerouted request reached %q, want %q", got.URL.Path, c.wantSecondURI)
+			}
+			assertNoMoreRequests(t, firstReqs, "first host")
+			assertNoMoreRequests(t, served, "the rerouted request's host")
+		})
 	}
-	if count != 1 {
-		t.Errorf("target received %d requests, want 1 (mismatched second request must be rejected by proxy)", count)
+}
+
+// singleTestRequest returns the one request a test fixture received, failing
+// the test when the fixture received none within a second.
+func singleTestRequest(t *testing.T, reqs <-chan *http.Request, what string) *http.Request {
+	t.Helper()
+	select {
+	case req := <-reqs:
+		return req
+	case <-time.After(time.Second):
+		t.Fatalf("%s received no request", what)
+		return nil
+	}
+}
+
+// assertNoMoreRequests fails when a test fixture receives a further request:
+// the rerouted request must not have reached a connection bound to another
+// host, and it must be sent exactly once.
+func assertNoMoreRequests(t *testing.T, reqs <-chan *http.Request, what string) {
+	t.Helper()
+	select {
+	case req := <-reqs:
+		t.Errorf("%s received an extra request: %s %s", what, req.Method, req.URL)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 

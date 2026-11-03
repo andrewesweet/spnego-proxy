@@ -88,16 +88,19 @@ func (s *ClientSession) logDirectError(what string, err error, target string) {
 // requests. The request is converted from absolute-URI (proxy form) to
 // origin form.
 //
-// The function runs a keep-alive loop bound to the original target host.
-// Subsequent pipelined requests are re-parsed and validated; requests for
-// a different host are rejected with errMismatchedTarget so a smuggled
-// second request cannot ride the existing direct TCP connection to a
-// target it was never authorised for.
-func (s *ClientSession) forwardDirect(req *http.Request) {
+// The function runs a keep-alive loop bound to the original target host:
+// subsequent pipelined requests are re-parsed and validated on the same
+// direct TCP connection. That connection is only ever used for the host it
+// was dialled for, so a request for any other host ends the loop and is
+// returned to the caller for routing again (D6) rather than being sent on
+// this connection. That keeps a smuggled request from reaching a host it was
+// not authorised for while letting one client connection carry requests for
+// many hosts.
+func (s *ClientSession) forwardDirect(req *http.Request) (*http.Request, bool) {
 	targetConn, target, err := dialDirect(req.Host, "80", s.cfg.DialTimeout)
 	if err != nil {
 		s.handleDialError(err, target, "HTTP")
-		return
+		return nil, false
 	}
 	defer func() { _ = targetConn.Close() }()
 
@@ -111,54 +114,61 @@ func (s *ClientSession) forwardDirect(req *http.Request) {
 
 	for iter := 0; ; iter++ {
 		if iter > 0 {
-			if req = s.nextDirectRequest(boundHost, target, iter); req == nil {
-				return
+			var reroute bool
+			req, reroute = s.nextDirectRequest(boundHost, target, iter)
+			if req == nil {
+				return nil, false
+			}
+			if reroute {
+				return req, true
 			}
 		}
 		if !s.relayDirect(req, targetConn, upstreamReader, target, iter) {
-			return
+			return nil, false
 		}
 	}
 }
 
-// nextDirectRequest reads and validates the next pipelined request on an
-// established direct connection and injects Via. It returns nil when the
-// keep-alive loop must stop: the client stopped sending, validation
-// rejected the request, the request targets a host this connection is not
-// bound to, or it is a CONNECT that cannot tunnel on a connection already
-// used for HTTP responses. Any client-facing error response has already
-// been written in those cases.
-func (s *ClientSession) nextDirectRequest(boundHost, target string, iter int) *http.Request {
+// nextDirectRequest reads the next pipelined request on an established direct
+// connection. It returns nil when the keep-alive loop must stop: the client
+// stopped sending, validation rejected the request, or it is a CONNECT that
+// cannot tunnel on a connection already used for HTTP responses. Any
+// client-facing error response has already been written in those cases.
+//
+// A request for a host other than the one this connection is bound to is
+// returned with reroute set: the caller closes this connection and routes the
+// request again, so the binding is never widened.
+func (s *ClientSession) nextDirectRequest(boundHost, target string, iter int) (req *http.Request, reroute bool) {
 	_ = s.conn.SetReadDeadline(time.Now().Add(s.cfg.ReadTimeout))
 	req, rerr := http.ReadRequest(s.reqReader)
 	_ = s.conn.SetReadDeadline(time.Time{})
 	if rerr != nil {
 		slog.Debug("noproxy keep-alive loop ended", "error", rerr, "target", target, "iter", iter, "client_addr", s.clientAddr)
-		return nil
+		return nil, false
+	}
+	// A direct TCP connection is bound to a single target host: a request
+	// for another host is routed again on the connection that host is
+	// dialled on, either a new direct one or the upstream proxy.
+	if !sameHost(req.Host, boundHost, "80") {
+		slog.Debug("noproxy direct connection is bound to another host, rerouting", "bound_host", boundHost, "request_host", req.Host, "client_addr", s.clientAddr)
+		return req, true
 	}
 	proceed, pe := s.validateRequest(req)
 	if !proceed {
 		if pe != nil {
 			writeHTTPError(s.conn, pe)
 		}
-		return nil
-	}
-	// A direct TCP connection is bound to a single target host;
-	// reject pipelined requests for any other host.
-	if !sameHost(req.Host, boundHost, "80") {
-		slog.Warn("noproxy pipelined request targets different host", "bound_host", boundHost, "request_host", req.Host, "client_addr", s.clientAddr)
-		writeHTTPError(s.conn, errMismatchedTarget)
-		return nil
+		return nil, false
 	}
 	// CONNECT on a plain-HTTP direct connection: cannot tunnel
 	// on a connection used for HTTP responses.
 	if req.Method == http.MethodConnect {
 		slog.Warn("noproxy pipelined CONNECT on HTTP connection", "client_addr", s.clientAddr)
 		writeHTTPError(s.conn, errMismatchedTarget)
-		return nil
+		return nil, false
 	}
 	injectVia(req.Header, req.Proto, s.cfg.Pseudonym)
-	return req
+	return req, false
 }
 
 // relayDirect writes one request to the direct target connection in origin

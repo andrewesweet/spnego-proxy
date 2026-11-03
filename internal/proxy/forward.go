@@ -195,10 +195,18 @@ func handleClient(conn net.Conn, cfg Config) {
 // and proxyConn cleanup defers stay in handleClient and fire when run
 // returns, preserving the issue #75 LIFO ordering.
 func (s *ClientSession) run() {
+	// pending carries a request that arrived on a direct (noproxy) connection
+	// which is bound to another host: it has already been read and must now
+	// be routed again on a fresh connection instead of being refused (D6).
+	var pending *http.Request
 	for iter := 0; ; iter++ {
-		req := s.readNextRequest(iter)
+		req := pending
+		pending = nil
 		if req == nil {
-			return
+			req = s.readNextRequest(iter)
+			if req == nil {
+				return
+			}
 		}
 
 		proceed, pe := s.validateRequest(req)
@@ -209,21 +217,42 @@ func (s *ClientSession) run() {
 			return
 		}
 
-		// Noproxy bypass and CONNECT-via-upstream both terminate the
-		// keep-alive loop: neither can share the authenticated upstream
-		// connection with further HTTP requests.
-		if s.routeNoProxy(req) {
+		next, cont := s.routeRequest(req, iter)
+		if !cont {
 			return
 		}
-		if req.Method == http.MethodConnect {
-			s.tunnelViaUpstream(req)
-			return
-		}
+		pending = next
+	}
+}
 
-		if !s.relayViaUpstream(req, iter) {
-			return
+// routeRequest sends one validated request down the routing decision:
+// noproxy bypass, CONNECT-via-upstream, or plain HTTP through the upstream
+// proxy. It reports whether the session may continue, and returns a non-nil
+// request when the request could not be served on the direct connection it
+// arrived on: the caller must route that request again, which is what keeps
+// a direct connection bound to the single host it was dialled for.
+func (s *ClientSession) routeRequest(req *http.Request, iter int) (*http.Request, bool) {
+	if s.cfg.NoProxy != nil {
+		if matched, pattern := s.cfg.NoProxy.Match(req.Host); matched {
+			slog.Debug("noproxy bypass", "host", req.Host, "pattern", pattern, "method", req.Method, "client_addr", s.clientAddr)
+			if req.Method == http.MethodConnect {
+				s.tunnelDirect(req)
+				return nil, false
+			}
+			injectVia(req.Header, req.Proto, s.cfg.Pseudonym)
+			return s.forwardDirect(req)
 		}
 	}
+	// CONNECT-via-upstream terminates the keep-alive loop: a tunnel cannot
+	// share the authenticated upstream connection with further HTTP requests.
+	if req.Method == http.MethodConnect {
+		s.tunnelViaUpstream(req)
+		return nil, false
+	}
+	if !s.relayViaUpstream(req, iter) {
+		return nil, false
+	}
+	return nil, true
 }
 
 // readNextRequest reads the next request from the client connection under
@@ -248,28 +277,6 @@ func (s *ClientSession) readNextRequest(iter int) *http.Request {
 		writeHTTPError(s.conn, errHTTPRequestError)
 	}
 	return nil
-}
-
-// routeNoProxy handles a request whose host matches the noproxy matcher by
-// dialling the target directly, bypassing the upstream proxy and SPNEGO. It
-// reports whether it took the request; false means the caller must route it
-// via the upstream proxy.
-func (s *ClientSession) routeNoProxy(req *http.Request) bool {
-	if s.cfg.NoProxy == nil {
-		return false
-	}
-	matched, pattern := s.cfg.NoProxy.Match(req.Host)
-	if !matched {
-		return false
-	}
-	slog.Debug("noproxy bypass", "host", req.Host, "pattern", pattern, "method", req.Method, "client_addr", s.clientAddr)
-	if req.Method == http.MethodConnect {
-		s.tunnelDirect(req)
-		return true
-	}
-	injectVia(req.Header, req.Proto, s.cfg.Pseudonym)
-	s.forwardDirect(req)
-	return true
 }
 
 // relayViaUpstream forwards one plain-HTTP request through the upstream
