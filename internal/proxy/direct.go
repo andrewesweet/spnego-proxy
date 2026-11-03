@@ -175,12 +175,25 @@ func (s *ClientSession) relayDirect(req *http.Request, targetConn net.Conn, upst
 	}
 
 	slog.Debug("noproxy HTTP response forwarding start", "target", target, "client_addr", s.clientAddr, "iter", iter)
-	resp, rerr := http.ReadResponse(upstreamReader, req)
+	// readThroughInterim relays any 1xx interim response (and reads on to the
+	// final one) so a following request on this connection is answered by its
+	// own response. Via is injected per response, interim ones included.
+	resp, clientErr, rerr := readThroughInterim(s.conn, req, func() (*http.Response, error) {
+		resp, readErr := http.ReadResponse(upstreamReader, req)
+		if readErr != nil {
+			return nil, readErr
+		}
+		injectVia(resp.Header, resp.Proto, s.cfg.Pseudonym)
+		return resp, nil
+	})
+	if clientErr != nil {
+		s.logDirectError("noproxy forward response", clientErr, target)
+		return false
+	}
 	if rerr != nil {
 		s.logDirectError("noproxy read response", rerr, target)
 		return false
 	}
-	injectVia(resp.Header, resp.Proto, s.cfg.Pseudonym)
 	if writeErr, derr := writeResponse(s.conn, resp); writeErr != nil {
 		s.logDirectError("noproxy forward response", writeErr, target)
 		return false

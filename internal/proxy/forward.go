@@ -296,9 +296,15 @@ func (s *ClientSession) relayViaUpstream(req *http.Request, iter int) bool {
 		return false
 	}
 
-	resp, err := readUpstreamResponse(s.upstreamReader, req, s.cfg.Pseudonym)
-	if err != nil {
-		handleUpstreamResponseError(s.conn, s.proxyConn, err, s.clientAddr)
+	resp, clientErr, rerr := readThroughInterim(s.conn, req, func() (*http.Response, error) {
+		return readUpstreamResponse(s.upstreamReader, req, s.cfg.Pseudonym)
+	})
+	if clientErr != nil {
+		logForwardError(clientErr, s.proxyConn.RemoteAddr(), s.conn.RemoteAddr())
+		return false
+	}
+	if rerr != nil {
+		handleUpstreamResponseError(s.conn, s.proxyConn, rerr, s.clientAddr)
 		return false
 	}
 

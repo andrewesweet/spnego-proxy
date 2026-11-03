@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"slices"
 	"strconv"
@@ -136,10 +137,14 @@ var errContentLengthInvalid = errors.New("invalid Content-Length in upstream res
 // forbidden control octet in a header value (RFC 9110 §5.5 / RFC 9112 §11.1).
 var errMalformedResponse = errors.New("malformed upstream response header")
 
-// readUpstreamResponse reads and validates an upstream HTTP response. It
+// readUpstreamResponse reads and validates one upstream HTTP response. It
 // performs: ReadResponse, Content-Length error detection, content-length
 // validation, Transfer-Encoding / Content-Length conflict resolution, and
 // Via header injection.
+//
+// The response it returns may be a 1xx interim response: http.ReadResponse
+// does not read past one (only http.Transport does), so relay loops that must
+// reach the final response go through readThroughInterim.
 //
 // On success it returns the parsed response (caller must close Body).
 // On Content-Length errors it returns errContentLengthInvalid so the caller
@@ -203,4 +208,60 @@ func readUpstreamResponse(upstreamReader *bufio.Reader, req *http.Request, pseud
 	injectVia(resp.Header, resp.Proto, pseudonym)
 
 	return resp, nil
+}
+
+// isInterimResponse reports whether resp is a 1xx interim response that the
+// proxy must relay or drop before reading the final response. 101 Switching
+// Protocols is excluded: it is the final response of a protocol upgrade, and
+// the HTTP message stream ends there.
+func isInterimResponse(resp *http.Response) bool {
+	return resp.StatusCode >= 100 && resp.StatusCode < 200 &&
+		resp.StatusCode != http.StatusSwitchingProtocols
+}
+
+// clientCannotParseInterim reports whether the client that sent req cannot
+// parse a 1xx response. RFC 9110 §15.2 forbids sending one to an HTTP/1.0
+// client, while any HTTP/1.1-or-later client MUST be able to accept one it did
+// not ask for.
+func clientCannotParseInterim(req *http.Request) bool {
+	return !req.ProtoAtLeast(1, 1)
+}
+
+// relayInterimResponse relays one interim response to the client, or drops it
+// when the client speaks HTTP/1.0 (RFC 9110 §15.2). resp must already carry
+// the proxy's Via header, which RFC 9110 §7.6.3 requires on every forwarded
+// response. A write error means the client connection is gone.
+func relayInterimResponse(client net.Conn, req *http.Request, resp *http.Response) error {
+	defer func() { _ = resp.Body.Close() }()
+	if clientCannotParseInterim(req) {
+		return nil
+	}
+	return resp.Write(client)
+}
+
+// readThroughInterim reads responses with readOne until the final response
+// arrives. Every 1xx other than 101 is interim (RFC 9110 §15.2): it is relayed
+// to an HTTP/1.1 client and dropped for an HTTP/1.0 client, and then the read
+// continues, because the final response to the request is still outstanding.
+// Draining this way keeps the upstream reader aligned with the client's
+// request stream, so a following request on a reused connection is answered by
+// its own response.
+//
+// readOne returns one parsed response with the proxy's Via header already
+// injected. The returned clientWriteErr reports a failed write of an interim
+// response to the client; err reports any other failure. Both are nil on
+// success.
+func readThroughInterim(client net.Conn, req *http.Request, readOne func() (*http.Response, error)) (resp *http.Response, clientWriteErr, err error) {
+	for {
+		resp, readErr := readOne()
+		if readErr != nil {
+			return nil, nil, readErr
+		}
+		if !isInterimResponse(resp) {
+			return resp, nil, nil
+		}
+		if werr := relayInterimResponse(client, req, resp); werr != nil {
+			return nil, werr, nil
+		}
+	}
 }
