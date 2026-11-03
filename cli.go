@@ -103,6 +103,25 @@ func parseFlags(args []string) (*cliConfig, *flag.FlagSet, error) {
 	return c, fs, nil
 }
 
+// cbThresholdMax is the largest value -cb-threshold accepts: the threshold is
+// stored as a uint32 by the circuit breaker, so a larger value would wrap.
+const cbThresholdMax = 1<<32 - 1
+
+// validateFlags rejects flag values that would silently change the behaviour of
+// the component they configure. The circuit breaker is the only such component
+// today: gobreaker replaces a Timeout of zero or less with its 60s default, and
+// the breaker opens on the first failure when the threshold is 0 because
+// ConsecutiveFailures >= 0 always holds.
+func validateFlags(c *cliConfig) error {
+	if c.CBThreshold == 0 || c.CBThreshold > cbThresholdMax {
+		return fmt.Errorf("-cb-threshold must be between 1 and %d, got %d", cbThresholdMax, c.CBThreshold)
+	}
+	if c.CBTimeout <= 0 {
+		return fmt.Errorf("-cb-timeout must be greater than 0, got %v", c.CBTimeout)
+	}
+	return nil
+}
+
 // buildProvider selects and constructs the token provider from the CLI
 // config: gokrb5 password-based auth when -user is set, otherwise the
 // platform-native GSS-API provider. The result is wrapped in the circuit
@@ -121,7 +140,7 @@ func buildProvider(c *cliConfig) (proxy.TokenProvider, error) {
 	if err != nil {
 		return nil, err
 	}
-	return proxy.NewCircuitBreakerTokenProvider(provider, uint32(c.CBThreshold), c.CBTimeout), nil //nolint:gosec // CLI flag value; overflow not a concern
+	return proxy.NewCircuitBreakerTokenProvider(provider, uint32(c.CBThreshold), c.CBTimeout), nil //nolint:gosec // validateFlags bounds the threshold to uint32
 }
 
 // buildConfig assembles the proxy.Config that Serve runs with from the parsed
