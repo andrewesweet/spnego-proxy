@@ -36,10 +36,11 @@ func isPasswordRejection(err error) bool {
 // Gokrb5TokenProvider uses the pure-Go gokrb5 library for SPNEGO token acquisition.
 // This is the fallback path used on non-macOS platforms or when -user is specified.
 //
-// The provider builds a gokrb5 client for each token acquisition and destroys
-// it before returning. Go does not provide primitives to scrub string-backed
-// memory, so the library's password string cannot be reliably zeroed and may
-// remain in memory after the call. Use a keytab where this is a concern.
+// The provider builds password and ticket-cache clients for each token
+// acquisition and destroys both before returning. Go does not provide primitives
+// to scrub string-backed memory, so the library's password string cannot be
+// reliably zeroed and may remain in memory after the call. Use a keytab where
+// this is a concern.
 type Gokrb5TokenProvider struct {
 	// Construction inputs, kept so the client can be rebuilt per acquisition.
 	user         string
@@ -206,6 +207,10 @@ func (p *Gokrb5TokenProvider) GetToken() (string, error) {
 	return base64.StdEncoding.EncodeToString(b), nil
 }
 
+// acquireCredential uses ASExchange directly because Login starts automatic
+// renewal, which can retry password logins outside the counted token path.
+// The returned client has only cached tickets, so service-ticket acquisition
+// cannot fall back to a password login, even if the TGT expires during the call.
 func (p *Gokrb5TokenProvider) acquireCredential(passwd []byte) (*client.Client, error) {
 	passwordClient := client.NewWithPassword(p.user, p.realm, string(passwd), p.cfg, p.settings...)
 	clear(passwd)
@@ -241,8 +246,8 @@ func (p *Gokrb5TokenProvider) acquireCredential(passwd []byte) (*client.Client, 
 }
 
 // rejectPassword records that the KDC rejected the password whose SHA-256 is
-// fingerprint, warns once, and stops further logins until the password
-// changes.
+// fingerprint, starts periodic warnings, and stops further logins until the
+// effective password changes.
 func (p *Gokrb5TokenProvider) rejectPassword(fingerprint [sha256.Size]byte) {
 	p.passwordRejected = true
 	p.rejectedFingerprint = fingerprint
@@ -282,9 +287,8 @@ func (p *Gokrb5TokenProvider) repeatPasswordRejectionWarnings(ticker *time.Ticke
 
 // checkPasswordRejected enforces the lockout guard: once the KDC has rejected
 // the configured password, no further login is sent until the password
-// changes. The password file is re-read on each refused attempt, which is the
-// watch for a correction; the circuit breaker already limits how often an
-// attempt arrives.
+// changes. It checks for a correction both on refused attempts and on the
+// warning timer, so detection does not depend on traffic or breaker state.
 func (p *Gokrb5TokenProvider) checkPasswordRejected() error {
 	if !p.passwordRejected {
 		return nil

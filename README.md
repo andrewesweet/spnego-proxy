@@ -120,7 +120,7 @@ All flags:
 | `-config` | Kerberos config file path | Password mode only |
 | `-user` | Kerberos username (triggers password-based auth on macOS) | Password mode only |
 | `-realm` | Kerberos realm | Password mode only |
-| `-password-file` | Path to password file (prompts if omitted); re-read for each login, and a KDC password rejection stops logins until the password value changes (trailing CR/LF ignored) | No |
+| `-password-file` | Path to password file (prompts if omitted); see [Password handling](#password-handling) and [Kerberos account lockout protection](#kerberos-account-lockout-protection) | No |
 | `-cb-threshold` | Consecutive token acquisition failures before the circuit breaker opens; 1–4294967295 (default: `3`) | No |
 | `-cb-timeout` | Circuit breaker cooldown; must be greater than zero (default: `30s`) | No |
 

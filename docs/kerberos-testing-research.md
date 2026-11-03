@@ -2,7 +2,7 @@
 
 ## Context
 
-Testing spnego-proxy currently requires:
+Manual end-to-end testing against a corporate proxy requires:
 
 - Linux x64, macOS Intel x64, and macOS aarch64 hosts
 - That sit behind a proxy requiring Kerberos authentication
@@ -14,18 +14,20 @@ development and (2) CI, without requiring corporate-style Kerberos DC setups.
 
 ## Current Test Coverage
 
-The existing test suite (~1,395 lines across 5 files) covers:
+The existing test suite covers:
 
 | Area | What's Tested | What's NOT Tested |
 | ------ | --------------- | ------------------- |
 | Proxy mechanics | Dial timeout, read timeout, token injection, bidirectional forwarding, half-close, keepalive, connection limiting, graceful shutdown | Full end-to-end proxy chain with real Kerberos auth |
-| gokrb5 path | Password file handling (perms, size, CRLF), provider construction, SPN inference/normalization, error handling | Actual TGT acquisition, SPNEGO token generation against a real KDC |
+| gokrb5 path | Password file handling (perms, size, CRLF), provider construction, SPN inference/normalization, error handling; mock-KDC lockout regressions linked below | SPNEGO token acceptance by a corporate upstream proxy |
 | macOS GSS-API | SPN derivation, SPN normalization, graceful error without credentials | Actual token acquisition via Heimdal GSS-API |
-| Circuit breaker | Open/closed/half-open state transitions | Circuit breaker with real token provider |
+| Circuit breaker | Open/closed/half-open state transitions, concurrent admission, real token provider with a mock KDC | Directory lockout policy interoperability |
 
-**The gap**: No tests exercise the actual Kerberos protocol — acquiring a TGT
-from a KDC, generating a real SPNEGO token, and using it to authenticate to an
-upstream proxy. This is where all manual testing effort is concentrated.
+The [lockout regression tests](../internal/proxy/auth_gokrb5_lockout_test.go)
+exercise TGT acquisition and SPNEGO token generation against a mock KDC.
+They cover delayed exchanges, password changes, rejection warnings, and recovery
+from clock skew. Acceptance by a corporate upstream proxy still needs manual
+verification.
 
 ---
 
@@ -79,13 +81,14 @@ defer kdc.Close()
 
 ### Effort: Low
 
-Add `github.com/jcmturner/krb5test` as a test dependency. Write integration
-tests using it. No infrastructure changes needed.
+`github.com/jcmturner/krb5test` is already a test dependency, used by the
+lockout regression tests linked in [Current Test Coverage](#current-test-coverage).
+Extending these tests needs no external KDC infrastructure.
 
-### Recommendation: **Do this first.**
+### Recommendation: Extend mock-KDC coverage
 
-This is the highest-value, lowest-effort option. It closes the biggest testing
-gap (gokrb5 token acquisition) with zero infrastructure overhead.
+Use the existing mock-KDC tests as the starting point for broader proxy-chain
+coverage. Keep corporate-proxy interoperability checks separate.
 
 ---
 

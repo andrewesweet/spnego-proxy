@@ -76,8 +76,9 @@ func newCircuitBreakerTokenProvider(inner TokenProvider, settings gobreaker.Sett
 type CircuitBreakerError struct{ authError }
 
 // GetToken acquires a token from the wrapped provider, subject to circuit
-// breaker policy. Returns a *CircuitBreakerError when the circuit is open
-// or half-open, allowing callers to distinguish circuit breaker rejections
+// breaker policy. Concurrent callers wait for the previous result, including
+// a half-open probe. Returns a *CircuitBreakerError when the breaker rejects
+// the attempt, allowing callers to distinguish circuit breaker rejections
 // from other token acquisition failures using errors.As.
 func (p *CircuitBreakerTokenProvider) GetToken() (string, error) {
 	p.mu.Lock()
