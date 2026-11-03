@@ -609,8 +609,8 @@ func (s *stubTokenProvider) GetToken() (string, error) {
 	current := s.inFlight.Add(1)
 	defer s.inFlight.Add(-1)
 	for {
-		max := s.maxInFlight.Load()
-		if current <= max || s.maxInFlight.CompareAndSwap(max, current) {
+		maxInFlight := s.maxInFlight.Load()
+		if current <= maxInFlight || s.maxInFlight.CompareAndSwap(maxInFlight, current) {
 			break
 		}
 	}

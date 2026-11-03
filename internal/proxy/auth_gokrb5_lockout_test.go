@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"regexp"
@@ -213,7 +214,12 @@ func startPasswordRejectingKDC(t *testing.T, kdc *krb5test.KDC) (string, <-chan 
 				return
 			}
 			rejections <- struct{}{}
-			if err := binary.Write(conn, binary.BigEndian, uint32(len(reply))); err != nil {
+			replyLen := uint64(len(reply))
+			if replyLen > math.MaxUint32 {
+				t.Error("KDC reply exceeds uint32 length")
+				return
+			}
+			if err := binary.Write(conn, binary.BigEndian, uint32(replyLen)); err != nil {
 				t.Error(err)
 				return
 			}
