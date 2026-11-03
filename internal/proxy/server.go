@@ -22,8 +22,8 @@ const (
 // an error.
 type acceptBackoff struct{ delay time.Duration }
 
-// next returns the wait before the next Accept and doubles it for the one
-// after that, capped at acceptBackoffMax.
+// next starts at acceptBackoffInitial, then doubles the previous wait on each
+// call, capped at acceptBackoffMax.
 func (b *acceptBackoff) next() time.Duration {
 	if b.delay == 0 {
 		b.delay = acceptBackoffInitial
