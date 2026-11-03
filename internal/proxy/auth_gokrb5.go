@@ -176,10 +176,10 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 	return p, nil
 }
 
-// password returns the Kerberos password for one acquisition: the current
+// readPassword returns the Kerberos password for one acquisition: the current
 // content of -password-file, or the password typed at start-up when no file
 // was given. The caller owns the returned bytes and must zero them.
-func (p *Gokrb5TokenProvider) password() ([]byte, error) {
+func (p *Gokrb5TokenProvider) readPassword() ([]byte, error) {
 	if p.passwordFile == "" {
 		return bytes.Clone(p.stdinPassword), nil
 	}
@@ -209,7 +209,7 @@ func (p *Gokrb5TokenProvider) GetToken() (string, error) {
 		return "", err
 	}
 
-	passwd, err := p.password()
+	passwd, err := p.readPassword()
 	if err != nil {
 		return "", &CredentialError{authError{msg: fmt.Sprintf("failed to get password: %v", err), cause: err}}
 	}
@@ -264,7 +264,7 @@ func (p *Gokrb5TokenProvider) checkPasswordRejected() error {
 	if !p.passwordRejected {
 		return nil
 	}
-	passwd, err := p.password()
+	passwd, err := p.readPassword()
 	if err != nil {
 		return &CredentialError{authError{
 			msg:   fmt.Sprintf("KDC rejected the configured password and the password cannot be re-read to check for a correction: %v", err),
