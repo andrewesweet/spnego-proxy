@@ -660,6 +660,43 @@ func TestTunnelClockKeepsLatestProgress(t *testing.T) {
 	})
 }
 
+func TestTunnelClockRevalidatesProgressDuringInactivitySampling(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		clock := newTunnelClock(100 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
+		clock.touch()
+		time.Sleep(80 * time.Millisecond)
+
+		sampling := make(chan struct{})
+		published := make(chan struct{})
+		go func() {
+			<-sampling
+			time.Sleep(10 * time.Millisecond)
+			clock.touch()
+			close(published)
+		}()
+		var pause sync.Once
+		quiet := clock.quietForSince(func(origin time.Time) time.Duration {
+			pause.Do(func() {
+				close(sampling)
+				<-published
+				time.Sleep(20 * time.Millisecond)
+			})
+			return time.Since(origin)
+		})
+		if quiet != 20*time.Millisecond {
+			t.Fatalf("progress at 110ms sampled at 130ms: inactivity = %v, want 20ms", quiet)
+		}
+		if got := clock.remaining(); got != 80*time.Millisecond || clock.idle() {
+			t.Fatalf("latest progress lost: remaining = %v, idle = %v", got, clock.idle())
+		}
+		time.Sleep(80 * time.Millisecond)
+		if got := clock.remaining(); got != 0 || !clock.idle() {
+			t.Fatalf("inactivity should exhaust the budget: remaining = %v, idle = %v", got, clock.idle())
+		}
+	})
+}
+
 func TestTunnelClockConcurrentProgressHasNonnegativeInactivity(t *testing.T) {
 	clock := newTunnelClock(time.Second)
 	start := make(chan struct{})

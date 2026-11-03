@@ -64,8 +64,17 @@ func (c *tunnelClock) touchAt(elapsed time.Duration) {
 
 // quietFor reports how long the tunnel has had no observed transport progress.
 func (c *tunnelClock) quietFor() time.Duration {
-	last := c.last.Load()
-	return time.Since(c.origin) - time.Duration(last)
+	return c.quietForSince(time.Since)
+}
+
+func (c *tunnelClock) quietForSince(since func(time.Time) time.Duration) time.Duration {
+	for {
+		last := c.last.Load()
+		elapsed := since(c.origin)
+		if c.last.Load() == last {
+			return elapsed - time.Duration(last)
+		}
+	}
 }
 
 // idle reports whether neither direction made observed progress for the timeout.
