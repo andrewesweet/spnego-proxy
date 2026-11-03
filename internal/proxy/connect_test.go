@@ -682,6 +682,145 @@ func TestConnectTunnelIdleTimeoutResetOnData(t *testing.T) {
 	}
 }
 
+// TestConnectTunnelOneWayTransferOutlastsIdleTimeout verifies that the idle
+// timeout measures the tunnel as a whole rather than each direction. A client
+// that keeps uploading while the upstream stays silent must not lose its read
+// side, so the upstream's reply sent after the upload still reaches it.
+func TestConnectTunnelOneWayTransferOutlastsIdleTimeout(t *testing.T) {
+	const (
+		idleTimeout = 200 * time.Millisecond
+		chunk       = "chunk\n"
+		chunks      = 20 // 5x the idle timeout at one chunk per idleTimeout/4.
+		reply       = "done\n"
+	)
+
+	uploadDone := make(chan struct{})
+	connectUpstream := newMockConnectUpstream(t, func(_ context.Context, conn net.Conn) {
+		defer close(uploadDone)
+		body := make([]byte, chunks*len(chunk))
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := io.ReadFull(conn, body); err != nil {
+			t.Errorf("upstream read upload: %v", err)
+			return
+		}
+		_, _ = io.WriteString(conn, reply)
+	})
+
+	proxy := NewProxyUnderTest(t, connectUpstream.Addr().String())
+	proxy.SetIdleTimeout(idleTimeout)
+	t.Cleanup(proxy.Close)
+
+	raw := "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	assertStatusCode(t, resp, http.StatusOK)
+
+	// Upload for 5x the idle timeout while the upstream sends nothing.
+	for range chunks {
+		if _, err := conn.Write([]byte(chunk)); err != nil {
+			t.Fatalf("upload through tunnel: %v", err)
+		}
+		time.Sleep(idleTimeout / 4)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got, err := io.ReadAll(br)
+	<-uploadDone
+	if err != nil {
+		t.Fatalf("read upstream reply: %v", err)
+	}
+	if string(got) != reply {
+		t.Fatalf("client read %q, want the upstream reply %q after a one-way upload lasting %v (idle timeout %v)",
+			got, reply, chunks*idleTimeout/4, idleTimeout)
+	}
+}
+
+// TestConnectTunnelStalledReaderCloses verifies that a tunnel whose reader
+// stops reading is closed by the idle timeout. Without a write deadline the
+// proxy blocks in dst.Write once the socket buffers fill, and nothing ends the
+// tunnel until the stalled peer closes its socket.
+func TestConnectTunnelStalledReaderCloses(t *testing.T) {
+	const idleTimeout = 200 * time.Millisecond
+
+	connectUpstream := newMockConnectUpstream(t, func(_ context.Context, conn net.Conn) {
+		chunk := make([]byte, 64*1024)
+		for {
+			if _, err := conn.Write(chunk); err != nil {
+				return
+			}
+		}
+	})
+
+	cfg := defaultTestConfig(connectUpstream.Addr().String(), &stubTokenProvider{token: "test-token"})
+	cfg.IdleTimeout = idleTimeout
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	// Handle exactly one client so the test can observe when its session ends.
+	sessionDone := make(chan struct{})
+	go func() {
+		clientConn, err := ln.Accept()
+		if err != nil {
+			close(sessionDone)
+			return
+		}
+		handleClient(clientConn, cfg)
+		close(sessionDone)
+	}()
+
+	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	raw := "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+	if _, err := conn.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	assertStatusCode(t, resp, http.StatusOK)
+
+	// Never read the tunnel body again: the proxy's writes to this client must
+	// eventually stall and the idle timeout must end the session.
+	const closeBudget = 25 * idleTimeout
+	select {
+	case <-sessionDone:
+	case <-time.After(closeBudget):
+		t.Fatalf("session with a stalled reader still running %v after CONNECT with idle timeout %v",
+			closeBudget, idleTimeout)
+	}
+
+	// The tunnel must have carried payload before it closed, so this test
+	// cannot pass on a session that ended before forwarding anything.
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buffered, _ := io.ReadAll(br)
+	if len(buffered) == 0 {
+		t.Fatal("stalled tunnel delivered no upstream payload before closing")
+	}
+}
+
 // isEOForClosed returns true if the error indicates a closed or EOF connection.
 func isEOForClosed(err error) bool {
 	if err == nil {
