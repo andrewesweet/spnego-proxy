@@ -218,7 +218,8 @@ Transport activity in either direction refreshes the tunnel's shared idle
 budget. Received bytes and bytes accepted by the kernel for writing count
 as progress. A one-way transfer stays open while that progress occurs
 within the timeout. With the timeout enabled, each destination write also
-has a deadline. Reverse traffic does not extend a stalled writer's deadline.
+has a deadline. If a write cannot make progress within the timeout, the proxy
+closes both tunnel connections, even while reverse traffic continues.
 
 The proxy cannot observe a remote application's reads from its socket
 buffer. TCP can withhold receive-window updates while the application

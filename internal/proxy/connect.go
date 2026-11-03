@@ -176,8 +176,10 @@ func logForwardError(err error, fromAddr, toAddr net.Addr) {
 	}
 }
 
-// forwardHalf copies data from src to dst, calling CloseWrite on dst when
-// done. It logs the start, completion, and any errors. Callers use
+// forwardHalf copies data from src to dst, calling CloseWrite on dst only
+// after normal EOF so the reverse direction can finish. Errors are returned
+// to forwardTunnel for full tunnel teardown. It logs the start, completion,
+// and any errors. Callers use
 // wg.Go to launch forwardHalf so the WaitGroup is managed automatically.
 // The clock is shared by both halves of the tunnel, so the idle timeout is
 // measured across the tunnel as a whole; a disabled clock turns idleCopy into
@@ -193,8 +195,9 @@ func forwardHalf(dst net.Conn, src io.Reader, srcConn net.Conn, fromAddr, toAddr
 	return err
 }
 
-// forwardTunnel copies both directions until both halves finish. Reuse the
-// existing readers so payload buffered while reading HTTP headers is preserved.
+// forwardTunnel copies both directions, preserving half-close on normal EOF
+// and closing both connections if either copy fails. Reuse the existing
+// readers so payload buffered while reading HTTP headers is preserved.
 func forwardTunnel(conn, peerConn net.Conn, reqReader, peerReader *bufio.Reader, idleTimeout time.Duration) {
 	clock := newTunnelClock(idleTimeout)
 	conn = trackTunnelActivity(conn, clock)
