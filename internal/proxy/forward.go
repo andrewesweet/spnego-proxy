@@ -148,8 +148,7 @@ func handleClient(conn net.Conn, cfg Config) {
 // cleanup defers (issue #75 LIFO ordering), constructs the per-connection
 // ClientSession, and delegates the request lifecycle to ClientSession.run.
 // Context cancellation closes an idle connection immediately and ends a busy
-// HTTP connection after its response. When endAfterResponse observes cancellation
-// before the response is written, it marks that response Connection: close (D8).
+// HTTP connection after its response.
 func handleClientCtx(ctx context.Context, conn net.Conn, cfg Config) {
 	defer func() { _ = conn.Close() }()
 	// Half-close the write half before the full close so the client
@@ -183,6 +182,7 @@ func handleClientCtx(ctx context.Context, conn net.Conn, cfg Config) {
 	defer slog.Debug("stop processing request", "client_addr", clientAddr)
 
 	s := &ClientSession{
+		ctx:        ctx,
 		conn:       conn,
 		cfg:        cfg,
 		clientAddr: clientAddr,
@@ -284,49 +284,35 @@ var errSessionShutdown = errors.New("proxy: shutdown")
 // connection at once instead of waiting for the deadline (D8).
 func (s *ClientSession) readRequest() (*http.Request, error) {
 	_ = s.conn.SetReadDeadline(time.Now().Add(s.cfg.ReadTimeout))
-	// Publish the idle wait and check for shutdown in one step: beginShutdown
-	// either sees idle and closes the connection, or this sees shutdown and
-	// returns without waiting for a request that will never be served.
 	s.mu.Lock()
-	if s.shutdown {
+	select {
+	case <-s.ctx.Done():
 		s.mu.Unlock()
 		return nil, errSessionShutdown
+	default:
 	}
 	s.idle = true
 	s.mu.Unlock()
 	req, err := http.ReadRequest(s.reqReader)
 	s.mu.Lock()
 	s.idle = false
-	shutdown := s.shutdown
 	s.mu.Unlock()
 	_ = s.conn.SetReadDeadline(time.Time{})
-	if shutdown {
-		// A request that finished parsing after beginShutdown ran is dropped:
-		// shutdown may already have closed the connection, so routing it would
-		// write its response to a dead socket. err can be nil here because the
-		// request bytes were already buffered.
+	select {
+	case <-s.ctx.Done():
 		return nil, errSessionShutdown
+	default:
 	}
 	return req, err
 }
 
-// beginShutdown records that Serve is shutting down and closes the client
-// connection when the session is idle between requests. A busy session is
-// left open so the request in flight still gets its answer; its response is
-// marked Connection: close so the connection ends after it (D8).
 func (s *ClientSession) beginShutdown() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.shutdown = true
 	if s.idle {
 		_ = s.conn.Close()
 	}
 }
-
-// endAfterResponse and the response write are one step: writeResponse marks
-// the response with Connection: close when shutdown has already started, under
-// the same lock beginShutdown takes, so the decision cannot race the
-// serialization.
 
 // readNextRequest reads the next request from the client connection under
 // the read timeout. It returns nil when no further request will arrive:
@@ -425,19 +411,16 @@ func (s *ClientSession) tunnelViaUpstream(req *http.Request) {
 	handleConnectTunnel(s.conn, proxyConn, s.reqReader, req, s.cfg.Pseudonym, s.clientAddr, s.cfg.IdleTimeout)
 }
 
-// writeResponse relays one response to the client. The shutdown decision and
-// the write are serialized under the session lock, so beginShutdown either
-// runs before the response is serialized — which marks it — or after it has
-// been written completely: a response written during shutdown always carries
-// Connection: close (D8). Response.Write reads the body to its end and closes
+// writeResponse relays one response to the client.
+// Response.Write reads the body to its end and closes
 // it, so no separate drain follows: a read or close failure on the body comes
 // back from Write as the error, and callers treat it as fatal because a failed
 // write leaves the client stream misaligned (D2).
 func (s *ClientSession) writeResponse(resp *http.Response) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.shutdown {
+	select {
+	case <-s.ctx.Done():
 		resp.Close = true
+	default:
 	}
 	err := resp.Write(s.conn)
 	// Write has already closed the body when it succeeded; this close only

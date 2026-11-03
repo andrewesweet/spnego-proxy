@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"sync"
 )
@@ -29,18 +30,14 @@ import (
 //     method-local connections and never touch these fields.
 //   - cfg is a read-only value snapshot, identical to the previous
 //     pass-by-value Config parameter.
-//   - shutdown and idle are guarded by mu: idle records that the session is
-//     waiting for a request, shutdown that Serve has cancelled, and holding mu
-//     across the transition is what lets shutdown close an idle connection
-//     without racing a new request or an in-flight response.
 type ClientSession struct {
+	ctx        context.Context
 	conn       net.Conn
 	cfg        Config
 	clientAddr string
 
-	mu       sync.Mutex
-	shutdown bool
-	idle     bool
+	mu   sync.Mutex
+	idle bool
 
 	reqReader *bufio.Reader
 

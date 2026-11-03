@@ -373,33 +373,73 @@ func (s *scriptedListener) Accept() (net.Conn, error) {
 	return nil, &net.OpError{Op: "accept", Net: "tcp", Err: syscall.EMFILE}
 }
 
-// shutdownInjectingReader makes the session observe shutdown in the middle of
-// a request read: the window in which a request can finish parsing after
-// beginShutdown has already run, so its response would be written to a socket
-// beginShutdown may have closed.
+func TestSessionBusyResponseObservesCancellationWithoutWatcher(t *testing.T) {
+	for _, direct := range []bool{false, true} {
+		name := "upstream"
+		if direct {
+			name = "direct"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			origin := startShutdownOrigin(t, func(*http.Request) { cancel() })
+			cfg := defaultTestConfig(origin, &stubTokenProvider{token: "tok"})
+			if direct {
+				cfg.NoProxy = NewNoProxyMatcher("*")
+			}
+			client, server := net.Pipe()
+			defer func() { _ = client.Close() }()
+			defer func() { _ = server.Close() }()
+			_ = client.SetDeadline(time.Now().Add(5 * time.Second))
+			s := &ClientSession{ctx: ctx, conn: server, cfg: cfg, reqReader: bufio.NewReader(server)}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				defer func() { _ = server.Close() }()
+				s.run()
+				if s.proxyConn != nil {
+					_ = s.proxyConn.Close()
+				}
+			}()
+			if _, err := io.WriteString(client, "GET http://"+origin+"/slow HTTP/1.1\r\nHost: "+origin+"\r\n\r\n"); err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if err != nil || string(body) != "/slow" || !resp.Close {
+				t.Fatalf("response after cancellation: body=%q, close=%v, error=%v; want /slow and Connection: close", body, resp.Close, err)
+			}
+			waitForDone(t, done)
+		})
+	}
+}
+
 type shutdownInjectingReader struct {
-	s    *ClientSession
-	once sync.Once
-	r    io.Reader
+	cancel context.CancelFunc
+	once   sync.Once
+	r      io.Reader
 }
 
 func (r *shutdownInjectingReader) Read(p []byte) (int, error) {
-	r.once.Do(func() { r.s.beginShutdown() })
+	r.once.Do(r.cancel)
 	return r.r.Read(p)
 }
 
-// TestReadRequestDropsRequestParsedAfterShutdown verifies that a request which
-// finishes parsing after shutdown started is not returned for routing: the
-// connection may already be closed, so serving it would drop its response.
 func TestReadRequestDropsRequestParsedAfterShutdown(t *testing.T) {
 	client, server := net.Pipe()
 	defer func() { _ = server.Close() }()
 	defer func() { _ = client.Close() }()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 
-	s := &ClientSession{conn: server, cfg: Config{ReadTimeout: time.Second}}
+	s := &ClientSession{ctx: ctx, conn: server, cfg: Config{ReadTimeout: time.Second}}
 	s.reqReader = bufio.NewReader(&shutdownInjectingReader{
-		s: s,
-		r: strings.NewReader("GET http://example.test/one HTTP/1.1\r\nHost: example.test\r\n\r\n"),
+		cancel: cancel,
+		r:      strings.NewReader("GET http://example.test/one HTTP/1.1\r\nHost: example.test\r\n\r\n"),
 	})
 
 	req, err := s.readRequest()
@@ -408,6 +448,39 @@ func TestReadRequestDropsRequestParsedAfterShutdown(t *testing.T) {
 	}
 	if req != nil {
 		t.Errorf("readRequest returned %s %s parsed after shutdown; it must not be routed", req.Method, req.URL)
+	}
+}
+
+func TestRequestAdmissionDropsBufferedRequestAfterCancellation(t *testing.T) {
+	for _, path := range []string{"upstream", "direct same host", "direct changed host"} {
+		t.Run(path, func(t *testing.T) {
+			client, server := net.Pipe()
+			defer func() { _ = server.Close() }()
+			defer func() { _ = client.Close() }()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			secondHost := "example.test"
+			if path == "direct changed host" {
+				secondHost = "other.test"
+			}
+			pipeline := "GET http://example.test/one HTTP/1.1\r\nHost: example.test\r\n\r\n" +
+				"GET http://" + secondHost + "/two HTTP/1.1\r\nHost: " + secondHost + "\r\n\r\n"
+			s := &ClientSession{ctx: ctx, conn: server, cfg: Config{ReadTimeout: time.Second}, reqReader: bufio.NewReader(strings.NewReader(pipeline))}
+			if _, err := s.readRequest(); err != nil {
+				t.Fatal(err)
+			}
+			if s.reqReader.Buffered() == 0 {
+				t.Fatal("second request must already be buffered")
+			}
+			cancel()
+			if path == "upstream" {
+				if req := s.readNextRequest(1); req != nil {
+					t.Fatalf("admitted buffered request after cancellation: %s", req.URL)
+				}
+			} else if req, reroute := s.nextDirectRequest("example.test", "example.test:80", 1); req != nil || reroute {
+				t.Fatalf("admitted buffered direct request after cancellation: request=%v, reroute=%v", req, reroute)
+			}
+		})
 	}
 }
 
@@ -428,16 +501,14 @@ func (c *gatedConn) Write(p []byte) (int, error) {
 	return c.written.Write(p)
 }
 
-// TestWriteResponseSynchronisesShutdown verifies that the shutdown decision and
-// the response serialization cannot interleave: beginShutdown does not return
-// while a response is being written, and a response written after shutdown was
-// recorded carries Connection: close.
-func TestWriteResponseSynchronisesShutdown(t *testing.T) {
-	t.Run("a response written during shutdown carries Connection: close", func(t *testing.T) {
+func TestWriteResponseObservesCancellation(t *testing.T) {
+	t.Run("cancelled before serialization", func(t *testing.T) {
 		conn := &gatedConn{started: make(chan struct{}), release: make(chan struct{})}
 		close(conn.release)
-		s := &ClientSession{conn: conn}
-		s.beginShutdown()
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		s := &ClientSession{ctx: ctx, conn: conn}
+		cancel()
 
 		if err := s.writeResponse(testResponse()); err != nil {
 			t.Fatalf("writeResponse: %v", err)
@@ -452,16 +523,16 @@ func TestWriteResponseSynchronisesShutdown(t *testing.T) {
 		}
 	})
 
-	t.Run("beginShutdown waits for the response being written", func(t *testing.T) {
+	t.Run("cancelled during serialization", func(t *testing.T) {
 		conn := &gatedConn{started: make(chan struct{}), release: make(chan struct{})}
-		s := &ClientSession{conn: conn}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		s := &ClientSession{ctx: ctx, conn: conn}
 
-		writeDone := make(chan struct{})
-		go func() {
-			defer close(writeDone)
-			_ = s.writeResponse(testResponse())
-		}()
-		<-conn.started // the response is mid-write
+		writeDone := make(chan error, 1)
+		go func() { writeDone <- s.writeResponse(testResponse()) }()
+		<-conn.started
+		cancel()
 
 		shutdownDone := make(chan struct{})
 		go func() {
@@ -470,13 +541,25 @@ func TestWriteResponseSynchronisesShutdown(t *testing.T) {
 		}()
 		select {
 		case <-shutdownDone:
-			t.Fatal("beginShutdown ran while a response was being serialized")
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(5 * time.Second):
+			close(conn.release)
+			<-writeDone
+			t.Fatal("shutdown blocked on response serialization")
 		}
 
 		close(conn.release)
-		<-writeDone
-		<-shutdownDone
+		if err := <-writeDone; err != nil {
+			t.Fatalf("writeResponse: %v", err)
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(conn.written.Bytes())), nil)
+		if err != nil {
+			t.Fatalf("read written response: %v", err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil || string(body) != "ok" || resp.Close {
+			t.Fatalf("response cancelled during serialization: body=%q, close=%v, error=%v; want unchanged persistent response", body, resp.Close, err)
+		}
 	})
 }
 
