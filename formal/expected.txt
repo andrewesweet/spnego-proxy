@@ -1,0 +1,37 @@
+# Expected verdict of each config, checked by formal/run-model.sh.
+#
+#   <model>/<config> breaks=<rules TLC finds a counterexample for, or -> unchecked=<rules TLC did not finish checking, or ->
+#
+# Rule names and sets are sorted, so the line is compared as a whole string.
+#
+# A config whose name ends in "Fixed" or "Reroute" states the fix direction and
+# must hold every rule. A config named after the code as it stands today breaks
+# the rules of the defects it encodes; those defects are tracked as GitHub
+# issues, so a break here is a known result, not a new finding. The "Sabotage"
+# configs are deliberately broken copies of the code: they exist so that every
+# promise fails on at least one config, which is what shows a passing config is
+# not passing for want of a rule that can never fail.
+#
+# When a run disagrees with this file, the model no longer describes the code or
+# the code moved under it. Decide which, then either fix the model or move the
+# sync commit in .agents/skills/verify-state-machines/SKILL.md and update the
+# line here. Never edit a rule or a line here only to make a run pass.
+
+m1-relay-keepalive/Relay breaks=EveryRequestAnswered,KeepAliveKept,ProxyReadsOwnResponse unchecked=-
+m1-relay-keepalive/RelayDrainFixed breaks=EveryRequestAnswered,ProxyReadsOwnResponse unchecked=-
+m1-relay-keepalive/RelayFixed breaks=- unchecked=-
+m1-relay-keepalive/RelayInterimFixed breaks=EveryRequestAnswered,KeepAliveKept unchecked=-
+m2-token-breaker/Breaker breaks=KDCFailuresBounded,NoLoginWhileOpen unchecked=-
+m2-token-breaker/BreakerFixed breaks=- unchecked=-
+m2-token-breaker/BreakerSabotageMaxRequests breaks=SingleProbe unchecked=NoDeadlock,TypeOK
+m3-connect-tunnel/Tunnel breaks=IdleCutOnlyWhenIdle,NoDataDroppedWhileOpen,NoDeadlock unchecked=-
+m3-connect-tunnel/TunnelFixed breaks=- unchecked=-
+m4-serve-shutdown/Serve breaks=DrainSkipsIdle unchecked=-
+m4-serve-shutdown/ServeFixed breaks=- unchecked=-
+m4-serve-shutdown/ServeSabotageNoAcceptDone breaks=NoAddAfterWait unchecked=-
+m5-direct-loop/DirectLoop breaks=MixedHostsServed unchecked=-
+m5-direct-loop/DirectLoopReroute breaks=- unchecked=-
+m5-direct-loop/DirectLoopSabotageNoCheck breaks=BoundHostOnly,PolicyRouting unchecked=-
+m6-tgt-renewal/RenewalFixed breaks=- unchecked=-
+m6-tgt-renewal/RenewalNonRenewable breaks=BreakerSeesEveryRejectedLogin,RejectedLoginsBounded unchecked=-
+m6-tgt-renewal/RenewalRenewable breaks=- unchecked=-

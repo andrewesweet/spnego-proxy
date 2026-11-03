@@ -147,6 +147,29 @@ library directly (the Go team already does) — fuzz *our* logic, optionally
 5. **Register the target.** Add a `compile_native_go_fuzzer` line for every new
    `Fuzz*` function in `.clusterfuzzlite/build.sh` so ClusterFuzzLite builds it.
 
+### State-machine model checks
+
+`formal/` holds TLA+ models of the proxy's concurrent state machines — the
+keep-alive relay, the token circuit breaker, the CONNECT tunnel idle timeout,
+the accept loop and shutdown, the `-noproxy` direct loop, and the gokrb5 TGT
+renewal goroutine — each with the promises its machine makes. TLC checks every
+interleaving inside the model's bounds and returns a broken promise as the
+shortest path that breaks it.
+
+These checks are a manual step: CI does not run them. They need Node, Java and
+TLC; `formal/run-model.sh` installs TLC 1.7.4 and Java 25 through mise on its
+first run.
+
+```bash
+formal/run-model.sh          # every model, about two minutes
+```
+
+The runner compares each config's verdict with `formal/expected.txt`, so a
+verdict that changed fails the run. Run it when a change touches one of the
+machines above. `.agents/skills/verify-state-machines/SKILL.md` lists the code
+each model covers and the rules it checks, and tells a real finding from a
+stale model.
+
 ## Formatting
 
 All code must be formatted before committing. CI will reject unformatted code.
