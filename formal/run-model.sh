@@ -4,15 +4,14 @@
 #
 #   formal/run-model.sh [MODEL|all] [OUT_ROOT]
 #
-# MODEL is a folder name under formal/ (m1-relay-keepalive and so on), or a
-# path to any folder that holds one *.tla, one or more *.cfg and an optional
-# view.mjs. With no argument, or "all", every folder named m* under formal/
+# MODEL is an exact model folder name under formal/ (m1-relay-keepalive and
+# so on). With no argument, or "all", every folder named m* under formal/
 # runs. Each config's report.md, chart.mmd and log land in OUT_ROOT/<config>/;
 # OUT_ROOT defaults to ${TMPDIR:-/tmp}/spnego-formal-runs/<UTC time>, so a run
 # never overwrites an earlier one and never writes into the repository.
 #
 # The check runs through the pstack /statechart command. Set STATECHART to that
-# command when it is neither on PATH nor at the pstack checkout path. The
+# command's executable path when it is not on PATH. The
 # command runs on Node 22.18 to 22.x or 23.6 or later, and installs TLC 1.7.4
 # with Java 25 (temurin-25) through mise on its first run.
 #
@@ -22,36 +21,27 @@
 set -u
 here=$(cd "$(dirname "$0")" && pwd -P)
 
-sc=${STATECHART:-}
-if [ -z "$sc" ]; then
-  if command -v statechart >/dev/null 2>&1; then
-    sc=$(command -v statechart)
-  else
-    sc=$HOME/ghq/github.com/cursor/plugins/pstack/skills/statechart/scripts/statechart
-  fi
-fi
+sc=${STATECHART:-$(command -v statechart 2>/dev/null)}
 if [ ! -x "$sc" ]; then
-  echo "run-model.sh: no statechart command at $sc; set STATECHART to it." >&2
+  echo "run-model.sh: statechart unavailable; set STATECHART to an executable path or put statechart on PATH." >&2
   exit 2
 fi
 
 arg=${1:-all}
 out=${2:-${TMPDIR:-/tmp}/spnego-formal-runs/$(date -u +%Y%m%dT%H%M%SZ)}
-if [ "$arg" = all ]; then
-  set -- "$here"/m*/
-elif [ -d "$arg" ]; then
-  set -- "$arg"
-elif [ -d "$here/$arg" ]; then
-  set -- "$here/$arg"
-else
-  echo "run-model.sh: no model folder $arg; one of:" >&2
+set --
+for d in "$here"/m*/; do
+  [ -d "$d" ] || continue
+  if [ "$arg" = all ] || [ "$arg" = "$(basename "$d")" ]; then
+    set -- "$@" "$d"
+  fi
+done
+if [ "$#" -eq 0 ]; then
+  echo "run-model.sh: no model folder named $arg; use all or an exact model folder name." >&2
+  echo "Usage: formal/run-model.sh [MODEL|all] [OUT_ROOT]" >&2
   for d in "$here"/m*/; do
     [ -d "$d" ] && echo "  $(basename "$d")" >&2
   done
-  exit 2
-fi
-if [ ! -d "$1" ]; then
-  echo "run-model.sh: no model folders under $here" >&2
   exit 2
 fi
 

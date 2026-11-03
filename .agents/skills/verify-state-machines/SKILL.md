@@ -23,10 +23,9 @@ The checks need Node, Java and TLC. Install them once:
 - **Java** 25 (`temurin-25`) and **TLC** 1.7.4 — pinned by the checker, which
   installs both with [mise](https://mise.jdx.dev/) on its first run. The first
   run therefore needs the network; later runs do not.
-- **The pstack `/statechart` command.** `formal/run-model.sh` looks for it on
-  `PATH`, then at the pstack checkout path
-  `~/ghq/github.com/cursor/plugins/pstack/skills/statechart/scripts/statechart`.
-  If yours is elsewhere, set `STATECHART` to it.
+- **The pstack `/statechart` command.** Set `STATECHART` to its executable
+  path, or put `statechart` on `PATH`. The runner uses `STATECHART` when set;
+  otherwise it looks for `statechart` on `PATH`.
 
 Check the toolchain with `node --version` and `mise ls java http:tla2tools`.
 
@@ -39,6 +38,9 @@ formal/run-model.sh                  # every model, about two minutes
 formal/run-model.sh m4-serve-shutdown
 formal/run-model.sh m5-direct-loop /tmp/my-run
 ```
+
+The first argument accepts only `all` or an exact model folder name under
+`formal/`. Omitting it runs every model. Paths to model folders are not accepted.
 
 The runner writes each config's `report.md`, `chart.mmd` and log under
 `OUT_ROOT/<config>/`, where `OUT_ROOT` defaults to
