@@ -12,12 +12,15 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/jcmturner/gofork/encoding/asn1"
 	"github.com/jcmturner/gokrb5/v8/iana/errorcode"
 	"github.com/jcmturner/gokrb5/v8/iana/etypeID"
+	"github.com/jcmturner/gokrb5/v8/iana/msgtype"
 	"github.com/jcmturner/gokrb5/v8/iana/patype"
 	"github.com/jcmturner/gokrb5/v8/messages"
 	"github.com/jcmturner/gokrb5/v8/types"
@@ -166,15 +169,8 @@ func TestGokrb5TokenProviderLogsInOnlyInsideGetToken(t *testing.T) {
 	}
 }
 
-// TestGokrb5TokenProviderStopsLoginsAfterPasswordRejection pins that a KDC
-// password rejection is terminal until the password file changes: the proxy
-// stops sending logins, warns once rather than once per request, and resumes
-// on its own when the file content changes.
-func TestGokrb5TokenProviderStopsLoginsAfterPasswordRejection(t *testing.T) {
-	kdc, as := startLockoutKDC(t, 0)
-	pwFile := writePasswordFile(t, "wrong-password", 0o600)
-	p := newLockoutProvider(t, kdc, pwFile)
-	logs := captureSlog(t)
+func startPasswordRejectingKDC(t *testing.T, kdc *krb5test.KDC) (string, <-chan struct{}) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -230,7 +226,20 @@ func TestGokrb5TokenProviderStopsLoginsAfterPasswordRejection(t *testing.T) {
 		_ = ln.Close()
 		<-done
 	})
-	p.cfg.Realms[0].KDC = []string{ln.Addr().String()}
+	return ln.Addr().String(), rejections
+}
+
+// TestGokrb5TokenProviderStopsLoginsAfterPasswordRejection pins that a KDC
+// password rejection is terminal until the password file changes: the proxy
+// stops sending logins, warns once rather than once per request, and resumes
+// on its own when the file content changes.
+func TestGokrb5TokenProviderStopsLoginsAfterPasswordRejection(t *testing.T) {
+	kdc, as := startLockoutKDC(t, 0)
+	pwFile := writePasswordFile(t, "wrong-password", 0o600)
+	p := newLockoutProvider(t, kdc, pwFile)
+	logs := captureSlog(t)
+	address, rejections := startPasswordRejectingKDC(t, kdc)
+	p.cfg.Realms[0].KDC = []string{address}
 
 	if _, err := p.GetToken(); err == nil || !strings.Contains(err.Error(), "KDC_ERR_PREAUTH_FAILED") {
 		t.Fatalf("expected KDC pre-authentication rejection, got %v", err)
@@ -270,6 +279,200 @@ func TestGokrb5TokenProviderStopsLoginsAfterPasswordRejection(t *testing.T) {
 	}
 	if got := as.count(); got != 1 {
 		t.Errorf("KDC served %d AS exchanges after the password changed, want 1", got)
+	}
+}
+
+func startDelayedKDC(t *testing.T, upstream string, phase int) (string, <-chan struct{}, chan<- struct{}) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paused := make(chan struct{})
+	release := make(chan struct{})
+	var delayed atomic.Bool
+	readPacket := func(r io.Reader) ([]byte, error) {
+		var header [4]byte
+		if _, err := io.ReadFull(r, header[:]); err != nil {
+			return nil, err
+		}
+		packet := make([]byte, 4+int(binary.BigEndian.Uint32(header[:])))
+		copy(packet, header[:])
+		_, err := io.ReadFull(r, packet[4:])
+		return packet, err
+	}
+	relay := func(conn net.Conn) error {
+		defer func() { _ = conn.Close() }()
+		if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			return err
+		}
+		request, err := readPacket(conn)
+		if err != nil {
+			return err
+		}
+		server, err := net.DialTimeout("tcp", upstream, 5*time.Second)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = server.Close() }()
+		if err := server.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			return err
+		}
+		if _, err := server.Write(request); err != nil {
+			return err
+		}
+		reply, err := readPacket(server)
+		if err != nil {
+			return err
+		}
+		var envelope asn1.RawValue
+		if _, err := asn1.Unmarshal(request[4:], &envelope); err != nil {
+			return err
+		}
+		if envelope.Tag == phase && delayed.CompareAndSwap(false, true) {
+			close(paused)
+			<-release
+		}
+		_, err = conn.Write(reply)
+		return err
+	}
+	var handlers sync.WaitGroup
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			handlers.Go(func() {
+				if err := relay(conn); err != nil {
+					t.Errorf("relay KDC exchange: %v", err)
+				}
+			})
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		<-done
+		handlers.Wait()
+	})
+	return ln.Addr().String(), paused, release
+}
+
+func TestGokrb5TokenProviderDoesNotReloginDuringAcquisition(t *testing.T) {
+	for _, phase := range []int{msgtype.KRB_AS_REQ, msgtype.KRB_TGS_REQ} {
+		t.Run(map[int]string{msgtype.KRB_AS_REQ: "delayed TGT", msgtype.KRB_TGS_REQ: "delayed service ticket"}[phase], func(t *testing.T) {
+			kdc, as := startLockoutKDC(t, 3*time.Second)
+			pwFile := writePasswordFile(t, kdc.Principals[testKDCUser].Password, 0o600)
+			p := newLockoutProvider(t, kdc, pwFile)
+			cb := NewCircuitBreakerTokenProvider(p, CBConsecutiveFailures, CBTimeout)
+			t.Cleanup(func() { _ = cb.Close() })
+			address, paused, release := startDelayedKDC(t, kdc.TCPListener.Addr().String(), phase)
+			p.cfg.Realms[0].KDC = []string{address}
+			result := make(chan error, 1)
+			go func() {
+				token, err := cb.GetToken()
+				if err == nil && token == "" {
+					err = errors.New("empty SPNEGO token")
+				}
+				result <- err
+			}()
+			select {
+			case <-paused:
+			case <-time.After(5 * time.Second):
+				t.Fatal("KDC did not reach the delayed exchange")
+			}
+			if err := kdc.Keytab.AddEntry(testKDCUser, kdc.Realm, "changed-at-kdc", time.Now().UTC(), 2, etypeID.AES256_CTS_HMAC_SHA1_96); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(3500 * time.Millisecond)
+			if got := as.count(); got != 1 {
+				t.Errorf("KDC served %d AS exchanges during one pending GetToken, want 1", got)
+			}
+			close(release)
+			select {
+			case err := <-result:
+				if phase == msgtype.KRB_TGS_REQ && err != nil {
+					t.Fatalf("delayed service-ticket acquisition failed: %v", err)
+				}
+				if phase == msgtype.KRB_AS_REQ && err == nil {
+					t.Fatal("expected the expired TGT to fail without a password refresh")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("GetToken did not complete after releasing the KDC")
+			}
+			if got := as.count(); got != 1 {
+				t.Errorf("KDC served %d AS exchanges including foreground refresh, want 1", got)
+			}
+			counts := cb.cb.Counts()
+			if phase == msgtype.KRB_TGS_REQ && counts.TotalSuccesses != 1 {
+				t.Errorf("breaker successes = %d, want 1", counts.TotalSuccesses)
+			}
+			if phase == msgtype.KRB_AS_REQ && counts.TotalFailures != 1 {
+				t.Errorf("breaker failures = %d, want 1", counts.TotalFailures)
+			}
+		})
+	}
+}
+
+func TestGokrb5TokenProviderPeriodicRejectionWarnings(t *testing.T) {
+	for _, finish := range []string{"password change", "close"} {
+		t.Run(finish, func(t *testing.T) {
+			kdc, as := startLockoutKDC(t, 0)
+			pwFile := writePasswordFile(t, "wrong-password", 0o600)
+			p := newLockoutProvider(t, kdc, pwFile)
+			address, rejections := startPasswordRejectingKDC(t, kdc)
+			p.cfg.Realms[0].KDC = []string{address}
+			logs := captureSlog(t)
+			synctest.Test(t, func(t *testing.T) {
+				defer func() { _ = p.Close() }()
+				cb := NewCircuitBreakerTokenProvider(p, 1, time.Hour)
+				if _, err := cb.GetToken(); err == nil || !strings.Contains(err.Error(), "KDC_ERR_PREAUTH_FAILED") {
+					t.Fatalf("expected KDC rejection, got %v", err)
+				}
+				if _, err := cb.GetToken(); err == nil || !strings.Contains(err.Error(), "circuit breaker open") {
+					t.Fatalf("expected an open circuit breaker, got %v", err)
+				}
+				for want := 2; want <= 3; want++ {
+					time.Sleep(5 * time.Minute)
+					synctest.Wait()
+					if got := strings.Count(logs.String(), "refusing Kerberos logins"); got != want {
+						t.Fatalf("warnings without traffic = %d, want %d", got, want)
+					}
+				}
+				if got := len(rejections); got != 2 {
+					t.Errorf("KDC received %d AS requests, want only the initial pair", got)
+				}
+				if finish == "close" {
+					if err := p.Close(); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if err := os.WriteFile(pwFile, []byte(kdc.Principals[testKDCUser].Password), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					time.Sleep(5 * time.Minute)
+					synctest.Wait()
+					if !strings.Contains(logs.String(), "password changed; resuming Kerberos logins") {
+						t.Fatal("timer did not detect the corrected password")
+					}
+				}
+				time.Sleep(10 * time.Minute)
+				synctest.Wait()
+				if got := strings.Count(logs.String(), "refusing Kerberos logins"); got != 3 {
+					t.Errorf("warnings after %s = %d, want 3", finish, got)
+				}
+				if got := as.count(); got != 0 {
+					t.Errorf("warning timer sent %d AS exchanges, want 0", got)
+				}
+			})
+		})
 	}
 }
 

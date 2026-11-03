@@ -262,8 +262,10 @@ that:
   is allowed.
 - **Every login is counted.** The proxy never lets the Kerberos library
   renew a ticket with the password in the background: each acquisition
-  builds a fresh client, logs in inside the request path, and destroys
-  the client before returning. A login that fails is therefore counted by
+  performs an explicit password exchange inside the request path, then
+  hands the ticket to a client with no password. The password exchange
+  never starts a renewal goroutine.
+  Both clients are destroyed before returning. A login that fails is counted by
   the circuit breaker, and no login happens without client traffic. The
   cost is a KDC exchange per token acquisition where a cached ticket would
   otherwise have been reused; the alternative, letting the library renew
@@ -273,8 +275,11 @@ that:
   configured password, the proxy sends no further logins until the
   password value in the file changes. Trailing CR/LF characters are stripped
   before comparing passwords. It re-reads the file on each refused
-  attempt, logs a warning at most once every 5 minutes while the rejection
-  stands, and resumes on its own when the effective password differs.
+  attempt and every 5 minutes while rejected. It warns immediately, then
+  every 5 minutes while the rejection stands, including without client
+  traffic or while the circuit breaker is open. The warnings stop when the
+  effective password changes or the proxy shuts down. Logins resume on
+  their own when the effective password differs.
   Re-saving the same password or adding or removing trailing CR/LF characters
   does not allow a retry. If the password is correct, restart the proxy to
   allow a retry. A password typed at the terminal cannot change, so logins
