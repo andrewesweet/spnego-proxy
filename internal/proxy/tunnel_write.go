@@ -51,7 +51,7 @@ func (c *tunnelConn) Write(p []byte) (int, error) {
 		if err := c.Conn.SetWriteDeadline(time.Now().Add(clock.timeout)); err != nil {
 			return total, err
 		}
-		n, err := writeTunnelChunk(c.Conn, p)
+		n, err := writeTunnelChunk(c.Conn, p, clock.timeout)
 		if n > 0 {
 			clock.touch()
 			total += n
@@ -65,6 +65,29 @@ func (c *tunnelConn) Write(p []byte) (int, error) {
 		}
 	}
 	return total, nil
+}
+
+func writeTunnelBuffered(conn net.Conn, p []byte, timeout time.Duration) (int, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		probe := time.Now().Add(timeout / 4)
+		if deadline.Before(probe) {
+			probe = deadline
+		}
+		if err := conn.SetWriteDeadline(probe); err != nil {
+			return 0, err
+		}
+		n, err := conn.Write(p)
+		if isTimeoutError(err) {
+			if n > 0 {
+				return n, nil
+			}
+			if time.Now().Before(deadline) {
+				continue
+			}
+		}
+		return n, err
+	}
 }
 
 func (c *tunnelConn) CloseWrite() error {
@@ -90,6 +113,9 @@ func (c *upstreamTLSConn) Close() error {
 }
 
 func trackTunnelActivity(conn net.Conn, clock *tunnelClock) net.Conn {
+	if clock.timeout <= 0 {
+		return conn
+	}
 	if tc, ok := conn.(*upstreamTLSConn); ok {
 		tc.transport.clock.Store(clock)
 		return tc

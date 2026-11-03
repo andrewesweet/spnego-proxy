@@ -2,8 +2,11 @@
 
 package proxy
 
-import "net"
+import (
+	"net"
+	"time"
+)
 
-func writeTunnelChunk(conn net.Conn, p []byte) (int, error) {
-	return conn.Write(p[:1])
+func writeTunnelChunk(conn net.Conn, p []byte, timeout time.Duration) (int, error) {
+	return writeTunnelBuffered(conn, p, timeout)
 }

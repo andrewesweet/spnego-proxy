@@ -6,12 +6,13 @@ import (
 	"net"
 	"os"
 	"syscall"
+	"time"
 )
 
-func writeTunnelChunk(conn net.Conn, p []byte) (int, error) {
+func writeTunnelChunk(conn net.Conn, p []byte, timeout time.Duration) (int, error) {
 	sc, ok := conn.(syscall.Conn)
 	if !ok {
-		return conn.Write(p[:1])
+		return writeTunnelBuffered(conn, p, timeout)
 	}
 	raw, err := sc.SyscallConn()
 	if err != nil {
