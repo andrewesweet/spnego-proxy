@@ -186,7 +186,6 @@ func handleClientCtx(ctx context.Context, conn net.Conn, cfg Config) {
 		conn:       conn,
 		cfg:        cfg,
 		clientAddr: clientAddr,
-		ctx:        ctx,
 		reqReader:  bufio.NewReader(conn),
 	}
 	// Shutdown closes a connection that is idle between requests at once: the
@@ -301,8 +300,11 @@ func (s *ClientSession) readRequest() (*http.Request, error) {
 	shutdown := s.shutdown
 	s.mu.Unlock()
 	_ = s.conn.SetReadDeadline(time.Time{})
-	if err != nil && shutdown {
-		// beginShutdown closed the connection under this wait.
+	if shutdown {
+		// A request that finished parsing after beginShutdown ran is dropped:
+		// shutdown may already have closed the connection, so routing it would
+		// write its response to a dead socket. err can be nil here because the
+		// request bytes were already buffered.
 		return nil, errSessionShutdown
 	}
 	return req, err
@@ -321,15 +323,10 @@ func (s *ClientSession) beginShutdown() {
 	}
 }
 
-// endAfterResponse marks a response as the last one on this connection when
-// shutdown has started: Response.Write emits Connection: close and the
-// keep-alive loop stops, so a busy connection is not kept past the request it
-// is answering (D8).
-func (s *ClientSession) endAfterResponse(resp *http.Response) {
-	if s.ctx.Err() != nil {
-		resp.Close = true
-	}
-}
+// endAfterResponse and the response write are one step: writeResponse marks
+// the response with Connection: close when shutdown has already started, under
+// the same lock beginShutdown takes, so the decision cannot race the
+// serialization.
 
 // readNextRequest reads the next request from the client connection under
 // the read timeout. It returns nil when no further request will arrive:
@@ -391,10 +388,9 @@ func (s *ClientSession) relayViaUpstream(req *http.Request, iter int) bool {
 		handleUpstreamResponseError(s.conn, s.proxyConn, rerr, s.clientAddr)
 		return false
 	}
-	s.endAfterResponse(resp)
 
-	if writeErr := writeResponse(s.conn, resp); writeErr != nil {
-		logForwardError(writeErr, s.proxyConn.RemoteAddr(), s.conn.RemoteAddr())
+	if err := s.writeResponse(resp); err != nil {
+		logForwardError(err, s.proxyConn.RemoteAddr(), s.conn.RemoteAddr())
 		return false
 	}
 
@@ -429,11 +425,23 @@ func (s *ClientSession) tunnelViaUpstream(req *http.Request) {
 	handleConnectTunnel(s.conn, proxyConn, s.reqReader, req, s.cfg.Pseudonym, s.clientAddr, s.cfg.IdleTimeout)
 }
 
-// writeResponse writes a response and ensures its body is closed even on error.
-// Response.Write consumes and closes the body on success; reading it again
-// would fail and incorrectly prevent connection reuse.
-func writeResponse(conn net.Conn, resp *http.Response) error {
-	writeErr := resp.Write(conn)
+// writeResponse relays one response to the client. The shutdown decision and
+// the write are serialized under the session lock, so beginShutdown either
+// runs before the response is serialized — which marks it — or after it has
+// been written completely: a response written during shutdown always carries
+// Connection: close (D8). Response.Write reads the body to its end and closes
+// it, so no separate drain follows: a read or close failure on the body comes
+// back from Write as the error, and callers treat it as fatal because a failed
+// write leaves the client stream misaligned (D2).
+func (s *ClientSession) writeResponse(resp *http.Response) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.shutdown {
+		resp.Close = true
+	}
+	err := resp.Write(s.conn)
+	// Write has already closed the body when it succeeded; this close only
+	// releases it on the error path.
 	_ = resp.Body.Close()
-	return writeErr
+	return err
 }

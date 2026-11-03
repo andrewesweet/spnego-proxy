@@ -2,11 +2,14 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -188,8 +191,10 @@ func TestServeEndsBusyConnectionWithConnectionClose(t *testing.T) {
 	}
 
 	// The connection must end after that response, and a later request on it
-	// must not be served.
-	bodyRequest(t, conn, "/after")
+	// must not be served. Writing it may fail with EPIPE or ECONNRESET once the
+	// proxy has closed the connection, which is the expected end of the
+	// exchange; ReadResponse alone decides whether a late response was served.
+	_, _ = io.WriteString(conn, "GET http://example.test/after HTTP/1.1\r\nHost: example.test\r\n\r\n")
 	if late, err := http.ReadResponse(br, nil); err == nil {
 		_ = late.Body.Close()
 		t.Errorf("served %s on a connection shut down mid-request; want the connection closed", late.Status)
@@ -366,4 +371,124 @@ func (s *scriptedListener) Accept() (net.Conn, error) {
 		return c, nil
 	}
 	return nil, &net.OpError{Op: "accept", Net: "tcp", Err: syscall.EMFILE}
+}
+
+// shutdownInjectingReader makes the session observe shutdown in the middle of
+// a request read: the window in which a request can finish parsing after
+// beginShutdown has already run, so its response would be written to a socket
+// beginShutdown may have closed.
+type shutdownInjectingReader struct {
+	s    *ClientSession
+	once sync.Once
+	r    io.Reader
+}
+
+func (r *shutdownInjectingReader) Read(p []byte) (int, error) {
+	r.once.Do(func() { r.s.beginShutdown() })
+	return r.r.Read(p)
+}
+
+// TestReadRequestDropsRequestParsedAfterShutdown verifies that a request which
+// finishes parsing after shutdown started is not returned for routing: the
+// connection may already be closed, so serving it would drop its response.
+func TestReadRequestDropsRequestParsedAfterShutdown(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
+
+	s := &ClientSession{conn: server, cfg: Config{ReadTimeout: time.Second}}
+	s.reqReader = bufio.NewReader(&shutdownInjectingReader{
+		s: s,
+		r: strings.NewReader("GET http://example.test/one HTTP/1.1\r\nHost: example.test\r\n\r\n"),
+	})
+
+	req, err := s.readRequest()
+	if !errors.Is(err, errSessionShutdown) {
+		t.Fatalf("readRequest error = %v, want errSessionShutdown", err)
+	}
+	if req != nil {
+		t.Errorf("readRequest returned %s %s parsed after shutdown; it must not be routed", req.Method, req.URL)
+	}
+}
+
+// gatedConn is a net.Conn whose first Write blocks until the test releases it
+// and records everything written, so a test can start shutdown while a
+// response is being serialized.
+type gatedConn struct {
+	net.Conn // never used: the response write needs only Write
+	started  chan struct{}
+	release  chan struct{}
+	once     sync.Once
+	written  bytes.Buffer
+}
+
+func (c *gatedConn) Write(p []byte) (int, error) {
+	c.once.Do(func() { close(c.started) })
+	<-c.release
+	return c.written.Write(p)
+}
+
+// TestWriteResponseSynchronisesShutdown verifies that the shutdown decision and
+// the response serialization cannot interleave: beginShutdown does not return
+// while a response is being written, and a response written after shutdown was
+// recorded carries Connection: close.
+func TestWriteResponseSynchronisesShutdown(t *testing.T) {
+	t.Run("a response written during shutdown carries Connection: close", func(t *testing.T) {
+		conn := &gatedConn{started: make(chan struct{}), release: make(chan struct{})}
+		close(conn.release)
+		s := &ClientSession{conn: conn}
+		s.beginShutdown()
+
+		if err := s.writeResponse(testResponse()); err != nil {
+			t.Fatalf("writeResponse: %v", err)
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(strings.NewReader(conn.written.String())), nil)
+		if err != nil {
+			t.Fatalf("read written response: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if !resp.Close {
+			t.Error("the response written during shutdown does not end the connection: want Connection: close")
+		}
+	})
+
+	t.Run("beginShutdown waits for the response being written", func(t *testing.T) {
+		conn := &gatedConn{started: make(chan struct{}), release: make(chan struct{})}
+		s := &ClientSession{conn: conn}
+
+		writeDone := make(chan struct{})
+		go func() {
+			defer close(writeDone)
+			_ = s.writeResponse(testResponse())
+		}()
+		<-conn.started // the response is mid-write
+
+		shutdownDone := make(chan struct{})
+		go func() {
+			defer close(shutdownDone)
+			s.beginShutdown()
+		}()
+		select {
+		case <-shutdownDone:
+			t.Fatal("beginShutdown ran while a response was being serialized")
+		case <-time.After(100 * time.Millisecond):
+		}
+
+		close(conn.release)
+		<-writeDone
+		<-shutdownDone
+	})
+}
+
+// testResponse is a small response with a body for the write tests.
+func testResponse() *http.Response {
+	const body = "ok"
+	return &http.Response{
+		StatusCode:    http.StatusOK,
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        make(http.Header),
+		Body:          io.NopCloser(strings.NewReader(body)),
+		ContentLength: int64(len(body)),
+	}
 }

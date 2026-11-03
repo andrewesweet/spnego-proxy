@@ -204,9 +204,8 @@ func (s *ClientSession) relayDirect(req *http.Request, targetConn net.Conn, upst
 		s.logDirectError("noproxy read response", rerr, target)
 		return false
 	}
-	s.endAfterResponse(resp)
-	if writeErr := writeResponse(s.conn, resp); writeErr != nil {
-		s.logDirectError("noproxy forward response", writeErr, target)
+	if err := s.writeResponse(resp); err != nil {
+		s.logDirectError("noproxy forward response", err, target)
 		return false
 	}
 	slog.Debug("noproxy HTTP response forwarding done", "target", target, "client_addr", s.clientAddr, "iter", iter)
