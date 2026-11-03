@@ -3,8 +3,10 @@ package proxy
 import (
 	"bytes"
 	"errors"
+	"io"
 	"log"
 	"log/slog"
+	"net"
 	"os"
 	"regexp"
 	"strings"
@@ -234,5 +236,78 @@ func TestIsPasswordRejection(t *testing.T) {
 				t.Errorf("isPasswordRejection(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestGokrb5TokenProviderBurstStopsAtThreshold pins the reported surface: a
+// burst of client connections whose token acquisition fails must not send one
+// rejected login per connection to the KDC, whatever the number of connections.
+func TestGokrb5TokenProviderBurstStopsAtThreshold(t *testing.T) {
+	kdc, as := startLockoutKDC(t, 0)
+	pwFile := writePasswordFile(t, "wrong-password", 0o600)
+	cb := NewCircuitBreakerTokenProvider(newLockoutProvider(t, kdc, pwFile), CBConsecutiveFailures, CBTimeout)
+	t.Cleanup(func() { _ = cb.Close() })
+
+	const clients = 10
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	cfg := defaultTestConfig("127.0.0.1:1", cb)
+	accepted := make(chan net.Conn, clients)
+	go func() {
+		for range clients {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- conn
+		}
+	}()
+
+	var handlers sync.WaitGroup
+	go func() {
+		for range clients {
+			select {
+			case conn := <-accepted:
+				handlers.Go(func() { handleClient(conn, cfg) })
+			case <-time.After(10 * time.Second):
+				return
+			}
+		}
+	}()
+
+	statuses := make(chan string, clients)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range clients {
+		wg.Go(func() {
+			conn, err := net.Dial("tcp", ln.Addr().String())
+			if err != nil {
+				statuses <- "dial error: " + err.Error()
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			<-start
+			_, _ = io.WriteString(conn, "GET http://example.test/ HTTP/1.1\r\nHost: example.test\r\n\r\n")
+			response, _ := io.ReadAll(conn)
+			line, _, _ := bytes.Cut(response, []byte("\r\n"))
+			statuses <- string(line)
+		})
+	}
+	close(start)
+	wg.Wait()
+	handlers.Wait()
+	close(statuses)
+
+	if got := as.count(); got > int(CBConsecutiveFailures) {
+		t.Errorf("KDC served %d AS exchanges for %d concurrent clients, want at most %d (the breaker threshold)", got, clients, CBConsecutiveFailures)
+	}
+	for status := range statuses {
+		if !strings.Contains(status, "502") {
+			t.Errorf("client received %q, want a 502 error response", status)
+		}
 	}
 }
