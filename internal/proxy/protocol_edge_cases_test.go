@@ -4,7 +4,9 @@ package proxy
 //
 // Requirements covered:
 //   F1  RFC 9110 §10.1.1 — Expect: 100-continue forwarded to upstream
-//   F2  RFC 9110 §10.1.1 — 100 Continue not forwarded to HTTP/1.0 clients (doc/known gap)
+//   F2  RFC 9110 §15.2   — 1xx interim responses relayed to HTTP/1.1 clients,
+//                          dropped for HTTP/1.0 clients, final response still read.
+//                          (HTTP/1.0 half was a documented known gap before D3.)
 //   G1  RFC 9110 §7.6.2  — Max-Forwards decremented for TRACE/OPTIONS; stop at zero
 //   I1  RFC 9112 §9.3    — HTTP/1.0 client connection closed after response
 //   I2  RFC 9112 §9.6    — Connection: close from client honored
@@ -76,26 +78,295 @@ func TestF1_ExpectHeaderNotAddedWhenAbsent(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// F2 — RFC 9110 §10.1.1: Do not forward 100 Continue to HTTP/1.0 clients
+// F2 — RFC 9110 §15.2: interim (1xx) responses before the final response
 // ---------------------------------------------------------------------------
 //
-// KNOWN GAP: The proxy's response path uses http.ReadResponse + resp.Write.
-// Go's http.ReadResponse transparently absorbs 100-continue interim responses
-// from the upstream and returns only the final response. This means that if an
-// upstream sends "HTTP/1.1 100 Continue\r\n\r\n" followed by a final response,
-// Go's ReadResponse discards the 100 before the proxy even sees it, and
-// resp.Write only serializes the final status. As a result the proxy never
-// forwards a bare 100 Continue to any client — HTTP/1.0 or HTTP/1.1 — which
-// satisfies the MUST NOT for HTTP/1.0 clients as a side effect.
+// RFC 9110 §15.2: a client MUST be able to parse one or more 1xx responses
+// received before a final response, and a proxy MUST forward 1xx responses it
+// did not itself request. RFC 9110 §15.2 also forbids sending a 1xx response
+// to an HTTP/1.0 client, which cannot parse one.
 //
-// This behavior cannot be tested end-to-end via the Go stdlib because there
-// is no API to inject a raw 100 Continue through http.ReadResponse; the test
-// would instead verify that the mock's raw-write path never reaches the client
-// as a standalone response. That is tested implicitly: the mock upstream
-// cannot send 100 Continue separately in a way that survives the proxy's
-// http.ReadResponse call.
+// The proxy must therefore keep reading after every 1xx other than 101 (101 is
+// the final response of a protocol upgrade) until the final response arrives.
+// Go's http.ReadResponse returns a 1xx as an ordinary bodyless response; only
+// http.Transport loops past interim responses, and the proxy does not use it.
 //
-// No explicit test is added; the gap is documented here for traceability.
+// The upstream side of these tests is a raw TCP listener because
+// http.Response.Write cannot emit a bare 1xx response.
+
+// clientMessage is one response as the client saw it on the wire.
+//
+// header keeps every field, so a test can assert on the Via header (RFC 9110
+// §7.6.3 requires a proxy to add it to every response it forwards, interim
+// ones included) or on a marker the origin set.
+type clientMessage struct {
+	statusCode int
+	header     http.Header
+	body       string
+}
+
+// forwardRequest builds the raw bytes of one request routed through the
+// upstream proxy (direct=false) or the -noproxy direct path (direct=true).
+// The upstream path targets the fixed authority example.test, which the raw
+// origin answers like any other absolute-form authority; the -noproxy path
+// must name origin itself for the matcher to take it. A non-empty body adds
+// Content-Length and Expect: 100-continue, the shape curl uses for a large
+// upload over plain HTTP.
+func forwardRequest(direct bool, origin, method, path, proto, body string) string {
+	authority := "example.test"
+	if direct {
+		authority = origin
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s http://%s%s %s\r\nHost: %s\r\n", method, authority, path, proto, authority)
+	if body != "" {
+		fmt.Fprintf(&b, "Content-Length: %d\r\nExpect: 100-continue\r\n", len(body))
+	}
+	b.WriteString("\r\n")
+	b.WriteString(body)
+	return b.String()
+}
+
+// startRawInterimOrigin starts a raw TCP origin (also usable as an upstream
+// proxy, since it accepts absolute-form request targets) that answers every
+// request on a connection with interim written verbatim, followed by the
+// response final returns for that request. Raw bytes are needed because
+// http.Response.Write cannot emit a bare 1xx response.
+func startRawInterimOrigin(t *testing.T, interim string, final func(*http.Request) string) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen interim origin: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		for {
+			conn, aerr := l.Accept()
+			if aerr != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				br := bufio.NewReader(conn)
+				for {
+					req, rerr := http.ReadRequest(br)
+					if rerr != nil {
+						return
+					}
+					_, _ = io.Copy(io.Discard, req.Body)
+					_, _ = io.WriteString(conn, interim+final(req))
+				}
+			}()
+		}
+	}()
+	return l.Addr().String()
+}
+
+// startInterimOrigin starts a raw origin whose final response is a 200 whose
+// body echoes the request path.
+func startInterimOrigin(t *testing.T, interim string) string {
+	t.Helper()
+	return startRawInterimOrigin(t, interim, func(req *http.Request) string {
+		p := req.URL.Path
+		return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(p), p)
+	})
+}
+
+// startBodylessInterimOrigin starts a raw origin whose final response is a
+// bodyless 200 that names the request path in X-Request-Path.
+//
+// The body is omitted on purpose: a test that reuses the client connection
+// needs the relayed response to leave the connection reusable, and on the
+// current base draining a response with a body after resp.Write fails and ends
+// the connection (a separate defect, not this one).
+func startBodylessInterimOrigin(t *testing.T, interim string) string {
+	t.Helper()
+	return startRawInterimOrigin(t, interim, func(req *http.Request) string {
+		return "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Request-Path: " + req.URL.Path + "\r\n\r\n"
+	})
+}
+
+// startInterimProxy starts a proxy that reaches origin through the upstream
+// proxy path (direct=false) or the -noproxy direct path (direct=true) and
+// returns its address.
+func startInterimProxy(t *testing.T, origin string, direct bool) string {
+	t.Helper()
+	proxy := NewProxyUnderTest(t, origin)
+	if direct {
+		proxy.SetNoProxy(NewNoProxyMatcher("127.0.0.1"))
+	}
+	t.Cleanup(proxy.Close)
+	return proxy.Addr()
+}
+
+// readThroughFinal reads responses the way net/http.Transport does: each 1xx
+// response is followed by another one, and the first non-1xx response is
+// final. It fails the test on a read error or when every response received so
+// far is still an interim one.
+func readThroughFinal(t *testing.T, conn net.Conn, br *bufio.Reader) []clientMessage {
+	t.Helper()
+	const maxInterim = 4
+	msgs := make([]clientMessage, 0, 2)
+	for range maxInterim + 1 {
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			t.Fatalf("read response %d (received %v so far): %v", len(msgs)+1, msgs, err)
+		}
+		body, berr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if berr != nil {
+			t.Fatalf("read body of %s: %v", resp.Status, berr)
+		}
+		msgs = append(msgs, clientMessage{statusCode: resp.StatusCode, header: resp.Header, body: string(body)})
+		if resp.StatusCode >= 200 {
+			return msgs
+		}
+	}
+	t.Fatalf("no final response after %d interim responses: %v", maxInterim, msgs)
+	return nil
+}
+
+// interimPaths names the two proxy routes that relay a response read from the
+// wire: through the SPNEGO upstream proxy and through -noproxy direct.
+var interimPaths = []struct {
+	name   string
+	direct bool
+}{
+	{"upstream", false},
+	{"noproxy direct", true},
+}
+
+// TestF2_InterimResponsesRelayedBeforeFinal verifies that a 1xx response from
+// upstream is relayed to an HTTP/1.1 client in order and before the final
+// response, and that the final response is still delivered with its own body.
+func TestF2_InterimResponsesRelayedBeforeFinal(t *testing.T) {
+	tests := []struct {
+		name         string
+		interim      string
+		wantInterims []int
+	}{
+		{
+			name:         "100 Continue",
+			interim:      "HTTP/1.1 100 Continue\r\n\r\n",
+			wantInterims: []int{100},
+		},
+		{
+			name:         "103 Early Hints",
+			interim:      "HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n",
+			wantInterims: []int{103},
+		},
+		{
+			name:         "two interim responses",
+			interim:      "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\n\r\n",
+			wantInterims: []int{100, 103},
+		},
+	}
+
+	for _, path := range interimPaths {
+		for _, tc := range tests {
+			t.Run(path.name+"/"+tc.name, func(t *testing.T) {
+				origin := startInterimOrigin(t, tc.interim)
+				proxyAddr := startInterimProxy(t, origin, path.direct)
+				conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+				if err != nil {
+					t.Fatalf("dial proxy: %v", err)
+				}
+				defer func() { _ = conn.Close() }()
+				if _, werr := io.WriteString(conn, forwardRequest(path.direct, origin, "POST", "/upload", "HTTP/1.1", "hello")); werr != nil {
+					t.Fatalf("write request: %v", werr)
+				}
+
+				msgs := readThroughFinal(t, conn, bufio.NewReader(conn))
+				if len(msgs) != len(tc.wantInterims)+1 {
+					t.Fatalf("client received %d responses, want %d interim + 1 final: %v", len(msgs), len(tc.wantInterims), msgs)
+				}
+				for i, want := range tc.wantInterims {
+					if msgs[i].statusCode != want {
+						t.Errorf("response %d: want interim status %d, got %d", i, want, msgs[i].statusCode)
+					}
+					if via := msgs[i].header.Get("Via"); !strings.Contains(via, testPseudonym) {
+						t.Errorf("interim response %d: want Via containing %q, got %q", i, testPseudonym, via)
+					}
+				}
+				last := msgs[len(msgs)-1]
+				if last.statusCode != http.StatusOK {
+					t.Errorf("final response: want 200, got %d", last.statusCode)
+				}
+				if last.body != "/upload" {
+					t.Errorf("final response body: want %q, got %q", "/upload", last.body)
+				}
+			})
+		}
+	}
+}
+
+// TestF2_InterimResponsesDroppedForHTTP10Client verifies that no 1xx response
+// reaches an HTTP/1.0 client, which cannot parse one, while the final response
+// still does.
+func TestF2_InterimResponsesDroppedForHTTP10Client(t *testing.T) {
+	for _, path := range interimPaths {
+		t.Run(path.name, func(t *testing.T) {
+			const interim = "HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n"
+			origin := startInterimOrigin(t, interim)
+			proxyAddr := startInterimProxy(t, origin, path.direct)
+			conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+			if err != nil {
+				t.Fatalf("dial proxy: %v", err)
+			}
+			defer func() { _ = conn.Close() }()
+			if _, werr := io.WriteString(conn, forwardRequest(path.direct, origin, "GET", "/page", "HTTP/1.0", "")); werr != nil {
+				t.Fatalf("write request: %v", werr)
+			}
+
+			_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			raw, _ := io.ReadAll(conn)
+			got := string(raw)
+			if strings.Contains(got, "Early Hints") {
+				t.Errorf("HTTP/1.0 client received an interim response: %q", got)
+			}
+			if !strings.HasPrefix(got, "HTTP/1.1 200 OK\r\n") {
+				t.Fatalf("HTTP/1.0 client response: want a 200 OK status line first, got %q", got)
+			}
+			if !strings.HasSuffix(got, "/page") {
+				t.Errorf("HTTP/1.0 client response body: want %q at the end, got %q", "/page", got)
+			}
+		})
+	}
+}
+
+// TestF2_EachRequestGetsOwnFinalResponse verifies that reading past an interim
+// response keeps the upstream reader aligned: after one exchange that carried a
+// 1xx, the next request on the same client connection is answered by its own
+// final response and not by the previous request's.
+func TestF2_EachRequestGetsOwnFinalResponse(t *testing.T) {
+	for _, path := range interimPaths {
+		t.Run(path.name, func(t *testing.T) {
+			origin := startBodylessInterimOrigin(t, "HTTP/1.1 100 Continue\r\n\r\n")
+			proxyAddr := startInterimProxy(t, origin, path.direct)
+			conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+			if err != nil {
+				t.Fatalf("dial proxy: %v", err)
+			}
+			defer func() { _ = conn.Close() }()
+			br := bufio.NewReader(conn)
+
+			for _, wantPath := range []string{"/first", "/second"} {
+				if _, werr := io.WriteString(conn, forwardRequest(path.direct, origin, "GET", wantPath, "HTTP/1.1", "")); werr != nil {
+					t.Fatalf("write request %s: %v", wantPath, werr)
+				}
+				msgs := readThroughFinal(t, conn, br)
+				last := msgs[len(msgs)-1]
+				if last.statusCode != http.StatusOK {
+					t.Errorf("request %s: want final 200, got %d", wantPath, last.statusCode)
+				}
+				if got := last.header.Get("X-Request-Path"); got != wantPath {
+					t.Errorf("request %s was answered by the final response for %q", wantPath, got)
+				}
+			}
+		})
+	}
+}
 
 // ---------------------------------------------------------------------------
 // G1 — RFC 9110 §7.6.2: Decrement Max-Forwards for TRACE/OPTIONS
