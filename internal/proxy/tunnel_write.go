@@ -24,7 +24,7 @@ func (c *tunnelConn) Read(p []byte) (int, error) {
 		if remaining <= 0 {
 			return 0, errTunnelIdle
 		}
-		if err := c.Conn.SetReadDeadline(time.Now().Add(remaining)); err != nil {
+		if err := c.SetReadDeadline(time.Now().Add(remaining)); err != nil {
 			return 0, err
 		}
 		n, err := c.Conn.Read(p)
@@ -48,7 +48,7 @@ func (c *tunnelConn) Write(p []byte) (int, error) {
 	}
 	total := 0
 	for len(p) > 0 {
-		if err := c.Conn.SetWriteDeadline(time.Now().Add(clock.timeout)); err != nil {
+		if err := c.SetWriteDeadline(time.Now().Add(clock.timeout)); err != nil {
 			return total, err
 		}
 		n, err := writeTunnelChunk(c.Conn, p, clock.timeout)
