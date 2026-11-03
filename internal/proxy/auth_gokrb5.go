@@ -29,7 +29,7 @@ const passwordRejectWarnInterval = 5 * time.Minute
 // KDC rejects the configured password. gokrb5 flattens a KRB-ERROR into a
 // formatted message with no unwrappable cause (krberror.Krberror carries text
 // only), so the message is the only signal available to the caller.
-var passwordRejectMarkers = []string{
+var passwordRejectMarkers = [...]string{
 	// KDC_ERR_PREAUTH_FAILED (RFC 4120 error 24): the pre-authentication data
 	// derived from the configured password did not verify.
 	"KDC_ERR_PREAUTH_FAILED",
@@ -243,6 +243,12 @@ func (p *Gokrb5TokenProvider) GetToken() (string, error) {
 func (p *Gokrb5TokenProvider) rejectPassword(fingerprint [sha256.Size]byte) {
 	p.passwordRejected = true
 	p.rejectedFingerprint = fingerprint
+	p.warnPasswordRejected()
+}
+
+// warnPasswordRejected logs that logins are refused, and records when so the
+// next warning waits passwordRejectWarnInterval.
+func (p *Gokrb5TokenProvider) warnPasswordRejected() {
 	p.lastRejectWarn = time.Now()
 	slog.Warn("KDC rejected the configured password; refusing Kerberos logins until the password changes",
 		"password_source", p.passwordSource(), "retry_after", passwordRejectWarnInterval.String())
@@ -273,9 +279,7 @@ func (p *Gokrb5TokenProvider) checkPasswordRejected() error {
 		return nil
 	}
 	if time.Since(p.lastRejectWarn) >= passwordRejectWarnInterval {
-		p.lastRejectWarn = time.Now()
-		slog.Warn("KDC rejected the configured password; refusing Kerberos logins until the password changes",
-			"password_source", p.passwordSource(), "retry_after", passwordRejectWarnInterval.String())
+		p.warnPasswordRejected()
 	}
 	return &CredentialError{authError{
 		msg: fmt.Sprintf("KDC rejected the configured password; refusing Kerberos logins until the password changes (source: %s)", p.passwordSource()),
