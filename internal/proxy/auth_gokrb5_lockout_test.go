@@ -122,6 +122,9 @@ func TestGokrb5TokenProviderLogsInOnlyInsideGetToken(t *testing.T) {
 	if _, err := cb.GetToken(); err != nil {
 		t.Fatalf("first GetToken: %v", err)
 	}
+	if got := as.count(); got == 0 {
+		t.Fatal("the first GetToken reached no AS exchange: the KDC counter is not observing logins")
+	}
 
 	// The account password changes at the KDC while the proxy holds the old
 	// one, so any login the proxy attempts from now on is rejected.
@@ -305,7 +308,14 @@ func TestGokrb5TokenProviderBurstStopsAtThreshold(t *testing.T) {
 	if got := as.count(); got > int(CBConsecutiveFailures) {
 		t.Errorf("KDC served %d AS exchanges for %d concurrent clients, want at most %d (the breaker threshold)", got, clients, CBConsecutiveFailures)
 	}
+	responses := make([]string, 0, clients)
 	for status := range statuses {
+		responses = append(responses, status)
+	}
+	if len(responses) != clients {
+		t.Fatalf("collected %d client responses, want %d", len(responses), clients)
+	}
+	for _, status := range responses {
 		if !strings.Contains(status, "502") {
 			t.Errorf("client received %q, want a 502 error response", status)
 		}
