@@ -168,9 +168,6 @@ func (s *ClientSession) nextDirectRequest(boundHost, target string, iter int) *h
 // because a side signalled close.
 func (s *ClientSession) relayDirect(req *http.Request, targetConn net.Conn, upstreamReader *bufio.Reader, target string, iter int) bool {
 	slog.Debug("noproxy HTTP response forwarding start", "target", target, "client_addr", s.clientAddr, "iter", iter)
-	// readThroughInterim relays any 1xx interim response (and reads on to the
-	// final one) so a following request on this connection is answered by its
-	// own response. Via is injected per response, interim ones included.
 	resp, requestErr, clientErr, rerr := exchangeRequest(s.conn, targetConn, req, func() error {
 		// Write request in origin form (not proxy form).
 		return req.Write(targetConn)

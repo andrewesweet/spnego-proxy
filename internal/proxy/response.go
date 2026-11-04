@@ -151,8 +151,8 @@ var errMalformedResponse = errors.New("malformed upstream response header")
 //
 // On success it returns the parsed response (caller must close Body).
 // On Content-Length errors it returns errContentLengthInvalid so the caller
-// can send a 502. On other parse failures it returns a different error,
-// signalling the caller to fall back to raw relay.
+// can send a 502. Other parse failures are returned unchanged for callers to
+// pass to handleUpstreamResponseError.
 func readUpstreamResponse(upstreamReader *bufio.Reader, req *http.Request, pseudonym string) (*http.Response, error) {
 	resp, err := http.ReadResponse(upstreamReader, req)
 	if err != nil {
@@ -164,9 +164,8 @@ func readUpstreamResponse(upstreamReader *bufio.Reader, req *http.Request, pseud
 		// The match on the error string is deliberate: Go's
 		// net/http does not export a typed error for this case.
 		// If the wording changes in a future Go release, the
-		// worst outcome is falling through to the raw-relay path
-		// — not a security issue, since Go already rejected
-		// the malformed response.
+		// error is returned unchanged and handled as a generic parse failure.
+		// The response remains rejected by handleUpstreamResponseError.
 		if strings.Contains(err.Error(), "Content-Length") {
 			return nil, errContentLengthInvalid
 		}
