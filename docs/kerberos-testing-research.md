@@ -384,9 +384,13 @@ networks:
 ### Phase 1: Extend Pure Go Mock KDC Coverage
 
 For implemented coverage, see [Current Test Coverage](#current-test-coverage).
-The remaining step is to extend the existing mock-KDC setup with a fake upstream
-that validates the `Proxy-Authorization: Negotiate` header through the full proxy
-chain.
+The mock-KDC suite already drives the full proxy chain with a fake upstream and
+asserts the `Proxy-Authorization: Negotiate` header
+(`TestProxyChainWithRealToken` in `internal/proxy/gokrb5_integration_test.go`).
+The remaining gap is coverage the mock KDC cannot give: enctypes, pre-auth
+policy, and ticket lifetimes that a real KDC negotiates. Extend the existing
+mock-KDC tests only for scenarios they do not already assert; the protocol
+fidelity gap is what Phase 2 closes.
 
 ### Phase 2: Docker-Based Integration Tests (Weeks)
 
