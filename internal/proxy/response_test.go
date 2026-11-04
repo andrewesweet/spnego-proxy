@@ -67,6 +67,10 @@ func TestD3_InterimResponseHeaderBytesValidated(t *testing.T) {
 	}()
 
 	resp, clientErr, rerr := readThroughInterim(client, req, readOne)
+	// Closing the client end unblocks the reader above: on a rejected interim
+	// response nothing was serialized, so the read ends at once with EOF
+	// instead of holding the test until the deadline.
+	_ = client.Close()
 	if resp != nil {
 		defer func() { _ = resp.Body.Close() }()
 	}
