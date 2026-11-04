@@ -150,7 +150,7 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 		passwordFile: passwordFile,
 		settings:     settings,
 	}
-	rand.Read(p.fingerprintKey[:])
+	_, _ = rand.Read(p.fingerprintKey[:]) // Always fills the buffer and returns a nil error (Go 1.24+).
 	if passwordFile == "" {
 		// Nothing to re-read: keep the typed password for the per-call client.
 		p.stdinPassword = passwd
