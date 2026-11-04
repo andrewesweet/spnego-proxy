@@ -1315,7 +1315,9 @@ func TestForwardTunnelEOFAllowsReverseReply(t *testing.T) {
 				if _, err := io.WriteString(client, "request"); err != nil {
 					t.Fatal(err)
 				}
-				closeWrite(client)
+				if err := closeWrite(client); err != nil {
+					t.Fatalf("half-close client: %v", err)
+				}
 				request, err := io.ReadAll(upstream)
 				if err != nil || string(request) != "request" {
 					t.Fatalf("half-closed request: %q, %v", request, err)
@@ -1323,7 +1325,9 @@ func TestForwardTunnelEOFAllowsReverseReply(t *testing.T) {
 				if _, err := io.WriteString(upstream, "reply"); err != nil {
 					t.Fatal(err)
 				}
-				closeWrite(upstream)
+				if err := closeWrite(upstream); err != nil {
+					t.Fatalf("half-close upstream: %v", err)
+				}
 				reply, err := io.ReadAll(client)
 				if err != nil || string(reply) != "reply" {
 					t.Fatalf("reply after EOF: %q, %v", reply, err)

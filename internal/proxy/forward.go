@@ -147,7 +147,7 @@ func handleClient(conn net.Conn, cfg Config) {
 	// reads EOF on the response stream rather than receiving a RST that
 	// could discard buffered response bytes (issue #75). Deferred AFTER
 	// conn.Close so it runs FIRST (LIFO order).
-	defer closeWrite(conn)
+	defer func() { _ = closeWrite(conn) }()
 	if cfg.Pseudonym == "" {
 		slog.Error("empty pseudonym in ProxyConfig, refusing connection", "client_addr", conn.RemoteAddr())
 		return
