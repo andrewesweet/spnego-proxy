@@ -139,6 +139,9 @@ func TestD3_ExpectRaceDoesNotReuseConnection(t *testing.T) {
 	resp, writeErr, clientErr, err := exchangeRequest(client, upstream, req, writeRequest, func() (*http.Response, error) {
 		return final, nil
 	})
+	if resp != nil {
+		defer func() { _ = resp.Body.Close() }()
+	}
 	if err != nil || clientErr != nil || writeErr != nil {
 		t.Fatalf("exchangeRequest = (err %v, clientWriteErr %v, requestWriteErr %v), want all nil", err, clientErr, writeErr)
 	}
