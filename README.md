@@ -281,9 +281,8 @@ that:
   effective password changes or the proxy shuts down. Logins resume on
   their own when the effective password differs.
   Re-saving the same password or adding or removing trailing CR/LF characters
-  does not allow a retry. If the password is correct, restart the proxy to
-  allow a retry. A password typed at the terminal cannot change, so logins
-  stay refused until the proxy restarts.
+  does not allow a retry. A password typed at the terminal cannot change, so
+  logins stay refused until the proxy restarts.
 
 ### CGo boundary (macOS)
 
