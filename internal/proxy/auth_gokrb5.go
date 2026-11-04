@@ -38,8 +38,11 @@ func isPasswordRejection(err error) bool {
 // Gokrb5TokenProvider uses the pure-Go gokrb5 library for SPNEGO token acquisition.
 // This is the fallback path used on non-macOS platforms or when -user is specified.
 //
-// The provider builds password and ticket-cache clients for each token
-// acquisition and destroys both before returning. Go does not provide primitives
+// The provider keeps a ticket-cache client between acquisitions and reuses it
+// while its TGT has lifetime left, so a valid TGT costs no password login. When
+// the TGT is missing or near expiry, the password login runs inside GetToken;
+// the password client never outlives that call. The ticket-cache client holds
+// no password and starts no renewal goroutine. Go does not provide primitives
 // to scrub string-backed memory, so the library's password string cannot be
 // reliably zeroed and may remain in memory after the call. Use a keytab where
 // this is a concern.
@@ -53,6 +56,12 @@ type Gokrb5TokenProvider struct {
 	settings     []func(*client.Settings)
 
 	mu sync.Mutex
+	// ticketClient caches the TGT and service tickets between acquisitions. It
+	// is reused while ticketRefreshAt is in the future; past that point the next
+	// acquisition logs in again and replaces it. It holds no password and runs
+	// no renewal goroutine, so reusing it cannot log in outside GetToken.
+	ticketClient    *client.Client
+	ticketRefreshAt time.Time
 	// stdinPassword holds the password when it was typed at a terminal
 	// (-password-file omitted): there is no file to re-read, so the provider
 	// keeps it for the lifetime of the process.
@@ -187,19 +196,10 @@ func (p *Gokrb5TokenProvider) GetToken() (string, error) {
 		return "", err
 	}
 
-	passwd, err := p.readPassword()
+	krbClient, err := p.ticketGrantingClient()
 	if err != nil {
-		return "", &CredentialError{authError{msg: "failed to get password: check password input and file permissions"}}
+		return "", err
 	}
-	fingerprint := p.passwordFingerprint(passwd)
-	krbClient, err := p.acquireCredential(passwd)
-	if err != nil {
-		if isPasswordRejection(err) {
-			p.rejectPassword(fingerprint)
-		}
-		return "", &CredentialError{authError{msg: fmt.Sprintf("could not acquire client credential: %v", err), cause: err}}
-	}
-	defer krbClient.Destroy()
 	spnegoClient := spnego.SPNEGOClient(krbClient, p.spn)
 	token, err := spnegoClient.InitSecContext()
 	if err != nil {
@@ -212,25 +212,54 @@ func (p *Gokrb5TokenProvider) GetToken() (string, error) {
 	return base64.StdEncoding.EncodeToString(b), nil
 }
 
+// ticketGrantingClient returns a client that mints service tickets without a
+// password login. A cached client is reused while its TGT has lifetime left;
+// otherwise the password login runs here, inside GetToken, where the circuit
+// breaker counts it.
+func (p *Gokrb5TokenProvider) ticketGrantingClient() (*client.Client, error) {
+	if p.ticketClient != nil && time.Now().Before(p.ticketRefreshAt) {
+		return p.ticketClient, nil
+	}
+	passwd, err := p.readPassword()
+	if err != nil {
+		return nil, &CredentialError{authError{msg: "failed to get password: check password input and file permissions"}}
+	}
+	fingerprint := p.passwordFingerprint(passwd)
+	krbClient, refreshAt, err := p.acquireCredential(passwd)
+	if err != nil {
+		if isPasswordRejection(err) {
+			p.rejectPassword(fingerprint)
+		}
+		return nil, &CredentialError{authError{msg: fmt.Sprintf("could not acquire client credential: %v", err), cause: err}}
+	}
+	if p.ticketClient != nil {
+		p.ticketClient.Destroy()
+	}
+	p.ticketClient = krbClient
+	p.ticketRefreshAt = refreshAt
+	return krbClient, nil
+}
+
 // acquireCredential uses ASExchange directly because Login starts automatic
 // renewal, which can retry password logins outside the counted token path.
 // The returned client has only cached tickets, so service-ticket acquisition
 // cannot fall back to a password login, even if the TGT expires during the call.
-func (p *Gokrb5TokenProvider) acquireCredential(passwd []byte) (*client.Client, error) {
+// The returned deadline is when the cached TGT should be replaced.
+func (p *Gokrb5TokenProvider) acquireCredential(passwd []byte) (*client.Client, time.Time, error) {
 	passwordClient := client.NewWithPassword(p.user, p.realm, string(passwd), p.cfg, p.settings...)
 	clear(passwd)
 	defer passwordClient.Destroy()
 	req, err := messages.NewASReqForTGT(passwordClient.Credentials.Domain(), p.cfg, passwordClient.Credentials.CName())
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	rep, err := passwordClient.ASExchange(passwordClient.Credentials.Domain(), req, 0)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	ticket, err := rep.Ticket.Marshal()
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	cache := new(credentials.CCache)
 	cache.DefaultPrincipal.Realm = rep.CRealm
@@ -247,7 +276,22 @@ func (p *Gokrb5TokenProvider) acquireCredential(passwd []byte) (*client.Client, 
 	entry.Server.Realm = rep.Ticket.Realm
 	entry.Server.PrincipalName = rep.Ticket.SName
 	cache.Credentials = []*credentials.Credential{entry}
-	return client.NewFromCCache(cache, p.cfg, p.settings...)
+	krbClient, err := client.NewFromCCache(cache, p.cfg, p.settings...)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	return krbClient, tgtRefreshDeadline(rep.DecryptedEncPart), nil
+}
+
+// tgtRefreshDeadline is when a cached TGT should be replaced: 5/6 through its
+// lifetime, the point gokrb5's own session logic treats as needing renewal, so
+// the cached client is replaced before its ticket stops being usable.
+func tgtRefreshDeadline(part messages.EncKDCRepPart) time.Time {
+	lifetime := part.EndTime.Sub(part.AuthTime)
+	if part.AuthTime.IsZero() || lifetime <= 0 {
+		lifetime = time.Until(part.EndTime)
+	}
+	return part.EndTime.Add(-lifetime / 6)
 }
 
 // passwordFingerprint detects password changes without keeping the password
@@ -333,13 +377,17 @@ func (p *Gokrb5TokenProvider) passwordSource() string {
 	return "password file"
 }
 
-// Close stops further token acquisition and zeroes any password typed at a
-// terminal. Each acquisition destroys its own gokrb5 client, so no client
-// outlives a call. It is idempotent and safe for concurrent use.
+// Close stops further token acquisition, destroys the cached ticket client, and
+// zeroes any password typed at a terminal. It is idempotent and safe for
+// concurrent use.
 func (p *Gokrb5TokenProvider) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.closed = true
+	if p.ticketClient != nil {
+		p.ticketClient.Destroy()
+		p.ticketClient = nil
+	}
 	if p.rejectWarnTicker != nil {
 		p.rejectWarnTicker.Stop()
 		close(p.rejectWarnStop)

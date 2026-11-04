@@ -261,16 +261,15 @@ that:
   no login is attempted; after `-cb-timeout` (default 30s) a single probe
   is allowed.
 - **Every login is counted.** The proxy never lets the Kerberos library
-  renew a ticket with the password in the background: each acquisition
-  performs an explicit password exchange inside the request path, then
-  hands the ticket to a client with no password. The password exchange
-  never starts a renewal goroutine.
-  Both clients are destroyed before returning. A login that fails is counted by
-  the circuit breaker, and no login happens without client traffic. The
-  cost is a KDC exchange per token acquisition where a cached ticket would
-  otherwise have been reused; the alternative, letting the library renew
-  tickets with the password in the background, is what allowed failed
-  logins to escape the breaker.
+  renew a ticket with the password in the background. A password exchange
+  runs inside the request path only when no usable TGT is cached; it hands
+  the ticket to a client with no password, which is kept and reused until
+  5/6 of the TGT's lifetime has passed. That client starts no renewal
+  goroutine, so a login can only happen inside the request path, where the
+  circuit breaker counts it. A login that fails is therefore counted, and
+  no login happens without client traffic. The alternative, letting the
+  library renew tickets with the password in the background, is what
+  allowed failed logins to escape the breaker.
 - **A rejected password stops logins.** When the KDC rejects the
   configured password, the proxy sends no further logins until the
   password value in the file changes. Trailing CR/LF characters are stripped

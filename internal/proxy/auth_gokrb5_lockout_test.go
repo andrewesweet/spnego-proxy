@@ -724,3 +724,43 @@ func TestGokrb5TokenProviderBurstStopsAtThreshold(t *testing.T) {
 		}
 	}
 }
+
+// TestGokrb5TokenProviderReusesCachedTicket pins that a valid TGT is reused
+// instead of logging in again: two token acquisitions with a usable TGT must
+// cost one AS exchange (one password login) and one TGS exchange, because the
+// second acquisition reuses both the cached TGT and the cached service ticket.
+func TestGokrb5TokenProviderReusesCachedTicket(t *testing.T) {
+	kdc, as := startLockoutKDC(t, 10*time.Minute)
+	tgs := &asExchangeCounter{re: regexp.MustCompile(`TGS_REQ from=[^ ]+: selected enctype`)}
+	kdc.Logger.SetOutput(io.MultiWriter(as, tgs))
+	pwFile := writePasswordFile(t, kdc.Principals[testKDCUser].Password, 0o600)
+	p := newLockoutProvider(t, kdc, pwFile)
+
+	first, err := p.GetToken()
+	if err != nil {
+		t.Fatalf("first GetToken: %v", err)
+	}
+	if first == "" {
+		t.Fatal("first GetToken returned an empty token")
+	}
+	if got := as.count(); got != 1 {
+		t.Fatalf("KDC served %d AS exchanges for the first acquisition, want 1", got)
+	}
+
+	second, err := p.GetToken()
+	if err != nil {
+		t.Fatalf("second GetToken: %v", err)
+	}
+	if second == "" {
+		t.Fatal("second GetToken returned an empty token")
+	}
+	if second == first {
+		t.Error("second GetToken returned the same token as the first")
+	}
+	if got := as.count(); got != 1 {
+		t.Errorf("KDC served %d AS exchanges across two acquisitions with a usable TGT, want 1 (a login per acquisition was the defect)", got)
+	}
+	if got := tgs.count(); got != 1 {
+		t.Errorf("KDC served %d TGS exchanges across two acquisitions, want 1 (the cached service ticket should be reused)", got)
+	}
+}
