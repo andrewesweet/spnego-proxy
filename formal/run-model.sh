@@ -56,10 +56,8 @@ fi
 
 rc=0
 seen=
-selected=
 for dir in "$@"; do
   model=$(basename "$dir")
-  selected="$selected $model"
   spec=
   for f in "$dir"/*.tla; do
     [ -f "$f" ] && spec=$f && break
@@ -112,10 +110,9 @@ done
 # checked, so a deleted config cannot leave a stale expectation behind.
 for key in $records; do
   model=${key%%/*}
-  case " $selected " in
-    *" $model "*) ;;
-    *) continue ;;
-  esac
+  if [ "$arg" != all ] && [ "$model" != "$arg" ]; then
+    continue
+  fi
   case " $seen " in
     *" $key "*) ;;
     *)
