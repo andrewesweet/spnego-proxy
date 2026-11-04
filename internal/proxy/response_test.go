@@ -4,8 +4,11 @@ package proxy
 
 import (
 	"errors"
+	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -85,5 +88,64 @@ func TestD3_InterimResponseHeaderBytesValidated(t *testing.T) {
 	}
 	if got := <-received; got != "" {
 		t.Errorf("client received %q, want nothing: a rejected interim response must not be serialized", got)
+	}
+}
+
+// TestD3_ExpectRaceDoesNotReuseConnection verifies that a final response which
+// arrives while an Expect: 100-continue upload is still being written leaves the
+// connection non-reusable.
+//
+// The upstream can answer early (for example 417 Expectation Failed) without
+// reading the request body. Those unwritten body bytes stay ahead of the next
+// request on the upstream connection, so reusing it would answer that request
+// from the wrong message. Both relay paths stop on connectionWillClose, which
+// must therefore report true whenever the response beat the upload.
+func TestD3_ExpectRaceDoesNotReuseConnection(t *testing.T) {
+	client, clientPeer := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = clientPeer.Close() }()
+	upstream, upstreamPeer := net.Pipe()
+	defer func() { _ = upstream.Close() }()
+	defer func() { _ = upstreamPeer.Close() }()
+	// net.Pipe is synchronous; drain both far ends so deadline changes and any
+	// write below cannot block.
+	go func() { _, _ = io.Copy(io.Discard, clientPeer) }()
+	go func() { _, _ = io.Copy(io.Discard, upstreamPeer) }()
+
+	req := &http.Request{
+		Method:     http.MethodPost,
+		URL:        &url.URL{Scheme: "http", Host: "example.test", Path: "/upload"},
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     http.Header{"Expect": {"100-continue"}},
+		Body:       io.NopCloser(strings.NewReader("hello")),
+	}
+	final := &http.Response{
+		Status:     "417 Expectation Failed",
+		StatusCode: http.StatusExpectationFailed,
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     make(http.Header),
+		Body:       http.NoBody,
+	}
+	// The upload is still in flight when the response arrives: the write
+	// finishes, with no error, only after the read has returned.
+	writeRequest := func() error {
+		time.Sleep(100 * time.Millisecond)
+		return nil
+	}
+
+	resp, writeErr, clientErr, err := exchangeRequest(client, upstream, req, writeRequest, func() (*http.Response, error) {
+		return final, nil
+	})
+	if err != nil || clientErr != nil || writeErr != nil {
+		t.Fatalf("exchangeRequest = (err %v, clientWriteErr %v, requestWriteErr %v), want all nil", err, clientErr, writeErr)
+	}
+	if resp == nil {
+		t.Fatal("exchangeRequest returned no response, want the early final response")
+	}
+	if !connectionWillClose(req, resp) {
+		t.Errorf("connectionWillClose = false, want true: a final response that beat the Expect upload must not reuse the connection")
 	}
 }

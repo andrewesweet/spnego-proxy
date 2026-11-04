@@ -285,9 +285,16 @@ func exchangeRequest(client, upstream net.Conn, req *http.Request, writeRequest 
 		_ = upstream.SetWriteDeadline(time.Now())
 		requestWriteErr = <-written
 		if requestWriteErr == nil {
-			// The write completed before cancellation took effect.
+			// The write completed before cancellation took effect, but the
+			// response still beat the upload. The upstream may have answered
+			// without reading the body (RFC 9110 §10.1.1 allows an early 417),
+			// so any body bytes it never consumed stay ahead of the next
+			// request: the connection must not be reused.
 			_ = client.SetReadDeadline(time.Time{})
 			_ = upstream.SetWriteDeadline(time.Time{})
+			if resp != nil {
+				resp.Close = true
+			}
 		} else if resp == nil {
 			// Report the response/relay failure that caused cancellation.
 			requestWriteErr = nil
