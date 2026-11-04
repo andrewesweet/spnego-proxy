@@ -1,6 +1,6 @@
 ---
 name: verify-state-machines
-description: "Re-run the TLA+ model checks that formal/ holds for spnego-proxy's concurrent state machines: the keep-alive relay, the token circuit breaker, the CONNECT tunnel idle timeout, the accept loop and shutdown, the -noproxy direct loop, and the gokrb5 TGT renewal goroutine. Use after changing internal/proxy/forward.go, response.go, connect.go, server.go, direct.go, circuit_breaker.go or auth_gokrb5.go, after changing a -cb-* / -idle-timeout / -noproxy / -timeout flag those machines read, or when you need the shortest path through a state machine that breaks one of its promises."
+description: "Re-run the TLA+ model checks that formal/ holds for spnego-proxy's concurrent state machines: the keep-alive relay, the token circuit breaker, the CONNECT tunnel idle timeout, the accept loop and shutdown, the -noproxy direct loop, and the gokrb5 TGT renewal goroutine. Use after changing internal/proxy/forward.go, response.go, connect.go, server.go, direct.go, circuit_breaker.go or auth_gokrb5.go, after changing a flag listed under 'When to run the checks', or when you need the shortest path through a state machine that breaks one of its promises."
 ---
 
 # Verify the state machines
@@ -73,9 +73,9 @@ prints one line per config:
 - `statechart error` — the checker itself failed; read the named log.
 
 `expected.txt` and the configs must match one to one. The runner refuses to
-start when a config is recorded twice, and fails when a record names a config
-this run did not produce, so a deleted config cannot leave a stale expectation
-behind.
+start when a config is recorded twice, and fails when a record for a selected
+model names a config this run did not produce. Run all models to detect stale
+expectations anywhere in the file.
 
 Exit status: `0` all matched, `1` a verdict differs or is missing from
 `expected.txt`, or the records and configs do not match one to one; `2` the
@@ -188,10 +188,9 @@ connections after the tunnel returns), and the `-idle-timeout` help text in
   closes the tunnel, while the other direction moved data in that read window.
   Break: a long one-way transfer (a download where the client sends nothing)
   loses its other direction at the timeout. **breaks**
-- `NoDataDroppedWhileOpen` — while the tunnel is open, data a side sends reaches
-  a sink that is still reading. Data a stalled sink never read is abandoned by
-  the write deadline and recorded separately (`abandoned`), so a pass cannot
-  claim that such data reached the peer. **breaks**
+- `NoDataDroppedWhileOpen` — see the invariant comment in
+  [`Tunnel.tla`](../../../formal/m3-connect-tunnel/Tunnel.tla) for its precise
+  safety guarantee and delivery limits. **breaks**
 - `NoDeadlock` — an open tunnel never reaches a state with no enabled step.
   Break: a tunnel whose reader stops reading can become stuck without closing.
   This checks for dead ends, not eventual termination. **breaks**

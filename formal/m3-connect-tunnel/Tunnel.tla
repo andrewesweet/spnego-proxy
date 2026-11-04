@@ -209,9 +209,9 @@ Spec == Init /\ [][Next]_vars
 \* other direction at the timeout.
 IdleCutOnlyWhenIdle == ~cutWhileFlowing
 
-\* While the tunnel is open, data a side sends is forwarded to a sink that is
-\* still reading. Data a stalled sink never read is abandoned by the write
-\* deadline instead, which is recorded separately, so a pass cannot claim that
-\* such data reached the peer.
+\* No peer sends data on a direction whose copy has already ended while the
+\* tunnel remains open. This is a safety check, not an eventual-delivery
+\* guarantee. A write timeout closes the tunnel and sets abandoned; this rule
+\* does not account for all queued or in-flight data lost at tunnel closure.
 NoDataDroppedWhileOpen == ~dropped
 ====
