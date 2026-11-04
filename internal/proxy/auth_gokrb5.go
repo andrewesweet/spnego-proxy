@@ -277,7 +277,7 @@ func (p *Gokrb5TokenProvider) rejectPassword(fingerprint [sha256.Size]byte) {
 // warnPasswordRejected logs that logins are refused.
 func (p *Gokrb5TokenProvider) warnPasswordRejected() {
 	slog.Warn("KDC rejected the configured password; refusing Kerberos logins until the password changes",
-		"password_source", p.passwordSource(), "retry_after", passwordRejectWarnInterval.String())
+		"password_source", p.passwordSource(), "recheck_interval", passwordRejectWarnInterval.String())
 }
 
 func (p *Gokrb5TokenProvider) repeatPasswordRejectionWarnings(ticker *time.Ticker, stop <-chan struct{}) {
