@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -91,6 +92,21 @@ func TestD3_InterimResponseHeaderBytesValidated(t *testing.T) {
 	}
 }
 
+// writeCancellationReleaser is a net.Conn that signals when exchangeRequest
+// cancels an in-flight Expect upload, so a test can hold the upload pending and
+// finish it at exactly that moment instead of sleeping.
+type writeCancellationReleaser struct {
+	net.Conn
+	release func()
+}
+
+func (c writeCancellationReleaser) SetWriteDeadline(t time.Time) error {
+	if !t.IsZero() {
+		c.release()
+	}
+	return c.Conn.SetWriteDeadline(t)
+}
+
 // TestD3_ExpectRaceDoesNotReuseConnection verifies that a final response which
 // arrives while an Expect: 100-continue upload is still being written leaves the
 // connection non-reusable.
@@ -129,14 +145,20 @@ func TestD3_ExpectRaceDoesNotReuseConnection(t *testing.T) {
 		Header:     make(http.Header),
 		Body:       http.NoBody,
 	}
-	// The upload is still in flight when the response arrives: the write
-	// finishes, with no error, only after the read has returned.
+	release := make(chan struct{})
+	var once sync.Once
+	releaseUpload := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(releaseUpload) // never leave the upload goroutine blocked
+
+	// The upload stays pending until exchangeRequest cancels it, and that
+	// cancellation is the only thing that releases it. The response therefore
+	// wins the race by construction, with no wall-clock timing involved.
 	writeRequest := func() error {
-		time.Sleep(100 * time.Millisecond)
+		<-release
 		return nil
 	}
 
-	resp, writeErr, clientErr, err := exchangeRequest(client, upstream, req, writeRequest, func() (*http.Response, error) {
+	resp, writeErr, clientErr, err := exchangeRequest(client, writeCancellationReleaser{Conn: upstream, release: releaseUpload}, req, writeRequest, func() (*http.Response, error) {
 		return final, nil
 	})
 	if resp != nil {
