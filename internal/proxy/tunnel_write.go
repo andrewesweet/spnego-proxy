@@ -102,9 +102,14 @@ type upstreamTLSConn struct {
 	transport *tunnelConn
 }
 
+// CloseWrite half-closes the TLS connection. The close_notify alert is sent
+// first, while the tunnel's write deadline still applies, so a peer that stops
+// reading cannot make the alert write outlive the idle timeout. Only then is
+// the write side marked closed, so later writes skip the deadline bookkeeping.
 func (c *upstreamTLSConn) CloseWrite() error {
+	err := c.Conn.CloseWrite()
 	c.transport.writeClosed.Store(true)
-	return c.Conn.CloseWrite()
+	return err
 }
 
 func (c *upstreamTLSConn) Close() error {

@@ -61,8 +61,8 @@ func TestTunnelBufferedWriteBatchesPayload(t *testing.T) {
 	if !bytes.Equal(got, payload) {
 		t.Fatal("buffered forwarding changed the payload")
 	}
-	if calls := counted.writes.Load(); calls == 0 || calls > 1024 {
-		t.Fatalf("1 MiB transfer used %d writes, want at most 1024", calls)
+	if calls := counted.writes.Load(); calls == 0 || calls > 64 {
+		t.Fatalf("1 MiB transfer used %d writes, want at most 64", calls)
 	}
 	if calls := counted.deadlines.Load(); calls > 1024 {
 		t.Fatalf("1 MiB transfer used %d deadline updates, want at most 1024", calls)

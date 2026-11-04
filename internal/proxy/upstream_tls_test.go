@@ -17,10 +17,96 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 )
+
+// observedWriteConn records the writes that reach the transport and whether any
+// of them ran after the tunnel marked its write side closed. It pins the order
+// of upstreamTLSConn.CloseWrite: the close_notify alert must be written while
+// the tunnel's write deadline still applies.
+type observedWriteConn struct {
+	net.Conn
+	transport        *tunnelConn
+	writes           atomic.Int64
+	wroteWhileClosed atomic.Bool
+}
+
+func (c *observedWriteConn) Write(p []byte) (int, error) {
+	c.writes.Add(1)
+	if c.transport.writeClosed.Load() {
+		c.wroteWhileClosed.Store(true)
+	}
+	return c.Conn.Write(p)
+}
+
+func TestTunnelTLSCloseWriteSendsAlertBeforeMarkingWriteClosed(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		certPEM, keyPEM := generateTestCert(t)
+		cert, err := tls.X509KeyPair(certPEM, keyPEM)
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(certPEM) {
+			t.Fatal("add test TLS root")
+		}
+
+		clientRaw, serverRaw := net.Pipe()
+		t.Cleanup(func() { _ = clientRaw.Close() })
+		t.Cleanup(func() { _ = serverRaw.Close() })
+		observed := &observedWriteConn{Conn: clientRaw}
+		transport := &tunnelConn{Conn: observed}
+		observed.transport = transport
+		client := &upstreamTLSConn{
+			Conn: tls.Client(transport, &tls.Config{
+				RootCAs: roots, ServerName: "127.0.0.1", MinVersion: tls.VersionTLS12,
+			}),
+			transport: transport,
+		}
+		server := tls.Server(serverRaw, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+
+		handshakeDone := make(chan error, 1)
+		go func() { handshakeDone <- server.Handshake() }()
+		if err := client.Handshake(); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-handshakeDone; err != nil {
+			t.Fatal(err)
+		}
+
+		// The peer keeps reading so the close_notify alert can be written.
+		serverDone := make(chan error, 1)
+		go func() {
+			buf := make([]byte, 64)
+			for {
+				if _, err := server.Read(buf); err != nil {
+					serverDone <- nil
+					return
+				}
+			}
+		}()
+		t.Cleanup(func() {
+			_ = clientRaw.Close()
+			_ = serverRaw.Close()
+			<-serverDone
+		})
+
+		transport.clock.Store(newTunnelClock(5 * time.Second))
+		before := observed.writes.Load()
+		if err := client.CloseWrite(); err != nil {
+			t.Fatalf("close write: %v", err)
+		}
+		if observed.writes.Load() == before {
+			t.Fatal("CloseWrite wrote no close_notify alert to the transport")
+		}
+		if observed.wroteWhileClosed.Load() {
+			t.Fatal("close_notify was written after the tunnel marked its write side closed, so it bypassed the write deadline")
+		}
+	})
+}
 
 type pacedTLSConn struct {
 	net.Conn
@@ -99,7 +185,8 @@ func TestTunnelTLSRecordProgressAfterHalfClose(t *testing.T) {
 		if err := client.CloseWrite(); err != nil {
 			t.Fatal(err)
 		}
-		_ = client.SetReadDeadline(time.Now().Add(timeout))
+		// No read deadline here: tunnelConn.Read arms the tunnel's idle-clock
+		// deadline on every read, so the clock alone bounds this test.
 		start := time.Now()
 		got, err := io.ReadAll(client)
 		if err != nil || string(got) != payload {
