@@ -25,10 +25,11 @@ func enableKeepAlive(conn net.Conn, period time.Duration) {
 // closeWrite calls CloseWrite on conn if the underlying type supports it.
 // This signals the remote peer that no more data will be sent on this half
 // of the connection, allowing it to read EOF and finish gracefully.
-func closeWrite(conn net.Conn) {
+func closeWrite(conn net.Conn) error {
 	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
-		_ = cw.CloseWrite()
+		return cw.CloseWrite()
 	}
+	return nil
 }
 
 // errTunnelIdle reports that a CONNECT tunnel was closed because neither of
@@ -188,10 +189,10 @@ func forwardHalf(dst net.Conn, src io.Reader, srcConn net.Conn, fromAddr, toAddr
 	slog.Debug("forward start", "from", fromAddr, "to", toAddr)
 	defer slog.Debug("forward done", "from", fromAddr, "to", toAddr)
 	_, err := idleCopy(dst, src, srcConn, clock)
-	logForwardError(err, fromAddr, toAddr)
 	if err == nil {
-		closeWrite(dst)
+		err = closeWrite(dst)
 	}
+	logForwardError(err, fromAddr, toAddr)
 	return err
 }
 

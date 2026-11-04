@@ -108,6 +108,121 @@ func TestTunnelTLSCloseWriteSendsAlertBeforeMarkingWriteClosed(t *testing.T) {
 	})
 }
 
+func TestForwardTunnelTLSHalfCloseTimeoutClosesBothDirections(t *testing.T) {
+	for _, direction := range []string{"upload", "download"} {
+		t.Run(direction, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				const timeout = 500 * time.Millisecond
+				certPEM, keyPEM := generateTestCert(t)
+				cert, err := tls.X509KeyPair(certPEM, keyPEM)
+				if err != nil {
+					t.Fatal(err)
+				}
+				roots := x509.NewCertPool()
+				if !roots.AppendCertsFromPEM(certPEM) {
+					t.Fatal("add test TLS root")
+				}
+				clientRaw, serverRaw := net.Pipe()
+				t.Cleanup(func() { _ = clientRaw.Close() })
+				t.Cleanup(func() { _ = serverRaw.Close() })
+				transport := &tunnelConn{Conn: clientRaw}
+				peer := &upstreamTLSConn{
+					Conn: tls.Client(transport, &tls.Config{
+						RootCAs: roots, ServerName: "127.0.0.1", MinVersion: tls.VersionTLS12,
+					}),
+					transport: transport,
+				}
+				server := tls.Server(serverRaw, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+				handshakeDone := make(chan error, 1)
+				go func() { handshakeDone <- server.Handshake() }()
+				if err := peer.Handshake(); err != nil {
+					t.Fatal(err)
+				}
+				if err := <-handshakeDone; err != nil {
+					t.Fatal(err)
+				}
+
+				client, conn := net.Pipe()
+				serverDone := make(chan struct{})
+				readDone := make(chan struct{})
+				tunnelDone := make(chan struct{})
+				defer func() {
+					_ = client.Close()
+					_ = conn.Close()
+					_ = clientRaw.Close()
+					_ = serverRaw.Close()
+					<-serverDone
+					<-readDone
+					<-tunnelDone
+				}()
+				requestDone := make(chan error, 1)
+				go func() {
+					defer close(serverDone)
+					request := make([]byte, len("request"))
+					_, err := io.ReadFull(server, request)
+					if err == nil && string(request) != "request" {
+						err = errors.New("forwarded request changed")
+					}
+					requestDone <- err
+					if err != nil {
+						return
+					}
+					for {
+						if _, err := io.WriteString(server, "a"); err != nil {
+							return
+						}
+						time.Sleep(timeout / 10)
+					}
+				}()
+				var reverseBytes atomic.Int64
+				go func() {
+					defer close(readDone)
+					buf := make([]byte, 1)
+					for {
+						n, err := client.Read(buf)
+						reverseBytes.Add(int64(n))
+						if err != nil {
+							return
+						}
+					}
+				}()
+				go func() {
+					defer close(tunnelDone)
+					requestReader := bufio.NewReader(strings.NewReader("request"))
+					responseReader := bufio.NewReader(peer)
+					if direction == "upload" {
+						forwardTunnel(conn, peer, requestReader, responseReader, timeout)
+					} else {
+						forwardTunnel(peer, conn, responseReader, requestReader, timeout)
+					}
+				}()
+				if err := <-requestDone; err != nil {
+					t.Fatalf("forward request before EOF: %v", err)
+				}
+				time.Sleep(timeout / 2)
+				if got := reverseBytes.Load(); got < 2 {
+					t.Fatalf("reverse traffic delivered %d bytes, want at least two", got)
+				}
+				select {
+				case <-tunnelDone:
+				case <-time.After(2 * timeout):
+					t.Fatal("TLS half-close timeout kept tunnel alive with reverse traffic")
+				}
+				if !transport.writeClosed.Load() {
+					t.Fatal("tunnel stopped before TLS half-close completed")
+				}
+				for _, done := range []chan struct{}{serverDone, readDone} {
+					select {
+					case <-done:
+					case <-time.After(timeout):
+						t.Error("half-close failure did not close both tunnel connections")
+					}
+				}
+			})
+		})
+	}
+}
+
 type pacedTLSConn struct {
 	net.Conn
 	interval time.Duration
