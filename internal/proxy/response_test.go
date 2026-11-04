@@ -67,6 +67,9 @@ func TestD3_InterimResponseHeaderBytesValidated(t *testing.T) {
 	}()
 
 	resp, clientErr, rerr := readThroughInterim(client, req, readOne)
+	if resp != nil {
+		defer func() { _ = resp.Body.Close() }()
+	}
 	if !errors.Is(rerr, errMalformedResponse) {
 		t.Fatalf("readThroughInterim error = %v, want errMalformedResponse", rerr)
 	}
