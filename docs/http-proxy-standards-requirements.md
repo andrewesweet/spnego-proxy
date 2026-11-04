@@ -502,9 +502,12 @@ Defined error types relevant to spnego-proxy:
 **Level**: MUST
 **Details**: If a client sends `Expect: 100-continue`, the proxy must forward the Expect header to the upstream (unless the upstream is known to be HTTP/1.0).
 
+For plain HTTP on both upstream and `-noproxy` routes, the proxy reads responses while forwarding an `Expect: 100-continue` upload. An HTTP/1.1 client can therefore receive `100 Continue` before sending its body. If the endpoint instead sends an early final response, the proxy relays it and closes the connection when the upload is incomplete.
+
 **Testing strategy**:
 
 - **White-box integration test**: Client sends `Expect: 100-continue`. Assert the upstream receives the `Expect` header.
+- **Upload regression test**: `TestF2_ExpectContinueBeforeUpload` in [protocol_edge_cases_test.go](../internal/proxy/protocol_edge_cases_test.go) covers clients that wait for `100 Continue` before sending fixed-length or chunked bodies, and early final rejection without an upload, on both routes.
 - **Response handling**: See [F2](#f2-interim-responses).
 - **Traceability**: RFC 9110 §10.1.1 ¶4.
 
@@ -514,6 +517,8 @@ Defined error types relevant to spnego-proxy:
 
 **Level**: MUST / MUST NOT
 **Details**: For each request, the proxy keeps reading after every 1xx response other than `101 Switching Protocols` until the final response arrives. It relays interim responses to HTTP/1.1 clients and suppresses them for HTTP/1.0 clients, regardless of whether the request includes `Expect`. Each relayed response carries the proxy's `Via` entry. The interim loop stops at 101 because the HTTP message stream ends at a protocol switch.
+
+Relayed interim responses have no body and omit `Content-Length`, `Transfer-Encoding`, and `Trailer` headers. Header names and values are validated before serialization on both routes.
 
 This behavior applies to plain HTTP and CONNECT through the upstream proxy, and to plain HTTP on the `-noproxy` direct path. Direct CONNECT establishes a TCP tunnel without reading an upstream HTTP response. On upstream CONNECT, interim responses do not establish or reject the tunnel; the subsequent final response determines the outcome. On persistent HTTP connections, reading through interim responses keeps each final response paired with its own request.
 

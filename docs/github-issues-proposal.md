@@ -620,10 +620,7 @@ hardening, but they are MUST-level requirements that affect correctness.
 > **Note**: The implementation and testing details below are suggestions. The
 > assignee is free to vary the approach as long as the same goal is reached.
 
-1. **F1 (Expect: 100-continue)**: Go's `http.ReadRequest` strips the Expect
-   header by default for body handling. Verify whether `WriteProxy` re-includes
-   it. If not, preserve it manually before forwarding. This may require saving the
-   Expect value before ReadRequest processes it.
+1. **F1**: See the authoritative [Expect forwarding requirements and upload regression coverage](http-proxy-standards-requirements.md#f1-forward-expect-100-continue).
 
 2. **F2**: Implemented. See the authoritative [interim response requirements and regression coverage](http-proxy-standards-requirements.md#f2-interim-responses).
 
