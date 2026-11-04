@@ -256,7 +256,16 @@ func relayInterimResponse(client net.Conn, req *http.Request, resp *http.Respons
 // a client waiting for 100 Continue can receive it before sending its body.
 // Other requests retain the synchronous write-before-read path.
 func exchangeRequest(client, upstream net.Conn, req *http.Request, writeRequest func() error, readOne func() (*http.Response, error)) (resp *http.Response, requestWriteErr, clientWriteErr, err error) {
-	if req.Body == nil || req.Body == http.NoBody || !strings.EqualFold(req.Header.Get("Expect"), "100-continue") {
+	expectContinue := false
+	for _, value := range req.Header.Values("Expect") {
+		for token := range strings.SplitSeq(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "100-continue") {
+				expectContinue = true
+				break
+			}
+		}
+	}
+	if req.Body == nil || req.Body == http.NoBody || !expectContinue {
 		if requestWriteErr = writeRequest(); requestWriteErr != nil {
 			return
 		}

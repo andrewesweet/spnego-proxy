@@ -239,13 +239,16 @@ var interimPaths = []struct {
 func TestF2_ExpectContinueBeforeUpload(t *testing.T) {
 	for _, path := range interimPaths {
 		for _, tc := range []struct {
-			name    string
-			chunked bool
-			reject  bool
+			name        string
+			chunked     bool
+			reject      bool
+			expectValue string
 		}{
 			{name: "content length"},
 			{name: "chunked", chunked: true},
 			{name: "early final", reject: true},
+			{name: "expect list", expectValue: "100-continue, 100-continue"},
+			{name: "multiple expect fields", expectValue: "other-expectation\r\nExpect: other,\t100-Continue \t"},
 		} {
 			t.Run(path.name+"/"+tc.name, func(t *testing.T) {
 				listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -303,6 +306,9 @@ func TestF2_ExpectContinueBeforeUpload(t *testing.T) {
 					headers = strings.Replace(headers, fmt.Sprintf("Content-Length: %d", len(body)), "Transfer-Encoding: chunked", 1)
 					headers = strings.Replace(headers, "100-continue", "100-Continue", 1)
 					payload = fmt.Sprintf("%x\r\n%s\r\n0\r\n\r\n", len(body), body)
+				}
+				if tc.expectValue != "" {
+					headers = strings.Replace(headers, "100-continue", tc.expectValue, 1)
 				}
 				if _, err := io.WriteString(conn, headers); err != nil {
 					t.Fatal(err)
