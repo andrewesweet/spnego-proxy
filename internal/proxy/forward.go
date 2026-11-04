@@ -290,15 +290,16 @@ func (s *ClientSession) relayViaUpstream(req *http.Request, iter int) bool {
 	injectVia(req.Header, req.Proto, s.cfg.Pseudonym)
 
 	slog.Debug("proxy request", "method", req.Method, "uri", req.RequestURI, "proto", req.Proto, "headers", len(req.Header), "client_addr", s.clientAddr, "upstream_addr", s.cfg.Upstream, "via", req.Header.Get(headerVia), "iter", iter)
-	if err := req.WriteProxy(s.proxyConn); err != nil {
-		slog.Error("failed to write request to proxy", "error", err, "error_type", errConnectionTerminated.errorType, "client_addr", s.clientAddr, "upstream_addr", s.cfg.Upstream, "method", req.Method, "host", req.Host)
+	resp, requestErr, clientErr, rerr := exchangeRequest(s.conn, s.proxyConn, req, func() error {
+		return req.WriteProxy(s.proxyConn)
+	}, func() (*http.Response, error) {
+		return readUpstreamResponse(s.upstreamReader, req, s.cfg.Pseudonym)
+	})
+	if requestErr != nil {
+		slog.Error("failed to write request to proxy", "error", requestErr, "error_type", errConnectionTerminated.errorType, "client_addr", s.clientAddr, "upstream_addr", s.cfg.Upstream, "method", req.Method, "host", req.Host)
 		writeHTTPError(s.conn, errConnectionTerminated)
 		return false
 	}
-
-	resp, clientErr, rerr := readThroughInterim(s.conn, req, func() (*http.Response, error) {
-		return readUpstreamResponse(s.upstreamReader, req, s.cfg.Pseudonym)
-	})
 	if clientErr != nil {
 		logForwardError(clientErr, s.proxyConn.RemoteAddr(), s.conn.RemoteAddr())
 		return false

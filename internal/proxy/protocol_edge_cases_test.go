@@ -233,6 +233,123 @@ var interimPaths = []struct {
 	{"noproxy direct", true},
 }
 
+// RFC 9110 §10.1.1 permits a client to withhold its body until 100 Continue.
+// An endpoint that sends 100 before reading the body must unblock that client;
+// buffering the entire upload before reading responses would deadlock.
+func TestF2_ExpectContinueBeforeUpload(t *testing.T) {
+	for _, path := range interimPaths {
+		for _, tc := range []struct {
+			name    string
+			chunked bool
+			reject  bool
+		}{
+			{name: "content length"},
+			{name: "chunked", chunked: true},
+			{name: "early final", reject: true},
+		} {
+			t.Run(path.name+"/"+tc.name, func(t *testing.T) {
+				listener, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = listener.Close() })
+				responseSent := make(chan error, 1)
+				endpointErr := make(chan error, 1)
+				go func() {
+					conn, err := listener.Accept()
+					if err != nil {
+						responseSent <- err
+						return
+					}
+					defer func() { _ = conn.Close() }()
+					_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+					req, err := http.ReadRequest(bufio.NewReader(conn))
+					if err != nil {
+						responseSent <- err
+						return
+					}
+					if tc.reject {
+						_, err = io.WriteString(conn, "HTTP/1.1 417 Expectation Failed\r\nContent-Length: 6\r\n\r\ndenied")
+						responseSent <- err
+						endpointErr <- err
+						return
+					}
+					if _, err = io.WriteString(conn, "HTTP/1.1 100 Continue\r\n\r\n"); err != nil {
+						responseSent <- err
+						return
+					}
+					responseSent <- nil
+					body, err := io.ReadAll(req.Body)
+					_ = req.Body.Close()
+					if err == nil {
+						_, err = fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
+					}
+					endpointErr <- err
+				}()
+
+				origin := listener.Addr().String()
+				proxyAddr := startInterimProxy(t, origin, path.direct)
+				conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = conn.Close() }()
+				_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+				const body = "hello upload"
+				raw := forwardRequest(path.direct, origin, "POST", "/upload", "HTTP/1.1", body)
+				headers := strings.TrimSuffix(raw, body)
+				payload := body
+				if tc.chunked {
+					headers = strings.Replace(headers, fmt.Sprintf("Content-Length: %d", len(body)), "Transfer-Encoding: chunked", 1)
+					headers = strings.Replace(headers, "100-continue", "100-Continue", 1)
+					payload = fmt.Sprintf("%x\r\n%s\r\n0\r\n\r\n", len(body), body)
+				}
+				if _, err := io.WriteString(conn, headers); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case err := <-responseSent:
+					if err != nil {
+						t.Fatalf("endpoint failed before sending response: %v", err)
+					}
+				case <-time.After(3 * time.Second):
+					t.Fatal("endpoint did not receive request headers")
+				}
+				reader := bufio.NewReader(conn)
+				if tc.reject {
+					messages := readThroughFinal(t, conn, reader)
+					if len(messages) != 1 || messages[0].statusCode != http.StatusExpectationFailed || messages[0].body != "denied" {
+						t.Fatalf("early final response must arrive without uploading: %v", messages)
+					}
+					if _, err := reader.ReadByte(); err != io.EOF {
+						t.Fatalf("incomplete upload connection must close: %v", err)
+					}
+					if err := <-endpointErr; err != nil {
+						t.Fatal(err)
+					}
+					return
+				}
+				resp, err := http.ReadResponse(reader, nil)
+				if err != nil {
+					t.Fatalf("endpoint sent 100, but waiting client received no permission to upload: %v", err)
+				}
+				_ = resp.Body.Close()
+				assertStatusCode(t, resp, http.StatusContinue)
+				if _, err := io.WriteString(conn, payload); err != nil {
+					t.Fatal(err)
+				}
+				messages := readThroughFinal(t, conn, reader)
+				if len(messages) != 1 || messages[0].statusCode != http.StatusOK || messages[0].body != body {
+					t.Fatalf("final response must echo complete upload: %v", messages)
+				}
+				if err := <-endpointErr; err != nil {
+					t.Fatalf("endpoint upload failed: %v", err)
+				}
+			})
+		}
+	}
+}
+
 // TestF2_InterimResponsesRelayedBeforeFinal verifies that a 1xx response from
 // upstream is relayed to an HTTP/1.1 client in order and before the final
 // response, and that the final response is still delivered with its own body.

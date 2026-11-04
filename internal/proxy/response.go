@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // logTECLConflict logs the Transfer-Encoding / Content-Length conflict
@@ -250,6 +251,57 @@ func relayInterimResponse(client net.Conn, req *http.Request, resp *http.Respons
 	buf.WriteString("\r\n")
 	_, err := io.WriteString(client, buf.String())
 	return err
+}
+
+// exchangeRequest reads responses while an Expect upload is being written, so
+// a client waiting for 100 Continue can receive it before sending its body.
+// Other requests retain the synchronous write-before-read path.
+func exchangeRequest(client, upstream net.Conn, req *http.Request, writeRequest func() error, readOne func() (*http.Response, error)) (resp *http.Response, requestWriteErr, clientWriteErr, err error) {
+	if req.Body == nil || req.Body == http.NoBody || !strings.EqualFold(req.Header.Get("Expect"), "100-continue") {
+		if requestWriteErr = writeRequest(); requestWriteErr != nil {
+			return
+		}
+		resp, clientWriteErr, err = readThroughInterim(client, req, readOne)
+		return
+	}
+
+	written := make(chan error, 1)
+	go func() {
+		writeErr := writeRequest()
+		if writeErr != nil {
+			// Wake a response read if the upload fails without a response.
+			_ = upstream.SetReadDeadline(time.Now())
+		}
+		written <- writeErr
+	}()
+	resp, clientWriteErr, err = readThroughInterim(client, req, readOne)
+	select {
+	case requestWriteErr = <-written:
+	default:
+		// A final response (for example 417) or a read/relay failure can
+		// arrive while the client still withholds its body. Unblock both
+		// possible upload waits and join before either reader is reused.
+		_ = client.SetReadDeadline(time.Now())
+		_ = upstream.SetWriteDeadline(time.Now())
+		requestWriteErr = <-written
+		if requestWriteErr == nil {
+			// The write completed before cancellation took effect.
+			_ = client.SetReadDeadline(time.Time{})
+			_ = upstream.SetWriteDeadline(time.Time{})
+		} else if resp == nil {
+			// Report the response/relay failure that caused cancellation.
+			requestWriteErr = nil
+		}
+	}
+	// A failed/cancelled upload must not prevent reading an early final body.
+	_ = upstream.SetReadDeadline(time.Time{})
+	if resp != nil && requestWriteErr != nil {
+		// Preserve an early final response, but never reuse its incomplete
+		// request stream, even if the upload failed before we could cancel it.
+		resp.Close = true
+		requestWriteErr = nil
+	}
+	return
 }
 
 // readThroughInterim reads responses with readOne until the final response

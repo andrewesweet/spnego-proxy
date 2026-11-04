@@ -167,18 +167,14 @@ func (s *ClientSession) nextDirectRequest(boundHost, target string, iter int) *h
 // false means the connection must be closed, either because of an error or
 // because a side signalled close.
 func (s *ClientSession) relayDirect(req *http.Request, targetConn net.Conn, upstreamReader *bufio.Reader, target string, iter int) bool {
-	// Write request in origin form (not proxy form).
-	if err := req.Write(targetConn); err != nil {
-		s.logDirectError("noproxy write request", err, target)
-		writeHTTPError(s.conn, errConnectionTerminated)
-		return false
-	}
-
 	slog.Debug("noproxy HTTP response forwarding start", "target", target, "client_addr", s.clientAddr, "iter", iter)
 	// readThroughInterim relays any 1xx interim response (and reads on to the
 	// final one) so a following request on this connection is answered by its
 	// own response. Via is injected per response, interim ones included.
-	resp, clientErr, rerr := readThroughInterim(s.conn, req, func() (*http.Response, error) {
+	resp, requestErr, clientErr, rerr := exchangeRequest(s.conn, targetConn, req, func() error {
+		// Write request in origin form (not proxy form).
+		return req.Write(targetConn)
+	}, func() (*http.Response, error) {
 		resp, readErr := http.ReadResponse(upstreamReader, req)
 		if readErr != nil {
 			return nil, readErr
@@ -186,6 +182,11 @@ func (s *ClientSession) relayDirect(req *http.Request, targetConn net.Conn, upst
 		injectVia(resp.Header, resp.Proto, s.cfg.Pseudonym)
 		return resp, nil
 	})
+	if requestErr != nil {
+		s.logDirectError("noproxy write request", requestErr, target)
+		writeHTTPError(s.conn, errConnectionTerminated)
+		return false
+	}
 	if clientErr != nil {
 		s.logDirectError("noproxy forward response", clientErr, target)
 		return false
