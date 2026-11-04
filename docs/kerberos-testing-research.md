@@ -42,21 +42,8 @@ implements:
 - **AS Exchange**: Responds to initial login to obtain a TGT
 - **TGS Exchange**: Grants service tickets
 
-Usage:
-
-```go
-principals := map[string][]string{
-    "testuser1": {"testgroup1"},
-    "HTTP/proxy.example.com": {},
-}
-kdc := krb5test.NewKDC(principals, logger)
-kdc.Start()
-defer kdc.Close()
-
-// kdc.KRB5Conf — auto-generated krb5.conf pointing to ephemeral localhost port
-// kdc.Keytab   — generated keytab for all principals
-// kdc.Realm    — realm name
-```
+For a working setup, see `startLockoutKDC` and `newLockoutProvider` in the tests
+linked in [Current Test Coverage](#current-test-coverage).
 
 ### What it enables
 
@@ -66,7 +53,7 @@ defer kdc.Close()
 - **Test the full proxy chain (gokrb5 path)**: Start the mock KDC, start a
   fake upstream "proxy" that validates the `Proxy-Authorization: Negotiate`
   header, start spnego-proxy pointed at both, and send HTTP requests through.
-- **No Docker, no system packages, no network**: Runs entirely in-process on
+- **No Docker, no system packages, no external network**: Runs in-process on
   ephemeral localhost ports. Works in any CI environment.
 - **Parallel test safety**: Each test gets its own KDC on a unique port.
 
@@ -394,18 +381,12 @@ networks:
 
 ## Recommended Phased Approach
 
-### Phase 1: Pure Go Mock KDC (Days)
+### Phase 1: Extend Pure Go Mock KDC Coverage
 
-1. Add `github.com/jcmturner/krb5test` as a test dependency
-2. Write integration tests that:
-   - Start a mock KDC with test principals
-   - Create a `Gokrb5TokenProvider` using the mock's `krb5.conf`
-   - Verify `GetToken()` returns a valid base64-encoded SPNEGO token
-   - Start spnego-proxy with a fake upstream, verify the `Proxy-Authorization`
-     header is injected correctly with a real token
-3. Run these tests in the existing CI pipeline (no infrastructure changes)
-
-**Eliminates**: Most manual testing of the gokrb5 code path.
+For implemented coverage, see [Current Test Coverage](#current-test-coverage).
+The remaining step is to extend the existing mock-KDC setup with a fake upstream
+that validates the `Proxy-Authorization: Negotiate` header through the full proxy
+chain.
 
 ### Phase 2: Docker-Based Integration Tests (Weeks)
 
@@ -444,10 +425,6 @@ Even with all the above, some scenarios will still require manual testing:
   chains, PAC files, etc.
 - **Long-lived operation**: Ticket renewal, credential expiry, cache
   rotation over hours/days.
-
-However, these are relatively narrow scenarios compared to the broad "does
-Kerberos auth work at all" testing that currently requires a full corporate
-setup.
 
 ---
 
