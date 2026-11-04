@@ -502,12 +502,12 @@ Defined error types relevant to spnego-proxy:
 **Level**: MUST
 **Details**: If a client sends `Expect: 100-continue`, the proxy must forward the Expect header to the upstream (unless the upstream is known to be HTTP/1.0).
 
-For plain HTTP on both upstream and `-noproxy` routes, the proxy reads responses while forwarding an `Expect: 100-continue` upload. An HTTP/1.1 client can therefore receive `100 Continue` before sending its body. If the endpoint instead sends an early final response, the proxy relays it and closes the connection when the upload is incomplete.
+For plain HTTP on both upstream and `-noproxy` routes, the proxy reads responses while forwarding an `Expect: 100-continue` upload. It recognizes the `100-continue` token case-insensitively in comma-separated lists across all `Expect` field lines, ignoring surrounding whitespace. An HTTP/1.1 client can therefore receive `100 Continue` before sending its body. If the endpoint instead sends an early final response, the proxy relays it and closes the connection when the upload is incomplete.
 
 **Testing strategy**:
 
 - **White-box integration test**: Client sends `Expect: 100-continue`. Assert the upstream receives the `Expect` header.
-- **Upload regression test**: `TestF2_ExpectContinueBeforeUpload` in [protocol_edge_cases_test.go](../internal/proxy/protocol_edge_cases_test.go) covers clients that wait for `100 Continue` before sending fixed-length or chunked bodies, and early final rejection without an upload, on both routes.
+- **Upload regression test**: `TestF2_ExpectContinueBeforeUpload` in [protocol_edge_cases_test.go](../internal/proxy/protocol_edge_cases_test.go) covers clients that wait for `100 Continue` before sending fixed-length or chunked bodies, comma-separated and repeated `Expect` fields, and early final rejection without an upload, on both routes.
 - **Response handling**: See [F2](#f2-interim-responses).
 - **Traceability**: RFC 9110 §10.1.1 ¶4.
 

@@ -3,9 +3,9 @@
 # ClusterFuzzLite build script for spnego-proxy.
 #
 # Compiles the repo's 8 native `testing.F` fuzz targets into libFuzzer
-# binaries via OSS-Fuzz's `compile_native_go_fuzzer` helper.
+# binaries via OSS-Fuzz's `compile_native_go_fuzzer_v2` helper.
 #
-# go.mod invariant: `compile_native_go_fuzzer` rewrites native targets through
+# go.mod invariant: `compile_native_go_fuzzer_v2` rewrites native targets through
 # the go-118-fuzz-build shim, which requires the shim be importable. The
 # `go get` below mutates ONLY the container's throwaway copy of the module;
 # the committed repo go.mod/go.sum are never touched, so the
