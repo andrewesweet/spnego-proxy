@@ -18,7 +18,7 @@ The existing test suite covers:
 
 | Area | What's Tested | What's NOT Tested |
 | ------ | --------------- | ------------------- |
-| Proxy mechanics | Dial timeout, read timeout, token injection, bidirectional forwarding, half-close, keepalive, connection limiting, graceful shutdown | Full end-to-end proxy chain with real Kerberos auth |
+| Proxy mechanics | Dial timeout, read timeout, token injection, bidirectional forwarding, half-close, keepalive, connection limiting, graceful shutdown; full proxy chain with mock-KDC tokens in [TestProxyChainWithRealToken](../internal/proxy/gokrb5_integration_test.go) | Corporate upstream-proxy interoperability |
 | gokrb5 path | Password file handling (perms, size, CRLF), provider construction, SPN inference/normalization, error handling; mock-KDC lockout regressions linked below | SPNEGO token acceptance by a corporate upstream proxy |
 | macOS GSS-API | SPN derivation, SPN normalization, graceful error without credentials | Actual token acquisition via Heimdal GSS-API |
 | Circuit breaker | Open/closed/half-open state transitions, concurrent admission, real token provider with a mock KDC | Directory lockout policy interoperability |
@@ -384,9 +384,6 @@ networks:
 ### Phase 1: Extend Pure Go Mock KDC Coverage
 
 For implemented coverage, see [Current Test Coverage](#current-test-coverage).
-The mock-KDC suite already drives the full proxy chain with a fake upstream and
-asserts the `Proxy-Authorization: Negotiate` header
-(`TestProxyChainWithRealToken` in `internal/proxy/gokrb5_integration_test.go`).
 The remaining gap is coverage the mock KDC cannot give: enctypes, pre-auth
 policy, and ticket lifetimes that a real KDC negotiates. Extend the existing
 mock-KDC tests only for scenarios they do not already assert; the protocol

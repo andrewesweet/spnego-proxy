@@ -238,10 +238,12 @@ link. A custom CA can be provided with `-upstream-ca`.
 ### Password handling
 
 When using password-based authentication (`-user` flag), the proxy builds
-a Kerberos client for each token acquisition and destroys it before the
-call returns. Go cannot reliably scrub string-backed memory, so the
+a temporary Kerberos client for each password login and destroys it before
+token acquisition returns. For ticket reuse and login timing, see
+[Kerberos account lockout protection](#kerberos-account-lockout-protection).
+Go cannot reliably scrub string-backed memory, so the
 library's password string may remain in memory after the request.
-With `-password-file`, the file is re-read for every acquisition and the
+With `-password-file`, the file is re-read before each password login and the
 copy read at start-up is zeroed
 immediately; a corrected password therefore takes effect without a
 restart, and the file must stay readable with the required permissions

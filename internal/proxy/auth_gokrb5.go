@@ -47,7 +47,7 @@ func isPasswordRejection(err error) bool {
 // reliably zeroed and may remain in memory after the call. Use a keytab where
 // this is a concern.
 type Gokrb5TokenProvider struct {
-	// Construction inputs, kept so the client can be rebuilt per acquisition.
+	// Construction inputs for replacing a missing or near-expiry cached TGT.
 	user         string
 	realm        string
 	cfg          *config.Config
@@ -138,7 +138,7 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 
 	// Read the password once at start-up so a missing file, insecure
 	// permissions, or a non-terminal stdin fail here rather than on the first
-	// request. The file is re-read for every acquisition.
+	// request.
 	passwd, err := getPassword(passwordFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get password: %w", err)
@@ -161,18 +161,17 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 	}
 	_, _ = rand.Read(p.fingerprintKey[:]) // Always fills the buffer and returns a nil error (Go 1.24+).
 	if passwordFile == "" {
-		// Nothing to re-read: keep the typed password for the per-call client.
+		// Nothing to re-read: keep the typed password for future logins.
 		p.stdinPassword = passwd
 	} else {
-		// The file is re-read for each acquisition, so the start-up copy is no
-		// longer needed. Zeroing it narrows the window in which plaintext
-		// credentials exist in process memory (CWE-316).
+		// Zeroing the start-up validation copy narrows the window in which
+		// plaintext credentials exist in process memory (CWE-316).
 		clear(passwd)
 	}
 	return p, nil
 }
 
-// readPassword returns the Kerberos password for one acquisition: the current
+// readPassword returns the password for a login or rejection check: the current
 // content of -password-file, or the password typed at start-up when no file
 // was given. The caller owns the returned bytes and must zero them.
 func (p *Gokrb5TokenProvider) readPassword() ([]byte, error) {
