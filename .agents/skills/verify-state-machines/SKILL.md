@@ -105,10 +105,12 @@ Three things in a report are easy to misread:
 
 ## The models
 
-Rule names are the TLA+ names; each sentence is the promise in plain words and
-the harm when it breaks. `breaks` marks a rule the config named after today's
-code is expected to break; those breaks are the known defects, each tracked as
-a GitHub issue. Do not weaken a rule, a bound or a config to clear one.
+The summaries, function names, and verdicts below describe the baseline in the
+[coverage record](#coverage-record). Rule names are the TLA+ names; each sentence
+is the promise in plain words and the harm when it breaks. `breaks` marks a rule
+the baseline config is expected to break; those breaks are defects of that
+baseline, each tracked as a GitHub issue. Do not weaken a rule, a bound or a
+config to clear one.
 
 ### m1-relay-keepalive — `Relay.tla`
 
@@ -135,8 +137,8 @@ Covers `internal/proxy/forward.go` (`run`, `readNextRequest`,
   alive. Break: every response with a body costs the client a new connection and
   the proxy a new upstream connection and token. **breaks**
 
-Configs: `Relay.cfg` (today's code, `N=2`), `RelayDrainFixed.cfg` and
-`RelayInterimFixed.cfg` (today's code with one of the two defects fixed, which
+Configs: `Relay.cfg` (baseline code, `N=2`), `RelayDrainFixed.cfg` and
+`RelayInterimFixed.cfg` (baseline code with one of the two defects fixed, which
 isolates the other), `RelayFixed.cfg` (the fix direction for both, `N=3`; all
 rules hold).
 
@@ -161,9 +163,9 @@ connection, so each client connection is a caller).
   lockout. **breaks**
 - `NoLoginWhileOpen` — no login reaches the KDC while the breaker is open.
   **breaks**
-- `SingleProbe` — while half-open, one probe is in flight. Holds today.
+- `SingleProbe` — while half-open, one probe is in flight. Holds at the baseline.
 
-Configs: `Breaker.cfg` (today's code, four callers), `BreakerFixed.cfg` (a mutex
+Configs: `Breaker.cfg` (baseline code, four callers), `BreakerFixed.cfg` (a mutex
 held across the whole `Execute`, two calls per caller, which also crosses
 open → half-open → open), `BreakerSabotageMaxRequests.cfg` (deliberately broken:
 `MaxRequests` 2, where `SingleProbe` must break).
@@ -195,7 +197,7 @@ connections after the tunnel returns), and the `-idle-timeout` help text in
   Break: a tunnel whose reader stops reading can become stuck without closing.
   This checks for dead ends, not eventual termination. **breaks**
 
-Configs: `Tunnel.cfg` (today's code: one read deadline per direction, no write
+Configs: `Tunnel.cfg` (baseline code: one read deadline per direction, no write
 deadline), `TunnelFixed.cfg` (a deadline that sees both directions, plus a write
 deadline; all rules hold).
 
@@ -211,11 +213,11 @@ Covers `internal/proxy/server.go` (`Serve`: the accept goroutine, the
 `main.go`'s signal handling.
 
 - `NoAddAfterWait` — no connection handler starts after shutdown has begun
-  waiting. Holds today.
+  waiting. Holds at the baseline.
 - `DrainSkipsIdle` — shutdown waits only for requests in flight, never for a
   read deadline on a connection sitting idle between requests. **breaks**
 
-Configs: `Serve.cfg` (today's code), `ServeFixed.cfg` (shutdown closes idle
+Configs: `Serve.cfg` (baseline code), `ServeFixed.cfg` (shutdown closes idle
 connections and ends each busy connection after its current response; all rules
 hold), `ServeSabotageNoAcceptDone.cfg` (deliberately broken: the `<-acceptDone`
 wait removed, where `NoAddAfterWait` must break).
@@ -234,13 +236,13 @@ Covers `internal/proxy/forward.go` (`run`, `routeNoProxy`),
 `sameHost`).
 
 - `BoundHostOnly` — a request written on a direct connection is for that
-  connection's host. Holds today.
+  connection's host. Holds at the baseline.
 - `PolicyRouting` — matching hosts go direct and the rest go upstream, as
-  `-noproxy` says. Holds today.
+  `-noproxy` says. Holds at the baseline.
 - `MixedHostsServed` — a request is never refused only because an earlier
   request on the same client connection went to another host. **breaks**
 
-Configs: `DirectLoop.cfg` (today's code: the request is answered with 400 and
+Configs: `DirectLoop.cfg` (baseline code: the request is answered with 400 and
 the loop ends), `DirectLoopReroute.cfg` (alternative: the loop ends and the
 request is routed again; all rules hold), `DirectLoopSabotageNoCheck.cfg`
 (deliberately broken: the `sameHost` check removed, where `BoundHostOnly` and
@@ -266,8 +268,8 @@ Covers `internal/proxy/circuit_breaker.go` (`GetToken`), `internal/proxy/auth_go
 - `RejectedLoginsBounded` — the KDC sees at most `-cb-threshold` rejected
   logins plus one per half-open probe. **breaks** with a non-renewable TGT
 
-Configs: `RenewalNonRenewable.cfg` (today's code with a non-renewable TGT),
-`RenewalRenewable.cfg` (today's code only while every refresh occurs before
+Configs: `RenewalNonRenewable.cfg` (baseline code with a non-renewable TGT),
+`RenewalRenewable.cfg` (baseline code only while every refresh occurs before
 `renewTill`; both rules hold within that scope), `RenewalFixed.cfg` (every
 password login runs inside `GetToken`; all rules hold). `RenewTillAhead` is a
 constant scenario assumption, not the ticket's renewable flag. The model does
@@ -326,6 +328,10 @@ When a machine changes on purpose, bring the model with it in the same commit:
 Each model was last confirmed against the code at **commit `ecd1990`**. The line
 numbers in the models' header comments refer to that commit; when a listed
 function has moved, treat the model as unconfirmed until you have re-read it.
+
+The keep-alive, shutdown, and direct-routing code has changed since this
+baseline; m1, m4, and m5 remain unconfirmed against those changes. For the current
+user-facing contract, see [HTTP connection reuse and shutdown](../../../README.md#http-connection-reuse-and-shutdown).
 
 | Model | Code at `ecd1990` |
 | --- | --- |
