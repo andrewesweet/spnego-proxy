@@ -24,9 +24,9 @@ const (
 )
 
 // CircuitBreakerTokenProvider wraps a TokenProvider with a circuit breaker
-// that prevents repeated calls to a failing credential backend. This avoids
-// account lockout from rapid authentication failures (e.g. stale Kerberos
-// tickets triggering KDC password-attempt counters).
+// to reduce account-lockout risk from repeated authentication failures.
+// Calls admitted before the circuit opens and background provider logins
+// remain outside its rejection policy.
 type CircuitBreakerTokenProvider struct {
 	inner     TokenProvider
 	cb        *gobreaker.CircuitBreaker[string]

@@ -147,6 +147,16 @@ library directly (the Go team already does) — fuzz *our* logic, optionally
 5. **Register the target.** Add a `compile_native_go_fuzzer` line for every new
    `Fuzz*` function in `.clusterfuzzlite/build.sh` so ClusterFuzzLite builds it.
 
+### State-machine model checks
+
+For prerequisites, affected code, model coverage, and verdict handling, see
+[Verify the state machines](.agents/skills/verify-state-machines/SKILL.md).
+After changing a modeled state machine, run the checks manually:
+
+```bash
+formal/run-model.sh          # every model, about two minutes
+```
+
 ## Formatting
 
 All code must be formatted before committing. CI will reject unformatted code.
