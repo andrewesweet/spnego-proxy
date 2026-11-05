@@ -102,10 +102,17 @@ jobs:
 
       - name: Checkout
         # zizmor: ignore[artipacked] credentials are persisted intentionally so the
-        # subsequent `git push origin HEAD:master --tags` step can authenticate
+        # subsequent `git push --atomic origin HEAD:master` step can authenticate
         # using the GitHub App token.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # For a workflow_run trigger, actions/checkout without an explicit ref
+          # checks out the default branch tip at checkout time, not the commit
+          # that triggered the upstream run. Pin the checkout to the verified
+          # head_sha so the release commit is always built on the triggering
+          # commit; the tip check in "Compute next version" guarantees that
+          # commit is still master's tip before anything is pushed.
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
           fetch-tags: true
           token: ${{ steps.app-token.outputs.token }}
@@ -117,7 +124,21 @@ jobs:
 
       - name: Compute next version
         id: version
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
+          # Skip when the triggering commit is no longer the tip of master: a
+          # newer push to master superseded this run, and tagging here would
+          # collide with the run for that newer commit. The next green run on
+          # master tags instead.
+          git fetch --quiet origin master
+          tip=$(git rev-parse origin/master)
+          if [ "${tip}" != "${SHA}" ]; then
+            echo "::notice::Skipping auto-tag: triggering commit ${SHA} is no longer the tip of master (current tip ${tip})."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           git tag -l 'v*'
           raw=$(git cliff --bumped-version || true)
           latest=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
@@ -155,7 +176,11 @@ jobs:
           git commit -m "docs: update changelog for ${VERSION}"
 
           git tag "${VERSION}"
-          git push origin HEAD:master --tags
+          # Push the release commit and its tag atomically: either both land or
+          # neither does. If master moved between the tip check above and this
+          # push, the push is rejected as non-fast-forward and the job fails
+          # visibly with nothing pushed; the next green run on master retries.
+          git push --atomic origin HEAD:master "refs/tags/${VERSION}"
 
       - name: Job summary
         if: always()
