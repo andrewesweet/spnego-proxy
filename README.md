@@ -261,7 +261,8 @@ that:
   concurrent client requests cannot send more logins than `-cb-threshold`
   (default 3) before the circuit breaker opens. While the circuit is open
   no login is attempted; after `-cb-timeout` (default 30s) a single probe
-  is allowed.
+  is allowed. Concurrent callers wait for the preceding result, including
+  during the probe.
 - **Every login is counted.** The proxy never lets the Kerberos library
   renew a ticket with the password in the background. A password exchange
   runs inside the request path only when no usable TGT is cached; it hands
@@ -272,9 +273,10 @@ that:
   no login happens without client traffic. The alternative, letting the
   library renew tickets with the password in the background, is what
   allowed failed logins to escape the breaker.
-- **A rejected password stops logins.** When the KDC rejects the
-  configured password, the proxy sends no further logins until the
-  password value in the file changes. Trailing CR/LF characters are stripped
+- **A rejected password stops logins.** When the KDC returns
+  `KDC_ERR_PREAUTH_FAILED` for the configured password, the proxy sends no
+  further logins until the password value in the file changes.
+  Trailing CR/LF characters are stripped
   before comparing passwords. It re-reads the file on each refused
   attempt and every 5 minutes while rejected. It warns immediately, then
   every 5 minutes while the rejection stands, including without client
@@ -284,6 +286,8 @@ that:
   Re-saving the same password or adding or removing trailing CR/LF characters
   does not allow a retry. A password typed at the terminal cannot change, so
   logins stay refused until the proxy restarts.
+  Other acquisition failures, such as clock skew, count toward the circuit
+  breaker but do not require a password change before retrying.
 
 ### CGo boundary (macOS)
 
