@@ -14,14 +14,18 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -711,9 +715,132 @@ func TestConnectTunnelIdleTimeout(t *testing.T) {
 	}
 }
 
-// TestConnectTunnelIdleTimeoutResetOnData verifies that active tunnels that
-// continuously exchange data are NOT interrupted by the idle timeout, because
-// each successful read resets the deadline.
+func TestTunnelClockKeepsLatestProgress(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const timeout = 2 * time.Second
+		clock := newTunnelClock(timeout)
+		time.Sleep(time.Second)
+		sampled := make(chan struct{})
+		resume := make(chan struct{})
+		published := make(chan struct{})
+		go func() {
+			elapsed := time.Since(clock.origin)
+			close(sampled)
+			<-resume
+			clock.touchAt(elapsed)
+			close(published)
+		}()
+		<-sampled
+		time.Sleep(time.Second)
+		clock.touch()
+		close(resume)
+		<-published
+		if got := clock.quietFor(); got != 0 {
+			t.Fatalf("late publication replaced newer progress: quiet for %v, want 0", got)
+		}
+		time.Sleep(time.Second)
+		if got := clock.remaining(); got != time.Second || clock.idle() {
+			t.Fatalf("latest progress lost: remaining = %v, idle = %v", got, clock.idle())
+		}
+		time.Sleep(time.Second)
+		if got := clock.remaining(); got != 0 || !clock.idle() {
+			t.Fatalf("latest progress should expire: remaining = %v, idle = %v", got, clock.idle())
+		}
+	})
+}
+
+func TestTunnelClockRevalidatesProgressDuringInactivitySampling(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		clock := newTunnelClock(100 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
+		clock.touch()
+		time.Sleep(80 * time.Millisecond)
+
+		sampling := make(chan struct{})
+		published := make(chan struct{})
+		go func() {
+			<-sampling
+			time.Sleep(10 * time.Millisecond)
+			clock.touch()
+			close(published)
+		}()
+		var pause sync.Once
+		quiet := clock.quietForSince(func(origin time.Time) time.Duration {
+			pause.Do(func() {
+				close(sampling)
+				<-published
+				time.Sleep(20 * time.Millisecond)
+			})
+			return time.Since(origin)
+		})
+		if quiet != 20*time.Millisecond {
+			t.Fatalf("progress at 110ms sampled at 130ms: inactivity = %v, want 20ms", quiet)
+		}
+		if got := clock.remaining(); got != 80*time.Millisecond || clock.idle() {
+			t.Fatalf("latest progress lost: remaining = %v, idle = %v", got, clock.idle())
+		}
+		time.Sleep(80 * time.Millisecond)
+		if got := clock.remaining(); got != 0 || !clock.idle() {
+			t.Fatalf("inactivity should exhaust the budget: remaining = %v, idle = %v", got, clock.idle())
+		}
+	})
+}
+
+func TestTunnelClockConcurrentProgressHasNonnegativeInactivity(t *testing.T) {
+	clock := newTunnelClock(time.Second)
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	for range 2 {
+		workers.Go(func() {
+			<-start
+			for range 20000 {
+				clock.touch()
+			}
+		})
+	}
+	close(start)
+	for range 20000 {
+		if quiet := clock.quietFor(); quiet < 0 {
+			t.Errorf("observed progress lies in the future: inactivity = %v", quiet)
+			break
+		}
+	}
+	workers.Wait()
+}
+
+func TestTunnelClockElapsedOffsets(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const timeout = 5 * time.Second
+		clock := newTunnelClock(timeout)
+		if got := clock.remaining(); got != timeout {
+			t.Fatalf("initial idle budget = %v, want %v", got, timeout)
+		}
+
+		clock.last.Store(-int64(2 * time.Second))
+		if got := clock.quietFor(); got != 2*time.Second {
+			t.Fatalf("activity two seconds before tunnel origin: quiet for %v, want 2s", got)
+		}
+		time.Sleep(time.Second)
+		if got := clock.remaining(); got != 2*time.Second || clock.idle() {
+			t.Fatalf("after three seconds of inactivity: remaining = %v, idle = %v", got, clock.idle())
+		}
+
+		clock.touch()
+		if got := clock.quietFor(); got != 0 {
+			t.Fatalf("activity reset: quiet for %v, want 0", got)
+		}
+		if got := clock.remaining(); got != timeout || clock.idle() {
+			t.Fatalf("activity reset: remaining = %v, idle = %v", got, clock.idle())
+		}
+		time.Sleep(timeout)
+		if got := clock.remaining(); got != 0 || !clock.idle() {
+			t.Fatalf("idle timeout reached: remaining = %v, idle = %v", got, clock.idle())
+		}
+	})
+}
+
+// TestConnectTunnelIdleTimeoutResetOnData verifies that observed transport
+// progress within each idle window keeps the tunnel open.
 func TestConnectTunnelIdleTimeoutResetOnData(t *testing.T) {
 	// Mock upstream that echoes data back.
 	connectUpstream := newMockConnectUpstream(t, func(_ context.Context, conn net.Conn) {
@@ -767,6 +894,539 @@ func TestConnectTunnelIdleTimeoutResetOnData(t *testing.T) {
 		}
 		if string(buf) != "ping" {
 			t.Fatalf("echo mismatch: got %q", buf)
+		}
+	}
+}
+
+// TestConnectTunnelOneWayTransferOutlastsIdleTimeout verifies that the idle
+// timeout measures the tunnel as a whole rather than each direction. Observed
+// upload progress within each idle window keeps the silent reverse direction
+// available for the upstream's reply.
+func TestConnectTunnelOneWayTransferOutlastsIdleTimeout(t *testing.T) {
+	const (
+		idleTimeout = 500 * time.Millisecond
+		chunk       = "chunk\n"
+		chunks      = 30 // 3x the idle timeout at one chunk per idleTimeout/10.
+		reply       = "done\n"
+	)
+
+	uploadDone := make(chan struct{})
+	connectUpstream := newMockConnectUpstream(t, func(_ context.Context, conn net.Conn) {
+		defer close(uploadDone)
+		body := make([]byte, chunks*len(chunk))
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := io.ReadFull(conn, body); err != nil {
+			t.Errorf("upstream read upload: %v", err)
+			return
+		}
+		_, _ = io.WriteString(conn, reply)
+	})
+
+	proxy := NewProxyUnderTest(t, connectUpstream.Addr().String())
+	proxy.SetIdleTimeout(idleTimeout)
+	t.Cleanup(proxy.Close)
+
+	raw := "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	assertStatusCode(t, resp, http.StatusOK)
+
+	// Upload for 3x the idle timeout while the upstream sends nothing.
+	uploadStart := time.Now()
+	for range chunks {
+		if _, err := conn.Write([]byte(chunk)); err != nil {
+			t.Fatalf("upload through tunnel: %v", err)
+		}
+		time.Sleep(idleTimeout / 10)
+	}
+	if elapsed := time.Since(uploadStart); elapsed <= idleTimeout {
+		t.Fatalf("upload lasted %v, want longer than the idle timeout %v", elapsed, idleTimeout)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got, err := io.ReadAll(br)
+	<-uploadDone
+	if err != nil {
+		t.Fatalf("read upstream reply: %v", err)
+	}
+	if string(got) != reply {
+		t.Fatalf("client read %q, want the upstream reply %q after a one-way upload lasting %v (idle timeout %v)",
+			got, reply, chunks*idleTimeout/10, idleTimeout)
+	}
+}
+
+// TestConnectTunnelOneWayDownloadOutlastsIdleTimeout is the mirror of
+// TestConnectTunnelOneWayTransferOutlastsIdleTimeout: observed download progress
+// within each idle window keeps the silent upload direction open. An upstream
+// that reads EOF treats it as a disconnect and stops sending.
+func TestConnectTunnelOneWayDownloadOutlastsIdleTimeout(t *testing.T) {
+	const (
+		idleTimeout = 500 * time.Millisecond
+		chunk       = "chunk\n"
+		chunks      = 30 // 3x the idle timeout at one chunk per idleTimeout/10.
+	)
+
+	var mu sync.Mutex
+	sent := 0
+	readReturned := make(chan int, 1)
+	downloadDone := make(chan struct{})
+	connectUpstream := newMockConnectUpstream(t, func(_ context.Context, conn net.Conn) {
+		defer close(downloadDone)
+		// Report how much had been sent when the client side of the tunnel
+		// first reads EOF, i.e. when the proxy half-closes the quiet direction.
+		go func() {
+			_, _ = conn.Read(make([]byte, 1))
+			mu.Lock()
+			n := sent
+			mu.Unlock()
+			readReturned <- n
+		}()
+		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		for range chunks {
+			if _, err := io.WriteString(conn, chunk); err != nil {
+				return
+			}
+			mu.Lock()
+			sent++
+			mu.Unlock()
+			time.Sleep(idleTimeout / 10)
+		}
+	})
+
+	proxy := NewProxyUnderTest(t, connectUpstream.Addr().String())
+	proxy.SetIdleTimeout(idleTimeout)
+	t.Cleanup(proxy.Close)
+
+	raw := "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+	conn, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	assertStatusCode(t, resp, http.StatusOK)
+
+	// Read the whole download without sending anything back.
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got, err := io.ReadAll(br)
+	<-downloadDone
+	if err != nil {
+		t.Fatalf("read download: %v", err)
+	}
+	if want := strings.Repeat(chunk, chunks); string(got) != want {
+		t.Fatalf("client read %d bytes, want %d", len(got), len(want))
+	}
+
+	var stalledAt int
+	select {
+	case stalledAt = <-readReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream never saw its client side of the tunnel close")
+	}
+	if stalledAt < chunks {
+		t.Fatalf("upstream read returned EOF after %d of %d chunks: the proxy half-closed the quiet direction while data was still flowing",
+			stalledAt, chunks)
+	}
+}
+
+// TestConnectTunnelStalledReaderCloses verifies that a tunnel whose reader
+// stops reading is closed by the idle timeout. Without a write deadline the
+// proxy blocks in dst.Write once the socket buffers fill, and nothing ends the
+// tunnel until the stalled peer closes its socket.
+func TestConnectTunnelStalledReaderCloses(t *testing.T) {
+	const idleTimeout = 500 * time.Millisecond
+
+	var uploaded atomic.Int64
+	connectUpstream := newMockConnectUpstream(t, func(_ context.Context, conn net.Conn) {
+		go func() {
+			buf := make([]byte, 1024)
+			for {
+				n, err := conn.Read(buf)
+				uploaded.Add(int64(n))
+				if err != nil {
+					return
+				}
+			}
+		}()
+		chunk := make([]byte, 64*1024)
+		for {
+			if _, err := conn.Write(chunk); err != nil {
+				return
+			}
+		}
+	})
+
+	cfg := defaultTestConfig(connectUpstream.Addr().String(), &stubTokenProvider{token: "test-token"})
+	cfg.IdleTimeout = idleTimeout
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	// Handle exactly one client so the test can observe when its session ends.
+	sessionDone := make(chan struct{})
+	go func() {
+		clientConn, err := ln.Accept()
+		if err != nil {
+			close(sessionDone)
+			return
+		}
+		handleClient(clientConn, cfg)
+		close(sessionDone)
+	}()
+
+	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	raw := "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+	if _, err := conn.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	assertStatusCode(t, resp, http.StatusOK)
+
+	uploadDone := make(chan struct{})
+	go func() {
+		defer close(uploadDone)
+		for {
+			if _, err := conn.Write([]byte("upload")); err != nil {
+				return
+			}
+			time.Sleep(idleTimeout / 10)
+		}
+	}()
+	defer func() {
+		_ = conn.Close()
+		<-uploadDone
+	}()
+
+	// Never read the tunnel body again: the proxy's writes to this client must
+	// eventually stall and the idle timeout must end the session.
+	const closeBudget = 10 * idleTimeout
+	select {
+	case <-sessionDone:
+	case <-time.After(closeBudget):
+		t.Fatalf("session with a stalled reader still running %v after CONNECT with idle timeout %v",
+			closeBudget, idleTimeout)
+	}
+	if got := uploaded.Load(); got < 2*int64(len("upload")) {
+		t.Fatalf("upstream received %d reverse-traffic bytes, want at least two uploads", got)
+	}
+
+	// The tunnel must have carried payload before it closed, so this test
+	// cannot pass on a session that ended before forwarding anything.
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buffered, _ := io.ReadAll(br)
+	if len(buffered) == 0 {
+		t.Fatal("stalled tunnel delivered no upstream payload before closing")
+	}
+}
+
+func newTunnelTestTCPPair(t *testing.T) (net.Conn, net.Conn) {
+	t.Helper()
+	ln, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	client, err := net.DialTCP("tcp", nil, ln.Addr().(*net.TCPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	server, err := ln.AcceptTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	for _, conn := range []*net.TCPConn{client, server} {
+		if err := conn.SetWriteBuffer(1024); err != nil {
+			t.Fatal(err)
+		}
+		if err := conn.SetReadBuffer(32 * 1024); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return client, server
+}
+
+func newTunnelTestConnections(t *testing.T, transport string) (client, conn, peer, upstream net.Conn) {
+	t.Helper()
+	if transport == "pipe" {
+		client, conn = net.Pipe()
+		peer, upstream = net.Pipe()
+	} else {
+		client, conn = newTunnelTestTCPPair(t)
+		peer, upstream = newTunnelTestTCPPair(t)
+	}
+	for _, c := range []net.Conn{client, conn, peer, upstream} {
+		t.Cleanup(func() { _ = c.Close() })
+		if err := c.SetDeadline(time.Now().Add(20 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if transport == "tls" {
+		certPEM, keyPEM := generateTestCert(t)
+		cert, err := tls.X509KeyPair(certPEM, keyPEM)
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(certPEM) {
+			t.Fatal("add test TLS root")
+		}
+		raw := &tunnelConn{Conn: peer}
+		tlsClient := tls.Client(raw, &tls.Config{RootCAs: roots, ServerName: "127.0.0.1", MinVersion: tls.VersionTLS12})
+		tlsServer := tls.Server(upstream, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+		handshakeDone := make(chan error, 1)
+		go func() { handshakeDone <- tlsServer.Handshake() }()
+		if err := tlsClient.Handshake(); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-handshakeDone; err != nil {
+			t.Fatal(err)
+		}
+		peer = &upstreamTLSConn{Conn: tlsClient, transport: raw}
+		upstream = tlsServer
+	}
+	return
+}
+
+func TestForwardTunnelTransportProgressWithinTimeoutKeepsBothDirectionsOpen(t *testing.T) {
+	for _, transport := range []string{"pipe", "tcp", "tls"} {
+		for _, direction := range []string{"upload", "download"} {
+			t.Run(transport+"/"+direction, func(t *testing.T) {
+				run := func(t *testing.T) {
+					timeout := 500 * time.Millisecond
+					if transport != "pipe" {
+						timeout = 2 * time.Second
+					}
+					client, conn, peer, upstream := newTunnelTestConnections(t, transport)
+					tunnelDone := make(chan struct{})
+					go func() {
+						defer close(tunnelDone)
+						forwardTunnel(conn, peer, bufio.NewReader(conn), bufio.NewReader(peer), timeout)
+					}()
+					src, dst := client, upstream
+					if direction == "download" {
+						src, dst = upstream, client
+					}
+					payload := strings.Repeat("0123456789abcdef", 64*1024)
+					buf := make([]byte, 1024)
+					interval := 5 * time.Millisecond
+					if transport == "pipe" {
+						payload = "slow transfer across the tunnel"
+						buf = make([]byte, 1)
+						interval = timeout / 4
+					}
+					writeDone := make(chan error, 1)
+					producerDone := make(chan struct{})
+					producerDuration := make(chan time.Duration, 1)
+					start := time.Now()
+					go func() {
+						_, err := io.WriteString(src, payload)
+						producerDuration <- time.Since(start)
+						writeDone <- err
+						close(producerDone)
+					}()
+					lastRead := start
+					var got strings.Builder
+					for got.Len() < len(payload) {
+						n, err := dst.Read(buf)
+						if err != nil {
+							t.Fatalf("transfer with transport progress delivered %d/%d bytes: %v", got.Len(), len(payload), err)
+						}
+						if gap := time.Since(lastRead); gap >= timeout {
+							t.Fatalf("test fixture paused byte delivery for %v, idle timeout %v", gap, timeout)
+						}
+						lastRead = time.Now()
+						_, _ = got.Write(buf[:n])
+						if transport != "pipe" {
+							select {
+							case <-producerDone:
+								interval = 0
+							default:
+							}
+						}
+						time.Sleep(interval)
+					}
+					if got.String() != payload {
+						t.Fatal("transfer with transport progress changed the payload")
+					}
+					if elapsed := time.Since(start); elapsed <= timeout {
+						t.Fatalf("transfer lasted %v, want longer than %v", elapsed, timeout)
+					}
+					if err := <-writeDone; err != nil {
+						t.Fatalf("source write: %v", err)
+					}
+					if elapsed := <-producerDuration; transport != "pipe" && elapsed <= timeout {
+						t.Fatalf("source write completed in %v, want backpressure lasting longer than %v", elapsed, timeout)
+					}
+					go func() {
+						_, err := io.WriteString(dst, "ack")
+						writeDone <- err
+					}()
+					ack := make([]byte, 3)
+					if _, err := io.ReadFull(src, ack); err != nil || string(ack) != "ack" {
+						t.Fatalf("quiet direction after slow transfer: %q, %v", ack, err)
+					}
+					if err := <-writeDone; err != nil {
+						t.Fatalf("acknowledgment write: %v", err)
+					}
+					_ = client.Close()
+					_ = upstream.Close()
+					select {
+					case <-tunnelDone:
+					case <-time.After(5 * time.Second):
+						t.Fatal("tunnel did not stop after both peers closed")
+					}
+				}
+				if transport == "pipe" {
+					synctest.Test(t, run)
+				} else {
+					run(t)
+				}
+			})
+		}
+	}
+}
+
+func TestForwardTunnelStalledReaderClosesBothDirections(t *testing.T) {
+	for _, transport := range []string{"pipe", "tcp", "tls"} {
+		for _, direction := range []string{"upload", "download"} {
+			t.Run(transport+"/"+direction, func(t *testing.T) {
+				run := func(t *testing.T) {
+					const timeout = time.Second
+					client, conn, peer, upstream := newTunnelTestConnections(t, transport)
+					tunnelDone := make(chan struct{})
+					go func() {
+						defer close(tunnelDone)
+						forwardTunnel(conn, peer, bufio.NewReader(conn), bufio.NewReader(peer), timeout)
+					}()
+					src, dst := client, upstream
+					if direction == "download" {
+						src, dst = upstream, client
+					}
+					var workers sync.WaitGroup
+					defer func() {
+						_ = client.Close()
+						_ = upstream.Close()
+						workers.Wait()
+					}()
+					workers.Go(func() {
+						payload := strings.Repeat("blocked", 16*1024)
+						for {
+							if _, err := io.WriteString(src, payload); err != nil {
+								return
+							}
+						}
+					})
+					var reverseBytes atomic.Int64
+					workers.Go(func() {
+						buf := make([]byte, 1)
+						for {
+							n, err := src.Read(buf)
+							reverseBytes.Add(int64(n))
+							if err != nil {
+								return
+							}
+						}
+					})
+					workers.Go(func() {
+						for {
+							if _, err := io.WriteString(dst, "a"); err != nil {
+								return
+							}
+							time.Sleep(timeout / 10)
+						}
+					})
+					time.Sleep(timeout / 2)
+					if got := reverseBytes.Load(); got < 2 {
+						t.Fatalf("reverse traffic delivered %d bytes, want at least two", got)
+					}
+					select {
+					case <-tunnelDone:
+					case <-time.After(2 * timeout):
+						t.Fatal("stalled reader kept tunnel alive with reverse traffic")
+					}
+				}
+				if transport == "pipe" {
+					synctest.Test(t, run)
+				} else {
+					run(t)
+				}
+			})
+		}
+	}
+}
+
+func TestForwardTunnelEOFAllowsReverseReply(t *testing.T) {
+	for _, transport := range []string{"tcp", "tls"} {
+		for _, timeout := range []time.Duration{0, time.Second} {
+			t.Run(fmt.Sprintf("%s/%v", transport, timeout), func(t *testing.T) {
+				client, conn, peer, upstream := newTunnelTestConnections(t, transport)
+				tunnelDone := make(chan struct{})
+				go func() {
+					defer close(tunnelDone)
+					forwardTunnel(conn, peer, bufio.NewReader(conn), bufio.NewReader(peer), timeout)
+				}()
+				if _, err := io.WriteString(client, "request"); err != nil {
+					t.Fatal(err)
+				}
+				if err := closeWrite(client); err != nil {
+					t.Fatalf("half-close client: %v", err)
+				}
+				request, err := io.ReadAll(upstream)
+				if err != nil || string(request) != "request" {
+					t.Fatalf("half-closed request: %q, %v", request, err)
+				}
+				if _, err := io.WriteString(upstream, "reply"); err != nil {
+					t.Fatal(err)
+				}
+				if err := closeWrite(upstream); err != nil {
+					t.Fatalf("half-close upstream: %v", err)
+				}
+				reply, err := io.ReadAll(client)
+				if err != nil || string(reply) != "reply" {
+					t.Fatalf("reply after EOF: %q, %v", reply, err)
+				}
+				select {
+				case <-tunnelDone:
+				case <-time.After(5 * time.Second):
+					t.Fatal("tunnel did not stop after both peers half-closed")
+				}
+			})
 		}
 	}
 }

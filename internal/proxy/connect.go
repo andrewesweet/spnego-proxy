@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -24,18 +25,81 @@ func enableKeepAlive(conn net.Conn, period time.Duration) {
 // closeWrite calls CloseWrite on conn if the underlying type supports it.
 // This signals the remote peer that no more data will be sent on this half
 // of the connection, allowing it to read EOF and finish gracefully.
-func closeWrite(conn net.Conn) {
+func closeWrite(conn net.Conn) error {
 	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
-		_ = cw.CloseWrite()
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
+// errTunnelIdle reports that a CONNECT tunnel was closed because neither of
+// its directions made observable transport progress for the whole idle timeout.
+var errTunnelIdle = errors.New("tunnel idle timeout")
+
+// tunnelClock measures idleness for a whole CONNECT tunnel rather than for a
+// single direction: both halves record observed transport progress in the same
+// timestamp.
+type tunnelClock struct {
+	timeout time.Duration
+	origin  time.Time
+	last    atomic.Int64 // Nanoseconds since origin of the latest observed transport progress
+}
+
+// newTunnelClock returns a clock measuring idleness against timeout. A timeout
+// of zero disables the idle check.
+func newTunnelClock(timeout time.Duration) *tunnelClock {
+	return &tunnelClock{timeout: timeout, origin: time.Now()}
+}
+
+// touch records observed transport progress.
+func (c *tunnelClock) touch() { c.touchAt(time.Since(c.origin)) }
+
+func (c *tunnelClock) touchAt(elapsed time.Duration) {
+	now := int64(elapsed)
+	for last := c.last.Load(); now > last; last = c.last.Load() {
+		if c.last.CompareAndSwap(last, now) {
+			return
+		}
 	}
 }
 
-// idleCopy copies from src to dst, resetting the read deadline on srcConn
-// after each successful read. If no data arrives within timeout, the read
-// fails with a deadline error and the copy returns. A zero timeout disables
-// the idle check and falls back to plain io.Copy.
-func idleCopy(dst net.Conn, src io.Reader, srcConn net.Conn, timeout time.Duration) (int64, error) {
-	if timeout <= 0 {
+// quietFor reports how long the tunnel has had no observed transport progress.
+func (c *tunnelClock) quietFor() time.Duration {
+	return c.quietForSince(time.Since)
+}
+
+func (c *tunnelClock) quietForSince(since func(time.Time) time.Duration) time.Duration {
+	for {
+		last := c.last.Load()
+		elapsed := since(c.origin)
+		if c.last.Load() == last {
+			return elapsed - time.Duration(last)
+		}
+	}
+}
+
+// idle reports whether neither direction made observed progress for the timeout.
+func (c *tunnelClock) idle() bool { return c.quietFor() >= c.timeout }
+
+// remaining reports how much of the idle budget is left before the tunnel is
+// considered idle in both directions. It is not positive once the budget is
+// spent.
+func (c *tunnelClock) remaining() time.Duration { return c.timeout - c.quietFor() }
+
+// idleCopy copies from src to dst while the tunnel as a whole stays active.
+//
+// Before each read it arms the read deadline on srcConn from the tunnel's
+// remaining idle budget, and after each successful read it records the traffic
+// in clock. A read that times out only ends the copy when neither direction
+// has made observable transport progress within the timeout; otherwise the
+// loop rearms the deadline. Destination connections arm a deadline before each
+// transport write and record bytes accepted for writing. A one-way transfer
+// stays open while this progress occurs within the timeout. TCP window
+// withholding beyond the timeout counts as inactivity even if the remote
+// application continues reading. A zero timeout disables the idle check and
+// falls back to plain io.Copy.
+func idleCopy(dst net.Conn, src io.Reader, srcConn net.Conn, clock *tunnelClock) (int64, error) {
+	if clock.timeout <= 0 {
 		return io.Copy(dst, src)
 	}
 	bufp := copyBufPool.Get().(*[]byte)
@@ -43,9 +107,14 @@ func idleCopy(dst net.Conn, src io.Reader, srcConn net.Conn, timeout time.Durati
 	buf := *bufp
 	var total int64
 	for {
-		_ = srcConn.SetReadDeadline(time.Now().Add(timeout))
+		remaining := clock.remaining()
+		if remaining <= 0 {
+			return total, errTunnelIdle
+		}
+		_ = srcConn.SetReadDeadline(time.Now().Add(remaining))
 		n, readErr := src.Read(buf)
 		if n > 0 {
+			clock.touch()
 			nw, writeErr := dst.Write(buf[:n])
 			total += int64(nw)
 			if writeErr != nil {
@@ -54,6 +123,15 @@ func idleCopy(dst net.Conn, src io.Reader, srcConn net.Conn, timeout time.Durati
 		}
 		if readErr != nil {
 			_ = srcConn.SetReadDeadline(time.Time{}) // clear deadline
+			if isTimeoutError(readErr) {
+				if !clock.idle() {
+					continue // the other direction is still moving data
+				}
+				return total, errTunnelIdle
+			}
+			if errors.Is(readErr, io.EOF) {
+				return total, nil
+			}
 			return total, readErr
 		}
 	}
@@ -73,47 +151,74 @@ func isExpectedCloseError(err error) bool {
 	return false
 }
 
+// isTimeoutError reports whether err is a deadline expiry. In a tunnel copy a
+// timeout means the idle timeout or a write deadline did its job, which is
+// routine teardown rather than a proxy fault.
+func isTimeoutError(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
 // logForwardError logs a data-forwarding error at the appropriate level:
-// Debug for routine connection teardown (see isExpectedCloseError), Error
-// otherwise. It is a no-op when err is nil.
+// Debug for routine connection teardown (see isExpectedCloseError), an idle
+// timeout, or a write deadline expiry; Error otherwise. It is a no-op when err
+// is nil.
 func logForwardError(err error, fromAddr, toAddr net.Addr) {
 	if err == nil {
 		return
 	}
-	if isExpectedCloseError(err) {
+	switch {
+	case errors.Is(err, errTunnelIdle):
+		slog.Debug("tunnel closed after idle timeout", "from", fromAddr, "to", toAddr)
+	case isTimeoutError(err), isExpectedCloseError(err):
 		slog.Debug("forward closed", "error", err, "from", fromAddr, "to", toAddr)
-	} else {
+	default:
 		slog.Error("forward error", "error", err, "from", fromAddr, "to", toAddr)
 	}
 }
 
-// forwardHalf copies data from src to dst, calling CloseWrite on dst when
-// done. It logs the start, completion, and any errors. Callers use
+// forwardHalf copies data from src to dst, calling CloseWrite on dst only
+// after normal EOF so the reverse direction can finish. Errors are returned
+// to forwardTunnel for full tunnel teardown. It logs the start, completion,
+// and any errors. Callers use
 // wg.Go to launch forwardHalf so the WaitGroup is managed automatically.
-// When idleTimeout > 0, idleCopy is used with srcConn to enforce an idle
-// deadline; otherwise plain io.Copy is used and srcConn may be nil.
-func forwardHalf(dst net.Conn, src io.Reader, srcConn net.Conn, fromAddr, toAddr net.Addr, idleTimeout time.Duration) {
-	defer closeWrite(dst)
+// The clock is shared by both halves of the tunnel, so the idle timeout is
+// measured across the tunnel as a whole; a disabled clock turns idleCopy into
+// plain io.Copy.
+func forwardHalf(dst net.Conn, src io.Reader, srcConn net.Conn, fromAddr, toAddr net.Addr, clock *tunnelClock) error {
 	slog.Debug("forward start", "from", fromAddr, "to", toAddr)
 	defer slog.Debug("forward done", "from", fromAddr, "to", toAddr)
-	var err error
-	if idleTimeout > 0 {
-		_, err = idleCopy(dst, src, srcConn, idleTimeout)
-	} else {
-		_, err = io.Copy(dst, src)
+	_, err := idleCopy(dst, src, srcConn, clock)
+	if err == nil {
+		err = closeWrite(dst)
 	}
 	logForwardError(err, fromAddr, toAddr)
+	return err
 }
 
-// forwardTunnel copies both directions until both halves finish. Reuse the
-// existing readers so payload buffered while reading HTTP headers is preserved.
+// forwardTunnel copies both directions, preserving half-close on normal EOF
+// and closing both connections if either copy fails. Reuse the existing
+// readers so payload buffered while reading HTTP headers is preserved.
 func forwardTunnel(conn, peerConn net.Conn, reqReader, peerReader *bufio.Reader, idleTimeout time.Duration) {
+	clock := newTunnelClock(idleTimeout)
+	conn = trackTunnelActivity(conn, clock)
+	peerConn = trackTunnelActivity(peerConn, clock)
+	forward := func(dst net.Conn, src *bufio.Reader, srcConn net.Conn) {
+		if err := forwardHalf(dst, src, srcConn, srcConn.RemoteAddr(), dst.RemoteAddr(), clock); err != nil {
+			for _, c := range []net.Conn{conn, peerConn} {
+				if tc, ok := c.(*upstreamTLSConn); ok {
+					_ = tc.transport.Close()
+				}
+				_ = c.Close()
+			}
+		}
+	}
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		forwardHalf(peerConn, reqReader, conn, conn.RemoteAddr(), peerConn.RemoteAddr(), idleTimeout)
+		forward(peerConn, reqReader, conn)
 	})
 	wg.Go(func() {
-		forwardHalf(conn, peerReader, peerConn, peerConn.RemoteAddr(), conn.RemoteAddr(), idleTimeout)
+		forward(conn, peerReader, peerConn)
 	})
 	wg.Wait()
 }

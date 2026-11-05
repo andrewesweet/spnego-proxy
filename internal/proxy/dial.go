@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -72,5 +73,26 @@ func dialUpstream(addr string, tlsCfg UpstreamTLSConfig) (net.Conn, error) {
 	}
 	tc.ServerName = extractHost(addr)
 
-	return tls.DialWithDialer(dialer, "tcp", addr, tc)
+	ctx := context.Background()
+	if dialer.Timeout != 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, dialer.Timeout)
+		defer cancel()
+	}
+	if !dialer.Deadline.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, dialer.Deadline)
+		defer cancel()
+	}
+	raw, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	transport := &tunnelConn{Conn: raw}
+	conn := tls.Client(transport, tc)
+	if err := conn.HandshakeContext(ctx); err != nil {
+		_ = raw.Close()
+		return nil, err
+	}
+	return &upstreamTLSConn{Conn: conn, transport: transport}, nil
 }

@@ -222,6 +222,21 @@ or `-connect-ports '*'` to allow all ports.
 CONNECT tunnels are closed after 5 minutes of inactivity by default.
 Use `-idle-timeout` to adjust or `-idle-timeout 0` to disable.
 
+Transport activity in either direction refreshes the tunnel's shared idle
+budget. Received bytes and bytes accepted by the kernel for writing count
+as progress. A one-way transfer stays open while that progress occurs
+within the timeout. With the timeout enabled, each destination write also
+has a deadline. If a write cannot make progress within the timeout, the proxy
+closes both tunnel connections, even while reverse traffic continues.
+
+The proxy cannot observe a remote application's reads from its socket
+buffer. TCP can withhold receive-window updates while the application
+drains small amounts of data, as described in
+[RFC 9293 section 3.8.6.2.2](https://www.rfc-editor.org/rfc/rfc9293.html#section-3.8.6.2.2).
+If this prevents the kernel from accepting more bytes for longer than
+`-idle-timeout`, the proxy treats it as inactivity and closes the tunnel,
+even if the remote application continues reading.
+
 ### Upstream TLS
 
 By default, proxy-to-upstream connections use plain TCP (matching cntlm
