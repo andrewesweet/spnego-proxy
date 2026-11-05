@@ -50,6 +50,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := validateFlags(c); err != nil {
+		slog.Error("invalid flag value", "error", err)
+		fs.Usage()
+		os.Exit(1)
+	}
+
 	provider, err := buildProvider(c)
 	if err != nil {
 		// codeql[go/clear-text-logging]

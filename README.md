@@ -121,6 +121,12 @@ All flags:
 | `-user` | Kerberos username (triggers password-based auth on macOS) | Password mode only |
 | `-realm` | Kerberos realm | Password mode only |
 | `-password-file` | Path to password file (prompts if omitted) | No |
+| `-cb-threshold` | Consecutive token acquisition failures before the circuit breaker opens; 1–4294967295 (default: `3`) | No |
+| `-cb-timeout` | Circuit breaker cooldown; must be greater than zero (default: `30s`) | No |
+
+The circuit-breaker limits apply to both authentication modes. The proxy
+validates them before creating the token provider. Validation errors print
+an error and usage to stderr and exit with status 1.
 
 ### macOS with explicit password
 
@@ -248,6 +254,11 @@ The proxy logs structured JSON via `slog`. Security-relevant events
 (authentication failures, CONNECT attempts, circuit breaker state
 changes, TE/CL conflicts) are logged but not classified separately from
 operational events.
+
+Connection accept errors include a `retry_in` field with the delay before
+the next attempt. Retries start after 5 ms, double after each consecutive
+failure up to 1 s, and reset after a successful accept. Shutdown interrupts
+the wait.
 
 ## License
 

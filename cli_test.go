@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -69,7 +70,7 @@ func TestParseFlagsDefaults(t *testing.T) {
 		{"connect-ports", c.ConnectPorts, "443"},
 		{"allowed-ips", c.AllowedIPs, ""},
 		{"noproxy", c.NoProxy, ""},
-		{"cb-threshold", c.CBThreshold, uint(proxy.CBConsecutiveFailures)},
+		{"cb-threshold", c.CBThreshold, int64(proxy.CBConsecutiveFailures)},
 		{"cb-timeout", c.CBTimeout, proxy.CBTimeout},
 		{"forwarded", c.Forwarded, false},
 		{"x-forwarded-for", c.XForwardedFor, false},
@@ -234,5 +235,84 @@ func TestBuildProviderNativeUnsupportedPlatform(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "native GSS-API") {
 		t.Errorf("error = %v, want native-GSS-API message", err)
+	}
+}
+
+// TestValidateFlagsRejectsCircuitBreakerValues pins the start-up validation of
+// the circuit-breaker flags. Without it each value below starts the proxy and
+// silently changes the breaker: gobreaker replaces a Timeout of zero or less
+// with 60s, the breaker opens on the first failure when the threshold is 0
+// (ConsecutiveFailures >= 0 always holds), and a threshold above 4294967295
+// wraps when narrowed to uint32.
+func TestValidateFlagsRejectsCircuitBreakerValues(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      cliConfig
+		wantFlag string
+	}{
+		{"threshold negative", cliConfig{CBThreshold: -1, CBTimeout: time.Second}, "-cb-threshold"},
+		{"threshold zero", cliConfig{CBThreshold: 0, CBTimeout: time.Second}, "-cb-threshold"},
+		{"threshold above uint32", cliConfig{CBThreshold: 1 << 32, CBTimeout: time.Second}, "-cb-threshold"},
+		{"timeout zero", cliConfig{CBThreshold: 1, CBTimeout: 0}, "-cb-timeout"},
+		{"timeout negative", cliConfig{CBThreshold: 1, CBTimeout: -time.Second}, "-cb-timeout"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateFlags(&tt.cfg)
+			if err == nil {
+				t.Fatalf("validateFlags(%+v) = nil, want an error naming %s", tt.cfg, tt.wantFlag)
+			}
+			if !strings.Contains(err.Error(), tt.wantFlag) {
+				t.Errorf("error = %v, want it to name %s", err, tt.wantFlag)
+			}
+		})
+	}
+}
+
+// TestValidateFlagsAcceptsBoundaryValues pins that validation rejects only the
+// values that change the breaker's behaviour: the smallest and largest usable
+// threshold and the smallest positive timeout still start.
+func TestValidateFlagsAcceptsBoundaryValues(t *testing.T) {
+	for _, cfg := range []cliConfig{
+		{CBThreshold: 1, CBTimeout: time.Nanosecond},
+		{CBThreshold: 1<<32 - 1, CBTimeout: time.Second},
+	} {
+		if err := validateFlags(&cfg); err != nil {
+			t.Errorf("validateFlags(%+v) = %v, want nil", cfg, err)
+		}
+	}
+}
+
+// TestValidateFlagsAcceptsDefaults pins that the shipped defaults keep working.
+func TestValidateFlagsAcceptsDefaults(t *testing.T) {
+	c, _, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil) error: %v", err)
+	}
+	if err := validateFlags(c); err != nil {
+		t.Fatalf("validateFlags(defaults) = %v, want nil", err)
+	}
+}
+
+// TestCLIRejectsOutOfRangeThresholds checks the CLI contract: invalid ranges
+// produce a clear range error and exit 1, rather than a flag parse error (2).
+func TestCLIRejectsOutOfRangeThresholds(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "spnego-proxy.exe")
+	if out, err := exec.CommandContext(t.Context(), "go", "build", "-o", bin, ".").CombinedOutput(); err != nil { //nolint:gosec // G204: fixed build command; output path comes from t.TempDir().
+		t.Fatalf("build CLI: %v\n%s", err, out)
+	}
+	for _, value := range []string{"-1", "0", "4294967296"} {
+		t.Run(value, func(t *testing.T) {
+			cmd := exec.CommandContext(t.Context(), bin, "-proxy", "proxy.example:3128", "-cb-threshold", value) //nolint:gosec // G204: binary built above in t.TempDir(); arguments are fixed test values.
+			out, err := cmd.CombinedOutput()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+				t.Fatalf("CLI error = %v, want exit 1\n%s", err, out)
+			}
+			want := "-cb-threshold must be between 1 and 4294967295, got " + value
+			if !strings.Contains(string(out), want) {
+				t.Fatalf("CLI output = %s, want range error %q", out, want)
+			}
+		})
 	}
 }
