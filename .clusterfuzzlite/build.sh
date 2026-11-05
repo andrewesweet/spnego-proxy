@@ -2,10 +2,10 @@
 #
 # ClusterFuzzLite build script for spnego-proxy.
 #
-# Compiles the repo's 7 native `testing.F` fuzz targets into libFuzzer
-# binaries via OSS-Fuzz's `compile_native_go_fuzzer` helper.
+# Compiles the repo's 8 native `testing.F` fuzz targets into libFuzzer
+# binaries via OSS-Fuzz's `compile_native_go_fuzzer_v2` helper.
 #
-# go.mod invariant: `compile_native_go_fuzzer` rewrites native targets through
+# go.mod invariant: `compile_native_go_fuzzer_v2` rewrites native targets through
 # the go-118-fuzz-build shim, which requires the shim be importable. The
 # `go get` below mutates ONLY the container's throwaway copy of the module;
 # the committed repo go.mod/go.sum are never touched, so the
@@ -36,6 +36,7 @@ PKG=github.com/andrewesweet/spnego-proxy/internal/proxy
 # which emits all three files and replays the real corpus during coverage.
 compile_native_go_fuzzer_v2 "$PKG" FuzzNoProxyMatch            fuzz_no_proxy_match
 compile_native_go_fuzzer_v2 "$PKG" FuzzUpstreamResponseFraming fuzz_upstream_response_framing
+compile_native_go_fuzzer_v2 "$PKG" FuzzReadThroughInterim      fuzz_read_through_interim
 compile_native_go_fuzzer_v2 "$PKG" FuzzConnectPortChain        fuzz_connect_port_chain
 compile_native_go_fuzzer_v2 "$PKG" FuzzSameHost                fuzz_same_host
 compile_native_go_fuzzer_v2 "$PKG" FuzzIPAllowlistChain        fuzz_ip_allowlist_chain

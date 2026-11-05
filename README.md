@@ -3,8 +3,7 @@
 An HTTP proxy that handles SPNEGO (Kerberos) authentication on behalf of
 clients that don't support it. It sits between the application and the
 real proxy, forwarding requests with a `Proxy-Authorization: Negotiate`
-header. It does not alter nor inspect traffic between the client and the
-real proxy.
+header. CONNECT tunnel payloads remain opaque.
 
 This fork adds **native macOS GSS-API support**, allowing passwordless
 operation using Kerberos tickets from the macOS credential cache
@@ -158,6 +157,9 @@ password-based path instead of the native GSS-API:
   structured `Proxy-Status` header (e.g.,
   `spnego-proxy; error=connection_timeout`) for machine-readable
   diagnostics.
+
+- **Informational responses:** See [interim response handling](docs/http-proxy-standards-requirements.md#f2-interim-responses)
+  for the HTTP version rules on upstream and `-noproxy` routes.
 
 ### Known deviation: response Via fallback
 

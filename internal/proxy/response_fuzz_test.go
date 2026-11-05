@@ -3,12 +3,124 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"net/textproto"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+type interimFuzzConn struct {
+	net.Conn
+	output bytes.Buffer
+}
+
+func (c *interimFuzzConn) Write(p []byte) (int, error) {
+	return c.output.Write(p)
+}
+
+func FuzzReadThroughInterim(f *testing.F) {
+	f.Add([]byte{0, 2, 3}, "POST", false, false)
+	f.Add([]byte{3, 0}, "PUT", true, false)
+	f.Add([]byte{0, 3}, "PATCH", false, false)
+	f.Add([]byte{100, 102, 103, 199}, "POST", false, false)
+	f.Add([]byte{103, 100}, "PUT", true, false)
+	f.Add([]byte{100, 103}, "PATCH", false, true)
+	f.Add([]byte{103}, "HEAD", true, true)
+	f.Add([]byte{}, "GET", true, false)
+	f.Add([]byte{}, "GET", false, true)
+
+	f.Fuzz(func(t *testing.T, statuses []byte, method string, upgrade, http10 bool) {
+		if len(statuses) > 32 {
+			statuses = statuses[:32]
+		}
+		var upstream strings.Builder
+		wantStatuses := make([]string, 0, len(statuses))
+		for i, b := range statuses {
+			code := 100 + int(b)%100
+			if code == http.StatusSwitchingProtocols {
+				code = http.StatusProcessing
+			}
+			status := fmt.Sprintf("HTTP/1.1 %d Interim", code)
+			wantStatuses = append(wantStatuses, status)
+			fmt.Fprintf(&upstream, "%s\r\nX-Interim: %d\r\n", status, i)
+			if b&128 != 0 {
+				upstream.WriteString("Content-Length: 0\r\n")
+			} else if b&64 != 0 {
+				upstream.WriteString("Transfer-Encoding: chunked\r\n")
+			}
+			if b&32 != 0 {
+				upstream.WriteString("Trailer: X-Checksum\r\n")
+			}
+			upstream.WriteString("\r\n")
+		}
+		wantFinal := http.StatusOK
+		if upgrade {
+			wantFinal = http.StatusSwitchingProtocols
+			upstream.WriteString("HTTP/1.1 101 Switching Protocols\r\nX-Final: stop\r\n\r\n")
+		} else {
+			upstream.WriteString("HTTP/1.1 200 OK\r\nX-Final: stop\r\nContent-Length: 0\r\n\r\n")
+		}
+		const remainder = "HTTP/1.1 204 No Content\r\n\r\ntunnel-bytes"
+		upstream.WriteString(remainder)
+		req := &http.Request{Method: method, ProtoMajor: 1, ProtoMinor: 1}
+		if http10 {
+			req.ProtoMinor = 0
+		}
+		reader := bufio.NewReader(strings.NewReader(upstream.String()))
+		client := &interimFuzzConn{}
+		resp, clientErr, err := readThroughInterim(client, req, func() (*http.Response, error) {
+			return readUpstreamResponse(reader, req, testPseudonym)
+		})
+		if clientErr != nil || err != nil {
+			t.Fatalf("interim sequence failed: client=%v upstream=%v", clientErr, err)
+		}
+		if resp == nil {
+			t.Fatal("missing final response")
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != wantFinal || resp.Header.Get("X-Final") != "stop" {
+			t.Fatalf("RFC 9110 section 15.2: stopped at %s, want marked final %d", resp.Status, wantFinal)
+		}
+		remaining, err := io.ReadAll(reader)
+		if err != nil || string(remaining) != remainder {
+			t.Fatalf("consumed bytes beyond final response: remaining=%q, error=%v", remaining, err)
+		}
+		if http10 {
+			if client.output.Len() != 0 {
+				t.Fatalf("RFC 9110 section 15.2: HTTP/1.0 received interim bytes %q", client.output.Bytes())
+			}
+			return
+		}
+		wire := textproto.NewReader(bufio.NewReader(&client.output))
+		for i, wantStatus := range wantStatuses {
+			status, err := wire.ReadLine()
+			if err != nil || status != wantStatus {
+				t.Fatalf("interim %d: got %q, %v; want %q", i, status, err, wantStatus)
+			}
+			header, err := wire.ReadMIMEHeader()
+			if err != nil {
+				t.Fatalf("interim %d headers: %v", i, err)
+			}
+			for _, name := range []string{"Content-Length", "Transfer-Encoding", "Trailer"} {
+				if values, ok := header[name]; ok {
+					t.Fatalf("RFC 9110 section 8.6; RFC 9112 sections 6.1, 6.3: interim %d emitted %s: %v", i, name, values)
+				}
+			}
+			if header.Get("X-Interim") != strconv.Itoa(i) || !strings.Contains(header.Get("Via"), testPseudonym) {
+				t.Fatalf("interim %d lost forwarded headers: %v", i, header)
+			}
+		}
+		if extra, err := wire.R.ReadByte(); !errors.Is(err, io.EOF) {
+			t.Fatalf("unexpected bytes after interim headers: byte=%q, error=%v", extra, err)
+		}
+	})
+}
 
 // FuzzUpstreamResponseFraming exercises the request-smuggling surface: if this
 // proxy's response validators accept an upstream response, then serialising

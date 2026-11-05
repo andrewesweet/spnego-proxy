@@ -318,6 +318,95 @@ func TestD6_ClientPayloadNotSentBeforeUpstream2xx(t *testing.T) {
 	waitForDone(t, done)
 }
 
+func TestD6D7_ConnectInterimResponsesBeforeFinal(t *testing.T) {
+	for _, proto := range []string{"HTTP/1.1", "HTTP/1.0"} {
+		for _, status := range []int{http.StatusOK, http.StatusForbidden} {
+			t.Run(fmt.Sprintf("%s/%d", proto, status), func(t *testing.T) {
+				const clientPayload = "CLIENT-TUNNEL-DATA"
+				const serverPayload = "SERVER-TUNNEL-DATA"
+				upstream, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatalf("listen upstream: %v", err)
+				}
+				t.Cleanup(func() { _ = upstream.Close() })
+				go func() {
+					conn, err := upstream.Accept()
+					if err != nil {
+						return
+					}
+					defer func() { _ = conn.Close() }()
+					_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+					reader := bufio.NewReader(conn)
+					req, err := http.ReadRequest(reader)
+					if err != nil {
+						return
+					}
+					_ = req.Body.Close()
+					response := "HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n"
+					if status == http.StatusForbidden {
+						_, _ = io.WriteString(conn, response+"HTTP/1.1 403 Forbidden\r\nContent-Length: 6\r\n\r\ndenied")
+						return
+					}
+					if _, err := io.WriteString(conn, response+"HTTP/1.1 200 Connection Established\r\n\r\n"+serverPayload); err != nil {
+						return
+					}
+					_, _ = io.Copy(conn, reader)
+				}()
+
+				proxy := NewProxyUnderTest(t, upstream.Addr().String())
+				t.Cleanup(proxy.Close)
+				client, err := net.DialTimeout("tcp", proxy.Addr(), 5*time.Second)
+				if err != nil {
+					t.Fatalf("dial proxy: %v", err)
+				}
+				t.Cleanup(func() { _ = client.Close() })
+				_ = client.SetDeadline(time.Now().Add(5 * time.Second))
+				if _, err := io.WriteString(client, "CONNECT example.com:443 "+proto+"\r\nHost: example.com:443\r\n\r\n"+clientPayload); err != nil {
+					t.Fatalf("write CONNECT and payload: %v", err)
+				}
+				reader := bufio.NewReader(client)
+				resp, err := http.ReadResponse(reader, nil)
+				if err != nil {
+					t.Fatalf("read CONNECT response: %v", err)
+				}
+				if proto == "HTTP/1.1" {
+					assertStatusCode(t, resp, http.StatusEarlyHints)
+					assertHeaderPresent(t, resp.Header, "Link", "</style.css>; rel=preload")
+					if via := resp.Header.Get("Via"); !strings.Contains(via, testPseudonym) {
+						t.Errorf("interim Via: got %q, want proxy pseudonym", via)
+					}
+					_ = resp.Body.Close()
+					resp, err = http.ReadResponse(reader, nil)
+					if err != nil {
+						t.Fatalf("read final CONNECT response after 103 (RFC 9110 section 15.2): %v", err)
+					}
+				}
+				defer func() { _ = resp.Body.Close() }()
+				assertStatusCode(t, resp, status)
+				if status == http.StatusForbidden {
+					body, err := io.ReadAll(resp.Body)
+					if err != nil || string(body) != "denied" {
+						t.Fatalf("CONNECT rejection body: got %q, %v; want denied", body, err)
+					}
+					if _, err := reader.ReadByte(); !errors.Is(err, io.EOF) {
+						t.Fatalf("CONNECT rejection must close connection: got %v", err)
+					}
+					return
+				}
+				assertHeaderAbsent(t, resp.Header, "Content-Length")
+				assertHeaderAbsent(t, resp.Header, "Transfer-Encoding")
+				got := make([]byte, len(serverPayload)+len(clientPayload))
+				if _, err := io.ReadFull(reader, got); err != nil {
+					t.Fatalf("read established CONNECT tunnel (RFC 9110 section 9.3.6): %v", err)
+				}
+				if string(got) != serverPayload+clientPayload {
+					t.Fatalf("tunnel payload: got %q, want %q", got, serverPayload+clientPayload)
+				}
+			})
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // D7 — No premature 2xx: upstream non-2xx must be relayed to client, not 200
 // ---------------------------------------------------------------------------

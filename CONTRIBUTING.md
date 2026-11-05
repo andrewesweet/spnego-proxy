@@ -139,12 +139,12 @@ library directly (the Go team already does) — fuzz *our* logic, optionally
    `f.Fuzz`; targets must be hermetic and deterministic (no network, files,
    clock, randomness, global state) and build with `CGO_ENABLED=0`. This is
    what lets ClusterFuzzLite compile the native targets unchanged via
-   `compile_native_go_fuzzer`.
+   `compile_native_go_fuzzer_v2`.
 4. **Reproducer hygiene.** If a target fails: a *real* bug → fix the production
    code and commit the reproducer (it becomes a regression seed) with a `fix:`
    commit; an *unsound oracle* → tighten the predicate and **delete** the noise
    reproducer (do not commit it).
-5. **Register the target.** Add a `compile_native_go_fuzzer` line for every new
+5. **Register the target.** Add a `compile_native_go_fuzzer_v2` line for every new
    `Fuzz*` function in `.clusterfuzzlite/build.sh` so ClusterFuzzLite builds it.
 
 ### State-machine model checks

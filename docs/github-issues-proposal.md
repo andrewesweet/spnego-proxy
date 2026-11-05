@@ -609,7 +609,7 @@ hardening, but they are MUST-level requirements that affect correctness.
 | ID | Requirement | Level | RFC |
 | --- | --- | --- | --- |
 | F1 | Forward Expect: 100-continue to upstream | MUST | RFC 9110 §10.1.1 |
-| F2 | Do not forward 100 Continue to HTTP/1.0 clients | MUST NOT | RFC 9110 §10.1.1 |
+| F2 | [Interim response handling](http-proxy-standards-requirements.md#f2-interim-responses) | MUST / MUST NOT | RFC 9110 §15.2 |
 | G1 | Decrement Max-Forwards for TRACE/OPTIONS; stop at zero | MUST | RFC 9110 §7.6.2 |
 | I1 | Do not maintain persistent connection with HTTP/1.0 client | MUST NOT | RFC 9112 §9.3 |
 | I2 | Honor Connection: close from client | MUST | RFC 9112 §9.6 |
@@ -620,15 +620,9 @@ hardening, but they are MUST-level requirements that affect correctness.
 > **Note**: The implementation and testing details below are suggestions. The
 > assignee is free to vary the approach as long as the same goal is reached.
 
-1. **F1 (Expect: 100-continue)**: Go's `http.ReadRequest` strips the Expect
-   header by default for body handling. Verify whether `WriteProxy` re-includes
-   it. If not, preserve it manually before forwarding. This may require saving the
-   Expect value before ReadRequest processes it.
+1. **F1**: See the authoritative [Expect forwarding requirements and upload regression coverage](http-proxy-standards-requirements.md#f1-forward-expect-100-continue).
 
-2. **F2 (100 to HTTP/1.0)**: Since responses are forwarded via raw `io.Copy`,
-   interim 100 responses are passed through blindly. Implementing this properly
-   would require parsing the response stream. Document as a known gap if the
-   response path isn't refactored to use `http.ReadResponse`.
+2. **F2**: Implemented. See the authoritative [interim response requirements and regression coverage](http-proxy-standards-requirements.md#f2-interim-responses).
 
 3. **G1 (Max-Forwards)**: Before forwarding TRACE or OPTIONS requests, check for
    a `Max-Forwards` header. If present and the value is 0, generate a 200 response
@@ -672,7 +666,7 @@ Using the test harness from Issue 1:
 - [ ] HTTP/1.0 connections are closed after response
 - [ ] Connection: close is honored
 - [ ] Early-Data header passes through unchanged
-- [ ] Known gaps (F2 if response parsing not implemented) documented as follow-up
+- [x] F2: see [interim response requirements and regression coverage](http-proxy-standards-requirements.md#f2-interim-responses)
 - [ ] Tests cover all scenarios with RFC traceability
 - [ ] Existing tests continue to pass
 

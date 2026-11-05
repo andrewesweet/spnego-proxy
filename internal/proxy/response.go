@@ -3,11 +3,15 @@ package proxy
 import (
 	"bufio"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // logTECLConflict logs the Transfer-Encoding / Content-Length conflict
@@ -136,15 +140,19 @@ var errContentLengthInvalid = errors.New("invalid Content-Length in upstream res
 // forbidden control octet in a header value (RFC 9110 §5.5 / RFC 9112 §11.1).
 var errMalformedResponse = errors.New("malformed upstream response header")
 
-// readUpstreamResponse reads and validates an upstream HTTP response. It
+// readUpstreamResponse reads and validates one upstream HTTP response. It
 // performs: ReadResponse, Content-Length error detection, content-length
 // validation, Transfer-Encoding / Content-Length conflict resolution, and
 // Via header injection.
 //
+// The response it returns may be a 1xx interim response: http.ReadResponse
+// does not read past one (only http.Transport does), so relay loops that must
+// reach the final response go through readThroughInterim.
+//
 // On success it returns the parsed response (caller must close Body).
 // On Content-Length errors it returns errContentLengthInvalid so the caller
-// can send a 502. On other parse failures it returns a different error,
-// signalling the caller to fall back to raw relay.
+// can send a 502. Other parse failures are returned unchanged for callers to
+// pass to handleUpstreamResponseError.
 func readUpstreamResponse(upstreamReader *bufio.Reader, req *http.Request, pseudonym string) (*http.Response, error) {
 	resp, err := http.ReadResponse(upstreamReader, req)
 	if err != nil {
@@ -156,9 +164,8 @@ func readUpstreamResponse(upstreamReader *bufio.Reader, req *http.Request, pseud
 		// The match on the error string is deliberate: Go's
 		// net/http does not export a typed error for this case.
 		// If the wording changes in a future Go release, the
-		// worst outcome is falling through to the raw-relay path
-		// — not a security issue, since Go already rejected
-		// the malformed response.
+		// error is returned unchanged and handled as a generic parse failure.
+		// The response remains rejected by handleUpstreamResponseError.
 		if strings.Contains(err.Error(), "Content-Length") {
 			return nil, errContentLengthInvalid
 		}
@@ -203,4 +210,152 @@ func readUpstreamResponse(upstreamReader *bufio.Reader, req *http.Request, pseud
 	injectVia(resp.Header, resp.Proto, pseudonym)
 
 	return resp, nil
+}
+
+// isInterimResponse reports whether resp is a 1xx interim response that the
+// proxy must relay or drop before reading the final response. 101 Switching
+// Protocols is excluded: it is the final response of a protocol upgrade, and
+// the HTTP message stream ends there.
+func isInterimResponse(resp *http.Response) bool {
+	return resp.StatusCode >= 100 && resp.StatusCode < 200 &&
+		resp.StatusCode != http.StatusSwitchingProtocols
+}
+
+// clientCannotParseInterim reports whether the client that sent req cannot
+// parse a 1xx response. RFC 9110 §15.2 forbids sending one to an HTTP/1.0
+// client, while any HTTP/1.1-or-later client MUST be able to accept one it did
+// not ask for.
+func clientCannotParseInterim(req *http.Request) bool {
+	return !req.ProtoAtLeast(1, 1)
+}
+
+// relayInterimResponse relays one interim response to the client, or drops it
+// when the client speaks HTTP/1.0 (RFC 9110 §15.2). resp must already carry
+// the proxy's Via header, which RFC 9110 §7.6.3 requires on every forwarded
+// response. A write error means the client connection is gone.
+func relayInterimResponse(client net.Conn, req *http.Request, resp *http.Response) error {
+	defer func() { _ = resp.Body.Close() }()
+	if clientCannotParseInterim(req) {
+		return nil
+	}
+	var buf strings.Builder
+	fmt.Fprintf(&buf, "%s %s\r\n", resp.Proto, resp.Status)
+	if err := resp.Header.WriteSubset(&buf, map[string]bool{
+		headerContentLength: true,
+		"Transfer-Encoding": true,
+		headerTrailer:       true,
+	}); err != nil {
+		return err
+	}
+	buf.WriteString("\r\n")
+	_, err := io.WriteString(client, buf.String())
+	return err
+}
+
+// exchangeRequest reads responses while an Expect upload is being written, so
+// a client waiting for 100 Continue can receive it before sending its body.
+// Other requests retain the synchronous write-before-read path.
+func exchangeRequest(client, upstream net.Conn, req *http.Request, writeRequest func() error, readOne func() (*http.Response, error)) (resp *http.Response, requestWriteErr, clientWriteErr, err error) {
+	expectContinue := false
+	for _, value := range req.Header.Values("Expect") {
+		for token := range strings.SplitSeq(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "100-continue") {
+				expectContinue = true
+				break
+			}
+		}
+	}
+	if req.Body == nil || req.Body == http.NoBody || !expectContinue {
+		if requestWriteErr = writeRequest(); requestWriteErr != nil {
+			return
+		}
+		resp, clientWriteErr, err = readThroughInterim(client, req, readOne)
+		return
+	}
+
+	written := make(chan error, 1)
+	go func() {
+		writeErr := writeRequest()
+		if writeErr != nil {
+			// Wake a response read if the upload fails without a response.
+			_ = upstream.SetReadDeadline(time.Now())
+		}
+		written <- writeErr
+	}()
+	resp, clientWriteErr, err = readThroughInterim(client, req, readOne)
+	select {
+	case requestWriteErr = <-written:
+	default:
+		// A final response (for example 417) or a read/relay failure can
+		// arrive while the client still withholds its body. Unblock both
+		// possible upload waits and join before either reader is reused.
+		_ = client.SetReadDeadline(time.Now())
+		_ = upstream.SetWriteDeadline(time.Now())
+		requestWriteErr = <-written
+		if requestWriteErr == nil {
+			// The write completed before cancellation took effect, but the
+			// response still beat the upload. The upstream may have answered
+			// without reading the body (RFC 9110 §10.1.1 allows an early 417),
+			// so any body bytes it never consumed stay ahead of the next
+			// request: the connection must not be reused.
+			_ = client.SetReadDeadline(time.Time{})
+			_ = upstream.SetWriteDeadline(time.Time{})
+			if resp != nil {
+				resp.Close = true
+			}
+		} else if resp == nil {
+			// Report the response/relay failure that caused cancellation.
+			requestWriteErr = nil
+		}
+	}
+	// A failed/cancelled upload must not prevent reading an early final body.
+	_ = upstream.SetReadDeadline(time.Time{})
+	if resp != nil && requestWriteErr != nil {
+		// Preserve an early final response, but never reuse its incomplete
+		// request stream, even if the upload failed before we could cancel it.
+		resp.Close = true
+		requestWriteErr = nil
+	}
+	return
+}
+
+// readThroughInterim reads responses with readOne until the final response
+// arrives. Every 1xx other than 101 is interim (RFC 9110 §15.2): it is relayed
+// to an HTTP/1.1 client and dropped for an HTTP/1.0 client, and then the read
+// continues, because the final response to the request is still outstanding.
+// Draining this way keeps the upstream reader aligned with the client's
+// request stream, so a following request on a reused connection is answered by
+// its own response.
+//
+// readOne returns one parsed response with the proxy's Via header already
+// injected. Every interim response it returns is validated here before it is
+// serialized, so a readOne on a path with no wider response validation (the
+// -noproxy direct path) cannot relay forbidden header bytes. The returned
+// clientWriteErr reports a failed write of an interim response to the client;
+// err reports any other failure, including a rejected interim response header.
+// Both are nil on success.
+func readThroughInterim(client net.Conn, req *http.Request, readOne func() (*http.Response, error)) (resp *http.Response, clientWriteErr, err error) {
+	for {
+		resp, readErr := readOne()
+		if readErr != nil {
+			return nil, nil, readErr
+		}
+		if !isInterimResponse(resp) {
+			return resp, nil, nil
+		}
+		// The interim response is serialized to the client by hand
+		// (relayInterimResponse), so its header field names and values must be
+		// safe before that happens: a bare CR, LF, or NUL would be written to
+		// the client verbatim (RFC 9110 §5.5, RFC 9112 §11.1). The upstream
+		// path has already checked in readUpstreamResponse; the -noproxy path
+		// has no wider response validation, so the check belongs at this shared
+		// seam, before any byte is serialized.
+		if pe := validateResponseHeaderBytes(resp); pe != nil {
+			_ = resp.Body.Close()
+			return nil, nil, errMalformedResponse
+		}
+		if werr := relayInterimResponse(client, req, resp); werr != nil {
+			return nil, werr, nil
+		}
+	}
 }

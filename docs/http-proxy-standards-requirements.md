@@ -502,25 +502,32 @@ Defined error types relevant to spnego-proxy:
 **Level**: MUST
 **Details**: If a client sends `Expect: 100-continue`, the proxy must forward the Expect header to the upstream (unless the upstream is known to be HTTP/1.0).
 
+For plain HTTP on both upstream and `-noproxy` routes, the proxy reads responses while forwarding an `Expect: 100-continue` upload. It recognizes the `100-continue` token case-insensitively in comma-separated lists across all `Expect` field lines, ignoring surrounding whitespace. An HTTP/1.1 client can therefore receive `100 Continue` before sending its body. If the endpoint instead sends an early final response, the proxy relays it and closes the connection when the upload is incomplete.
+
 **Testing strategy**:
 
 - **White-box integration test**: Client sends `Expect: 100-continue`. Assert the upstream receives the `Expect` header.
-- **Test 100 response forwarding**: Upstream sends `100 Continue`. Assert the client receives it.
+- **Upload regression test**: `TestF2_ExpectContinueBeforeUpload` in [protocol_edge_cases_test.go](../internal/proxy/protocol_edge_cases_test.go) covers clients that wait for `100 Continue` before sending fixed-length or chunked bodies, comma-separated and repeated `Expect` fields, and early final rejection without an upload, on both routes.
+- **Response handling**: See [F2](#f2-interim-responses).
 - **Traceability**: RFC 9110 §10.1.1 ¶4.
 
-#### F2. Do Not Forward 100 to HTTP/1.0 Clients
+#### F2. Interim responses
 
-> "A proxy MUST NOT forward a 100 (Continue) response if the request message was received from an HTTP/1.0 (or earlier) client and did not include an Expect request-header field with the '100-continue' expectation."
->
-> — RFC 9110, §10.1.1
+**Source**: RFC 9110 §15.2.
 
-**Level**: MUST NOT
-**Details**: If the downstream client is HTTP/1.0, the proxy must suppress 100 Continue interim responses from the upstream.
+**Level**: MUST / MUST NOT
+**Details**: For each request, the proxy keeps reading after every 1xx response other than `101 Switching Protocols` until the final response arrives. It relays interim responses to HTTP/1.1 clients and suppresses them for HTTP/1.0 clients, regardless of whether the request includes `Expect`. Each relayed response carries the proxy's `Via` entry. The interim loop stops at 101 because the HTTP message stream ends at a protocol switch.
+
+Relayed interim responses have no body and omit `Content-Length`, `Transfer-Encoding`, and `Trailer` headers. Header names and values are validated before serialization on both routes.
+
+This behavior applies to plain HTTP and CONNECT through the upstream proxy, and to plain HTTP on the `-noproxy` direct path. Direct CONNECT establishes a TCP tunnel without reading an upstream HTTP response. On upstream CONNECT, interim responses do not establish or reject the tunnel; the subsequent final response determines the outcome. On persistent HTTP connections, reading through interim responses keeps each final response paired with its own request.
 
 **Testing strategy**:
 
-- **White-box integration test**: Client sends an HTTP/1.0 request without `Expect`. Mock upstream sends `100 Continue`. Assert the client does NOT receive the 100 response.
-- **Traceability**: RFC 9110 §10.1.1 ¶5.
+- **HTTP regression tests**: The `TestF2_*` tests in [protocol_edge_cases_test.go](../internal/proxy/protocol_edge_cases_test.go) cover ordered interim and final responses, version-dependent suppression, bodyless interim framing, and request/response alignment on both routes.
+- **CONNECT regression test**: `TestD6D7_ConnectInterimResponsesBeforeFinal` in [connect_test.go](../internal/proxy/connect_test.go) covers 103 followed by success or rejection for HTTP/1.1 and HTTP/1.0 clients, including tunnel payload preservation.
+- **Fuzz target**: `FuzzReadThroughInterim` in [response_fuzz_test.go](../internal/proxy/response_fuzz_test.go) checks interim sequences, the 101 stopping point, and unread bytes after the final response.
+- **Traceability**: RFC 9110 §15.2; RFC 9112 §6.3.
 
 ---
 
@@ -839,7 +846,7 @@ Per RFC 9113, §8.2.2: "intermediaries SHOULD also remove other connection-speci
 | E7 | Chunk-extensions forwarded without misframing | MUST |
 | E8 | Chunked trailer consistency | MUST |
 | F1 | Forward Expect: 100-continue | MUST |
-| F2 | Don't forward 100 to HTTP/1.0 clients | MUST NOT |
+| F2 | [Interim responses](#f2-interim-responses) | MUST / MUST NOT |
 | G1 | Max-Forwards for TRACE/OPTIONS | MUST |
 | I1 | No persistent connection with HTTP/1.0 clients | MUST NOT |
 | I2 | Honor Connection: close | MUST |
@@ -937,7 +944,7 @@ This harness will be reused by all subsequent requirement implementations and it
 | Priority | ID | Requirement | Rationale |
 | ---------- | ----- | ------------- | ----------- |
 | 27 | F1 | Forward Expect: 100-continue | **Correctness**: prevents client hangs |
-| 28 | F2 | Suppress 100 for HTTP/1.0 | **Correctness**: version-dependent behavior |
+| 28 | F2 | [Interim responses](#f2-interim-responses) | **Correctness**: version-dependent behavior |
 | 29 | G1 | Max-Forwards for TRACE/OPTIONS | **Correctness**: MUST decrement |
 | 30 | I1 | No persistent connection with HTTP/1.0 | **Correctness**: MUST NOT maintain |
 | 31 | I2 | Honor Connection: close | **Correctness**: MUST close when requested |

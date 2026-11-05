@@ -167,25 +167,33 @@ func (s *ClientSession) nextDirectRequest(boundHost, target string, iter int) *h
 // false means the connection must be closed, either because of an error or
 // because a side signalled close.
 func (s *ClientSession) relayDirect(req *http.Request, targetConn net.Conn, upstreamReader *bufio.Reader, target string, iter int) bool {
-	// Write request in origin form (not proxy form).
-	if err := req.Write(targetConn); err != nil {
-		s.logDirectError("noproxy write request", err, target)
+	slog.Debug("noproxy HTTP response forwarding start", "target", target, "client_addr", s.clientAddr, "iter", iter)
+	resp, requestErr, clientErr, rerr := exchangeRequest(s.conn, targetConn, req, func() error {
+		// Write request in origin form (not proxy form).
+		return req.Write(targetConn)
+	}, func() (*http.Response, error) {
+		resp, readErr := http.ReadResponse(upstreamReader, req)
+		if readErr != nil {
+			return nil, readErr
+		}
+		injectVia(resp.Header, resp.Proto, s.cfg.Pseudonym)
+		return resp, nil
+	})
+	if requestErr != nil {
+		s.logDirectError("noproxy write request", requestErr, target)
 		writeHTTPError(s.conn, errConnectionTerminated)
 		return false
 	}
-
-	slog.Debug("noproxy HTTP response forwarding start", "target", target, "client_addr", s.clientAddr, "iter", iter)
-	resp, rerr := http.ReadResponse(upstreamReader, req)
+	if clientErr != nil {
+		s.logDirectError("noproxy forward response", clientErr, target)
+		return false
+	}
 	if rerr != nil {
 		s.logDirectError("noproxy read response", rerr, target)
 		return false
 	}
-	injectVia(resp.Header, resp.Proto, s.cfg.Pseudonym)
-	if writeErr, derr := writeResponse(s.conn, resp); writeErr != nil {
+	if writeErr := writeResponse(s.conn, resp); writeErr != nil {
 		s.logDirectError("noproxy forward response", writeErr, target)
-		return false
-	} else if derr != nil {
-		slog.Debug("noproxy upstream body drain failed, closing connection", "error", derr, "target", target, "client_addr", s.clientAddr)
 		return false
 	}
 	slog.Debug("noproxy HTTP response forwarding done", "target", target, "client_addr", s.clientAddr, "iter", iter)
