@@ -1,32 +1,42 @@
 ---- MODULE Relay ----
 \* Keep-alive relay of plain-HTTP requests through the upstream proxy.
 \*
-\* Code (spnego-proxy at ecd1990):
-\*   internal/proxy/forward.go     run (197-227), readNextRequest (234-251),
-\*                                 relayViaUpstream (281-314), writeResponse (347-353)
-\*   internal/proxy/response.go    readUpstreamResponse (148-206), which calls
-\*                                 http.ReadResponse exactly once (149)
-\*   net/http Response.Write closes resp.Body after sending it, so the
-\*       io.Copy(io.Discard, resp.Body) that writeResponse runs next fails with
-\*       "http: invalid Read on closed Body" for every response with a body,
-\*       and relayViaUpstream returns false on that drain error (305-311).
+\* Code (spnego-proxy at 52034ab):
+\*   internal/proxy/forward.go     run (218-252), readNextRequest (322-345),
+\*                                 relayViaUpstream (347-392), writeResponse (422-436)
+\*   internal/proxy/response.go    readUpstreamResponse (156-217), which calls
+\*                                 http.ReadResponse once per call (157), and
+\*                                 readThroughInterim (337-361), which calls
+\*                                 readUpstreamResponse until the final response
+\*                                 and relays every non-101 1xx it reads
+\*                                 (relayInterimResponse, 236-256; dropped for
+\*                                 an HTTP/1.0 client, 228-234)
+\*   net/http Response.Write closes resp.Body after sending it, so
+\*       writeResponse runs no drain: a read or close failure on the body comes
+\*       back from Write as its error, and the caller treats that as fatal.
 \*
 \* One action is one blocking I/O call of the session goroutine, or one message
 \* sent by the client or the upstream. Every request and response here is
-\* keep-alive, so connectionWillClose (forward.go 95-100) is always false.
+\* keep-alive, so connectionWillClose (forward.go 97-108) is always false.
 \* Dial, SPNEGO token and header rewriting are folded into ProxyForwardsRequest:
 \* they do not change which response the proxy pairs with which request.
+\* Relaying a 1xx is folded into the read action that reads it: the client is
+\* the only other party of that write, and ClientSkipsInterim consumes it.
+\* The shutdown checks of readRequest and writeResponse are outside this model.
 \* Each request may receive up to MaxInterim 1xx messages before its final
-\* response, so the fixed config reads past a 1xx more than once.
+\* response, so the read loop reads past a 1xx more than once.
 EXTENDS Naturals, Sequences
 
 CONSTANTS
   N,             \* requests the client sends on one connection
-  LoopOnInterim, \* FALSE: the code at ecd1990. TRUE: the fix direction, which
-                 \* relays each 1xx and keeps reading until a final response.
-  BodyEndsConnection \* TRUE: the code at ecd1990 (the drain error after a body).
-                     \* FALSE: fix direction, a drain that succeeds once
-                     \* resp.Write has sent the whole body.
+  LoopOnInterim, \* TRUE: the code: readThroughInterim relays each non-101 1xx
+                 \* and keeps reading until a final response. FALSE: sabotage,
+                 \* one http.ReadResponse per response, a 1xx relayed as the
+                 \* answer (the code at ecd1990).
+  BodyEndsConnection \* FALSE: the code: no drain, Response.Write has sent and
+                     \* closed the body. TRUE: sabotage, the ecd1990 drain,
+                     \* which failed after every response with a body and
+                     \* closed the connection.
 
 VARIABLES
   pc,         \* where the session goroutine is
@@ -117,7 +127,7 @@ ProxyReadsRequest ==
   /\ UNCHANGED <<resp, sent, answered, toClient, upReqs, upstream, interims, closedOnBody>>
 
 \* readNextRequest fails on a later iteration: the ReadTimeout deadline passes,
-\* or the client hangs up. run returns and handleClient closes the connection.
+\* or the client hangs up. run returns and handleClientCtx closes the connection.
 ProxyStopsWaiting ==
   /\ pc = "read_request"
   /\ toProxy = <<>>
@@ -131,8 +141,9 @@ ProxyForwardsRequest ==
   /\ pc' = "read_response"
   /\ UNCHANGED <<cur, resp, toProxy, sent, answered, toClient, upstream, interims, closedOnBody>>
 
-\* readUpstreamResponse: one http.ReadResponse call. It returns whatever message
-\* is next in upstreamReader, 1xx included.
+\* One readThroughInterim iteration calls readUpstreamResponse to read the next
+\* message, relaying a 1xx and continuing in the code config. The single-read
+\* sabotage instead treats that 1xx as the answer.
 ProxyReadsResponse ==
   /\ pc = "read_response"
   /\ upstream # <<>>
@@ -146,7 +157,7 @@ ProxyReadsResponse ==
   /\ UNCHANGED <<cur, toProxy, sent, answered, upReqs, interims, closedOnBody>>
 
 \* writeResponse, then return !connectionWillClose(req, resp), which is true
-\* here unless the body drain failed.
+\* here unless the sabotage's body drain failed.
 ProxyRelaysResponse ==
   /\ pc = "write_response"
   /\ toClient' = Append(toClient, resp)
@@ -198,7 +209,7 @@ Spec == Init /\ [][Next]_vars
 \* the ReadTimeout wait.
 EveryRequestAnswered == pc = "closed" => Owed = 0
 
-\* readUpstreamResponse(reader, req) returns req's own final response. Breaking
+\* readThroughInterim returns req's own final response. Breaking
 \* it: the proxy relays a 1xx as req's answer, and frames a later message with
 \* the wrong request.
 ProxyReadsOwnResponse == pc = "write_response" => resp.kind = "final" /\ resp.for = cur

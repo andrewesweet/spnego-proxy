@@ -1,6 +1,6 @@
 ---
 name: verify-state-machines
-description: "Re-run the TLA+ model checks that formal/ holds for spnego-proxy's concurrent state machines: the keep-alive relay, the token circuit breaker, the CONNECT tunnel idle timeout, the accept loop and shutdown, the -noproxy direct loop, and the gokrb5 TGT renewal goroutine. Use after changing internal/proxy/forward.go, response.go, connect.go, server.go, direct.go, circuit_breaker.go or auth_gokrb5.go, after changing a flag listed under 'When to run the checks', or when you need the shortest path through a state machine that breaks one of its promises."
+description: "Re-run the TLA+ model checks that formal/ holds for spnego-proxy's concurrent state machines: the keep-alive relay, the token circuit breaker, the CONNECT tunnel idle timeout, the accept loop and shutdown, the -noproxy direct loop, and the gokrb5 TGT session behind the breaker. Use after changing internal/proxy/forward.go, response.go, connect.go, tunnel_write.go, server.go, direct.go, circuit_breaker.go or auth_gokrb5.go, after changing a flag listed under 'When to run the checks', or when you need the shortest path through a state machine that breaks one of its promises."
 ---
 
 # Verify the state machines
@@ -105,12 +105,13 @@ Three things in a report are easy to misread:
 
 ## The models
 
-The summaries, function names, and verdicts below describe the baseline in the
+The summaries, function names, and verdicts below describe the state in the
 [coverage record](#coverage-record). Rule names are the TLA+ names; each sentence
-is the promise in plain words and the harm when it breaks. `breaks` marks a rule
-the baseline config is expected to break; those breaks are defects of that
-baseline, each tracked as a GitHub issue. Do not weaken a rule, a bound or a
-config to clear one.
+is the promise in plain words and the harm when it breaks. Each model has a
+plain `<Model>.cfg` for the code as it is — every rule must hold there — and
+`<Model>Sabotage*.cfg` configs that deliberately break the code in one recorded
+way and must break exactly the rules listed for them. Do not weaken a rule, a
+bound or a config to clear one.
 
 ### m1-relay-keepalive — `Relay.tla`
 
@@ -119,108 +120,126 @@ is one blocking I/O call of the session goroutine, or one message from the
 client or the upstream; dialling, the SPNEGO token and header rewriting are
 folded into the forwarding step because they do not change which response is
 paired with which request. A request may receive up to two 1xx messages before
-its final response, so the fix direction reads past a 1xx more than once.
+its final response, and `readThroughInterim` relays each non-101 1xx to an
+HTTP/1.1-or-later client and keeps reading until the final response; for an
+HTTP/1.0 client the interim is dropped instead of relayed (RFC 9110 §15.2,
+`clientCannotParseInterim`). The model covers the HTTP/1.1 path.
 
 Covers `internal/proxy/forward.go` (`run`, `readNextRequest`,
 `relayViaUpstream`, `writeResponse`), `internal/proxy/response.go`
-(`readUpstreamResponse`, which calls `http.ReadResponse` once), and `net/http`'s
-`Response.Write` closing the body it sent.
+(`readUpstreamResponse`, which calls `http.ReadResponse` once per call, and
+`readThroughInterim`), and `net/http`'s `Response.Write` closing the body it
+sent, which is why `writeResponse` runs no drain.
 
 - `EveryRequestAnswered` — the proxy closes a client connection only after every
   request the client sent has a final answer. Break: the client's request fails
-  after the read timeout instead of being answered. **breaks**
+  after the read timeout instead of being answered.
 - `ProxyReadsOwnResponse` — the proxy relays the final response belonging to the
   request it just forwarded, never an interim (1xx) message. Break: a 1xx is
   relayed as the answer and a later message is framed against the wrong request.
-  **breaks**
 - `KeepAliveKept` — the connection survives a response that both sides keep
   alive. Break: every response with a body costs the client a new connection and
-  the proxy a new upstream connection and token. **breaks**
+  the proxy a new upstream connection and token.
 
-Configs: `Relay.cfg` (baseline code, `N=2`), `RelayDrainFixed.cfg` and
-`RelayInterimFixed.cfg` (baseline code with one of the two defects fixed, which
-isolates the other), `RelayFixed.cfg` (the fix direction for both, `N=3`; all
-rules hold).
+Configs: `Relay.cfg` (the code; all rules hold), `RelaySabotageSingleRead.cfg`
+(deliberately broken: the 1xx loop removed, the ecd1990 shape, where
+`EveryRequestAnswered` and `ProxyReadsOwnResponse` must break),
+`RelaySabotageBodyDrain.cfg` (deliberately broken: the ecd1990 body drain
+restored, where `EveryRequestAnswered` and `KeepAliveKept` must break).
 
 ### m2-token-breaker — `Breaker.tla`
 
 The circuit breaker around SPNEGO token acquisition, with concurrent callers,
-while the configured password no longer works. `beforeRequest` and
-`afterRequest` are separate atomic steps as in gobreaker, the inner `GetToken`
-calls are serialised as in the gokrb5 provider, and the open-to-half-open expiry
-is one abstract step.
+while the configured password no longer works. The backend abstraction has
+neither a cached TGT nor a password-rejection latch: every admitted inner call
+attempts one rejected login. This conservatively checks the breaker's bounds;
+current gokrb5 rejects repeat calls for the same rejected fingerprint without
+KDC contact, as m6 models. `beforeRequest` and `afterRequest` are separate atomic
+steps as in gobreaker. Inner calls are serialised by the backend mutex and by
+the mutex held across the whole `Execute`; open-to-half-open expiry is one
+abstract step.
 
 Covers `internal/proxy/circuit_breaker.go` (`NewCircuitBreakerTokenProvider`,
 `GetToken`), gobreaker's `Execute`, `beforeRequest`, `afterRequest`,
-`onFailure` and `currentState`, `internal/proxy/auth_gokrb5.go` (`GetToken`,
-which holds its mutex across `AcquireCred` and `InitSecContext`), and
+`onFailure` and `currentState`, the mutex in `internal/proxy/auth_gokrb5.go`
+(`GetToken`, held across `ticketGrantingClient` and `InitSecContext`, with the
+password-rejection latch omitted), and
 `internal/proxy/forward.go` (`dialAndAuthUpstream`, one `GetToken` per upstream
 connection, so each client connection is a caller).
 
 - `KDCFailuresBounded` — the KDC sees at most `-cb-threshold` rejected logins
   plus one per half-open probe. Break: a burst of client connections makes more
   failed logins than the breaker allows, and those count towards account
-  lockout. **breaks**
+  lockout.
 - `NoLoginWhileOpen` — no login reaches the KDC while the breaker is open.
-  **breaks**
-- `SingleProbe` — while half-open, one probe is in flight. Holds at the baseline.
+- `SingleProbe` — while half-open, one probe is in flight. Holds in the code
+  config and breaks only in `BreakerSabotageMaxRequests.cfg`.
 
-Configs: `Breaker.cfg` (baseline code, four callers), `BreakerFixed.cfg` (a mutex
-held across the whole `Execute`, two calls per caller, which also crosses
-open → half-open → open), `BreakerSabotageMaxRequests.cfg` (deliberately broken:
-`MaxRequests` 2, where `SingleProbe` must break).
+Configs use this latch-free backend abstraction: `Breaker.cfg` (current
+breaker settings, four callers and two calls each, crossing open → half-open →
+open; all rules hold), `BreakerSabotageUnserialised.cfg` (the `Execute` mutex
+removed, the ecd1990 shape, where `KDCFailuresBounded` and `NoLoginWhileOpen`
+must break), and `BreakerSabotageMaxRequests.cfg` (the mutex removed and
+`MaxRequests` 2, where `SingleProbe` must break). The first sabotage's KDC
+failures do not reproduce current gokrb5 with only the outer mutex removed:
+its inner mutex and fingerprint latch allow only one rejected login for an
+unchanged password.
 
 ### m3-connect-tunnel — `Tunnel.tla`
 
 An established CONNECT tunnel with `-idle-timeout` enabled. Time is abstract: a
 direction's read deadline may pass whenever its source is quiet, and
-`otherActive` records whether the other direction moved data since that deadline
-was set. `timeoutReArms` counts the fix direction's deadlines that passed while
-the other direction was active and were re-armed; `cutWhileFlowing` counts
-every cut. In the fix direction the guard makes a cut while the other direction
-is active impossible by construction, so `Tunnel.cfg` is the config that makes
-`IdleCutOnlyWhenIdle` a check rather than a tautology.
+`otherActive` records whether the tunnel moved data since that deadline was
+armed — in the code that is the shared tunnelClock, whose last touch can come
+from either half. `timeoutReArms` counts the deadlines that passed while the
+tunnel was not idle and were re-armed; `cutWhileFlowing` counts every cut.
 
 Covers `internal/proxy/connect.go` (`idleCopy`, `forwardHalf`,
-`forwardTunnel`), `internal/proxy/forward.go` (`handleClient`, which closes both
-connections after the tunnel returns), and the `-idle-timeout` help text in
-`cli.go`.
+`forwardTunnel`, the `tunnelClock`), `internal/proxy/tunnel_write.go`
+(`tunnelConn`, which re-arms the read deadline and arms a write deadline),
+`internal/proxy/forward.go` (`handleClientCtx`, which closes both connections
+after the tunnel returns), and the `-idle-timeout` help text in `cli.go`.
 
 - `IdleCutOnlyWhenIdle` — a read deadline never cuts a direction, and never
   closes the tunnel, while the other direction moved data in that read window.
   Break: a long one-way transfer (a download where the client sends nothing)
-  loses its other direction at the timeout. **breaks**
+  loses its other direction at the timeout.
 - `NoDataDroppedWhileOpen` — see the invariant comment in
   [`Tunnel.tla`](../../../formal/m3-connect-tunnel/Tunnel.tla) for its precise
-  safety guarantee and delivery limits. **breaks**
+  safety guarantee and delivery limits.
 - `NoDeadlock` — an open tunnel never reaches a state with no enabled step.
   Break: a tunnel whose reader stops reading can become stuck without closing.
-  This checks for dead ends, not eventual termination. **breaks**
+  This checks for dead ends, not eventual termination.
 
-Configs: `Tunnel.cfg` (baseline code: one read deadline per direction, no write
-deadline), `TunnelFixed.cfg` (a deadline that sees both directions, plus a write
-deadline; all rules hold).
+Configs: `Tunnel.cfg` (the code: one deadline that sees both directions, plus
+a write deadline; all rules hold), `TunnelSabotagePerDirection.cfg`
+(deliberately broken: one read deadline per direction and no write deadline,
+the ecd1990 shape, where all three rules must break).
 
 ### m4-serve-shutdown — `Serve.tla`
 
 Shutdown of the accept loop and of the keep-alive connections it started. Time
-is abstract, except that the fix's urgent close of idle connections happens
+is abstract, except that the code's urgent close of idle connections happens
 before any deadline passes.
 
-Covers `internal/proxy/server.go` (`Serve`: the accept goroutine, the
-`<-acceptDone` wait before `wg.Wait`, the drain timeout), `internal/proxy/forward.go`
-(`run`, `readNextRequest`, which never looks at the shutdown context), and
-`main.go`'s signal handling.
+Covers `internal/proxy/server.go` (`Serve`: the accept goroutine with its
+backoff, the `<-acceptDone` wait before `wg.Wait`, the drain timeout),
+`internal/proxy/forward.go` (`handleClientCtx`, `readRequest`, which discards a
+request read after shutdown began, and `writeResponse`, which ends a busy
+connection after its response), and `main.go`'s signal handling.
 
 - `NoAddAfterWait` — no connection handler starts after shutdown has begun
-  waiting. Holds at the baseline.
+  waiting. Holds in the code config.
 - `DrainSkipsIdle` — shutdown waits only for requests in flight, never for a
-  read deadline on a connection sitting idle between requests. **breaks**
+  read deadline on a connection sitting idle between requests.
 
-Configs: `Serve.cfg` (baseline code), `ServeFixed.cfg` (shutdown closes idle
-connections and ends each busy connection after its current response; all rules
-hold), `ServeSabotageNoAcceptDone.cfg` (deliberately broken: the `<-acceptDone`
-wait removed, where `NoAddAfterWait` must break).
+Configs: `Serve.cfg` (the code; all rules hold), `ServeSabotageNoIdleClose.cfg`
+(deliberately broken: only the idle-connection close removed; shutdown still
+stops admission, discards requests read after it began, and ends busy connections
+after their responses, which isolates the ecd1990 idle-close behaviour —
+`DrainSkipsIdle` must break),
+`ServeSabotageNoAcceptDone.cfg` (deliberately broken: the `<-acceptDone` wait
+removed, where `NoAddAfterWait` must break).
 
 ### m5-direct-loop — `DirectLoop.tla`
 
@@ -231,50 +250,55 @@ covers plain-HTTP requests only: the 400 that `nextDirectRequest` answers for a
 CONNECT on a bound direct connection is not modelled, so a regression there
 would not show.
 
-Covers `internal/proxy/forward.go` (`run`, `routeNoProxy`),
-`internal/proxy/direct.go` (`forwardDirect`, `nextDirectRequest`, `relayDirect`,
-`sameHost`).
+Covers `internal/proxy/forward.go` (`run`, `routeRequest`),
+`internal/proxy/direct.go` (`forwardDirect`, `nextDirectRequest`,
+`relayDirect`, `sameHost`).
 
 - `BoundHostOnly` — a request written on a direct connection is for that
-  connection's host. Holds at the baseline.
+  connection's host. Holds in the code config.
 - `PolicyRouting` — matching hosts go direct and the rest go upstream, as
-  `-noproxy` says. Holds at the baseline.
+  `-noproxy` says. Holds in the code config.
 - `MixedHostsServed` — a request is never refused only because an earlier
-  request on the same client connection went to another host. **breaks**
+  request on the same client connection went to another host.
 
-Configs: `DirectLoop.cfg` (baseline code: the request is answered with 400 and
-the loop ends), `DirectLoopReroute.cfg` (alternative: the loop ends and the
-request is routed again; all rules hold), `DirectLoopSabotageNoCheck.cfg`
+Configs: `DirectLoop.cfg` (the code: the loop ends and the request is routed
+again; all rules hold), `DirectLoopSabotageRefuse.cfg` (deliberately broken:
+the ecd1990 refusal, where the request is answered with 400 and the loop ends,
+and `MixedHostsServed` must break), `DirectLoopSabotageNoCheck.cfg`
 (deliberately broken: the `sameHost` check removed, where `BoundHostOnly` and
 `PolicyRouting` must break).
 
 ### m6-tgt-renewal — `Renewal.tla`
 
 The gokrb5 TGT session behind the circuit breaker, after the configured password
-stops working. Time is abstract: the TGT moves fresh → last sixth → expired, and
-`R` stands for the renewal goroutine's retries before expiry. One caller makes
-its `GetToken` calls one at a time, so m2's burst plays no part here.
+stops working. Time is abstract: the TGT moves fresh → past its refresh point
+(5/6 of the lifetime) → expired, and every state past the refresh point makes
+the next `GetToken` replace the TGT with one password AS exchange. The only
+password login is that replacement, inside `GetToken`; `checkPasswordRejected`
+refuses every login without KDC contact until the password value changes. The
+recovery path depends on the source: a `-password-file` is re-read on every
+check, so an edited file clears the latch on the next admitted call (the
+`PasswordFileChanged` step); a password typed at a terminal lives in the
+provider for the life of the process, so it cannot change and only a restart
+clears the latch — that path has no model step. One caller makes its
+`GetToken` calls one at a time, so m2's burst plays no part here.
 
-Covers `internal/proxy/circuit_breaker.go` (`GetToken`), `internal/proxy/auth_gokrb5.go`
-(`GetToken`), gokrb5's `client/client.go` (`Login`, `AffirmLogin`,
-`realmLogin`), `client/session.go` (`enableAutoSessionRenewal`,
-`refreshSession`, `ensureValidSession`), and `client/TGSExchange.go`
-(`GetServiceTicket`).
+Covers `internal/proxy/circuit_breaker.go` (`GetToken`, the mutex held across
+`Execute`), `internal/proxy/auth_gokrb5.go` (`GetToken`,
+`ticketGrantingClient`, `acquireCredential`, `checkPasswordRejected`,
+`tgtRefreshDeadline`), and the absence of a session renewal goroutine:
+gokrb5's auto-renewal and its password-login fallback are outside the provider.
 
 - `BreakerSeesEveryRejectedLogin` — every password login the KDC rejects is a
   failure the breaker counts. Break: the renewal goroutine retries logins the
   breaker never sees, so the lockout count climbs past `-cb-threshold`.
-  **breaks** with a non-renewable TGT
 - `RejectedLoginsBounded` — the KDC sees at most `-cb-threshold` rejected
-  logins plus one per half-open probe. **breaks** with a non-renewable TGT
+  logins plus one per half-open probe.
 
-Configs: `RenewalNonRenewable.cfg` (baseline code with a non-renewable TGT),
-`RenewalRenewable.cfg` (baseline code only while every refresh occurs before
-`renewTill`; both rules hold within that scope), `RenewalFixed.cfg` (every
-password login runs inside `GetToken`; all rules hold). `RenewTillAhead` is a
-constant scenario assumption, not the ticket's renewable flag. The model does
-not cover a renewable TGT reaching `renewTill`: a delayed timer can then call
-`refreshSession`, which falls back to password login outside the breaker.
+Configs: `Renewal.cfg` (the code; all rules hold),
+`RenewalSabotageGoroutineRefresh.cfg` (deliberately broken: the ecd1990 shape,
+a renewal goroutine that logs in outside `GetToken` and the breaker, where both
+rules must break).
 
 ## When to run the checks
 
@@ -325,22 +349,21 @@ When a machine changes on purpose, bring the model with it in the same commit:
 
 ## Coverage record
 
-Each model was last confirmed against the code at **commit `ecd1990`**. The line
+Each model was last confirmed against the code at **commit `52034ab`**. The line
 numbers in the models' header comments refer to that commit; when a listed
 function has moved, treat the model as unconfirmed until you have re-read it.
 
-The keep-alive, shutdown, and direct-routing code has changed since this
-baseline; m1, m4, and m5 remain unconfirmed against those changes. For the current
-user-facing contract, see [HTTP connection reuse and shutdown](../../../README.md#http-connection-reuse-and-shutdown).
+For the current user-facing contract, see
+[HTTP connection reuse and shutdown](../../../README.md#http-connection-reuse-and-shutdown).
 
-| Model | Code at `ecd1990` |
+| Model | Code at `52034ab` |
 | --- | --- |
 | m1 | `internal/proxy/forward.go`, `internal/proxy/response.go` |
-| m2 | `internal/proxy/circuit_breaker.go`, `internal/proxy/auth_gokrb5.go`, `internal/proxy/forward.go`, gobreaker v2.4.0 |
-| m3 | `internal/proxy/connect.go`, `internal/proxy/forward.go`, `cli.go` (`-idle-timeout`) |
+| m2 | `internal/proxy/circuit_breaker.go`, `internal/proxy/auth_gokrb5.go` (mutex only; cached TGT and password-rejection latch omitted), `internal/proxy/forward.go`, gobreaker v2.4.0 |
+| m3 | `internal/proxy/connect.go`, `internal/proxy/tunnel_write.go`, `internal/proxy/forward.go`, `cli.go` (`-idle-timeout`) |
 | m4 | `internal/proxy/server.go`, `internal/proxy/forward.go`, `main.go` |
 | m5 | `internal/proxy/direct.go`, `internal/proxy/forward.go` |
-| m6 | `internal/proxy/circuit_breaker.go`, `internal/proxy/auth_gokrb5.go`, gokrb5 v8.4.4 |
+| m6 | `internal/proxy/circuit_breaker.go`, `internal/proxy/auth_gokrb5.go` (gokrb5 internals no longer covered) |
 
 ## What the checks do not cover
 
@@ -355,7 +378,9 @@ user-facing contract, see [HTTP connection reuse and shutdown](../../../README.m
   fuzz targets (see `CONTRIBUTING.md`).
 - **The macOS GSS provider**, upstream TLS, the dial paths, `netutil.LimitListener`
   and the Windows build.
-- **The accept-error spin**, which is outside m4's rules.
+- **The accept-error backoff**: the accept loop waits out an exponential
+  backoff between failed accepts (server.go); m4 treats the loop's retry as
+  one step and does not model the backoff timing.
 
 ## Keeping this file in line
 

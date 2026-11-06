@@ -2,29 +2,33 @@
 \* One client connection's keep-alive loop, through the upstream proxy and
 \* after a request matched -noproxy.
 \*
-\* Code (spnego-proxy at ecd1990):
-\*   internal/proxy/forward.go  run (197-227): every request on the upstream
-\*       loop goes through routeNoProxy (257-273); a match hands the client
-\*       connection to forwardDirect, and run returns when forwardDirect returns.
-\*   internal/proxy/direct.go  forwardDirect (96-122) dials the request's host
-\*       and binds the loop to it (boundHost, 109); nextDirectRequest (131-162)
-\*       answers a request for any other host, or a CONNECT, with 400
-\*       errMismatchedTarget and ends the loop (146-159); relayDirect (169-193)
-\*       writes the request on the bound connection.
-\* Hosts are compared after sameHost's canonical form (24-42); the parsing
+\* Code (spnego-proxy at 52034ab):
+\*   internal/proxy/forward.go  run (218-252): every request goes through
+\*       routeRequest (254-283); a request that could not be served on the
+\*       connection it arrived on comes back as pending and is routed again.
+\*   internal/proxy/direct.go  forwardDirect (99-139) dials the request's host
+\*       and binds the loop to it (boundHost, 117); nextDirectRequest (141-179)
+\*       checks the bound host before validating (153-157) and reports a
+\*       request for another host with reroute set, which ends the loop and
+\*       routes that request again; relayDirect (181-218) writes the request
+\*       on the bound connection.
+\* Hosts are compared after sameHost's canonical form (29-44); the parsing
 \* itself is out of scope here (fuzzed separately).
 \* The model covers plain-HTTP requests only. nextDirectRequest also answers a
-\* CONNECT on a bound direct connection with 400 errMismatchedTarget; that
-\* refusal is not modelled, so a regression in it would not show here.
+\* CONNECT on a bound direct connection with 400 errMismatchedTarget (165-170);
+\* that refusal is not modelled, so a regression in it would not show here. A
+\* CONNECT for another host is routed again like any other request (Route).
 EXTENDS Naturals, Sequences
 
 CONSTANTS
   Hosts,        \* target hosts
   Bypass,       \* the hosts that match -noproxy
   N,            \* requests the client sends on the connection
-  CheckBound,   \* TRUE: the code. FALSE: sabotage, without the sameHost check (148).
-  Reroute       \* FALSE: the code. TRUE: alternative: a request for another host
-                \* ends the direct loop and goes through routeNoProxy again.
+  CheckBound,   \* TRUE: the code. FALSE: sabotage, without the bound-host check (153).
+  Reroute       \* TRUE: the code: a request for another host ends the direct
+                \* loop and goes through routeRequest again. FALSE: sabotage,
+                \* the ecd1990 refusal: the request is answered 400
+                \* errMismatchedTarget and the loop ends.
 
 Upstream == "upstream"
 
@@ -50,7 +54,7 @@ Init ==
   /\ wire = <<>>
   /\ refused = 0
 
-\* routeNoProxy, then either relayViaUpstream or a new forwardDirect loop.
+\* routeRequest chooses relayViaUpstream or a new forwardDirect loop.
 Route(h) ==
   IF h \in Bypass
     THEN /\ route' = "direct"

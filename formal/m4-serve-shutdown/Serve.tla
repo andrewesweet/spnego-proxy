@@ -1,19 +1,25 @@
 ---- MODULE Serve ----
 \* Shutdown of the accept loop and of the keep-alive connections it started.
 \*
-\* Code (spnego-proxy at ecd1990):
-\*   internal/proxy/server.go  Serve (16-54). The accept goroutine (19-36)
+\* Code (spnego-proxy at 52034ab):
+\*   internal/proxy/server.go  Serve (44-92). The accept goroutine (45-77)
 \*       loops on l.Accept(): an error returns when ctx is done and otherwise
-\*       logs and continues; a connection starts wg.Go(handleClient). The main
-\*       path waits for ctx.Done(), closes the listener, waits for acceptDone,
+\*       logs, waits out an exponential backoff while watching ctx, and
+\*       retries; a connection starts wg.Go(handleClientCtx). The main path
+\*       waits for ctx.Done(), closes the listener, waits for acceptDone,
 \*       then races wg.Wait() against time.After(drainTimeout).
-\*   internal/proxy/forward.go  run (197-227) and readNextRequest (234-251):
-\*       the keep-alive loop reads each next request under a ReadTimeout
-\*       deadline and never looks at the shutdown context.
-\*   main.go (75-79): SIGINT or SIGTERM cancels ctx; when Serve returns,
+\*   internal/proxy/forward.go  handleClientCtx (152-216) starts a watcher
+\*       goroutine that closes the connection at once while it is idle
+\*       between requests (beginShutdown, 309-320). readRequest (285-307)
+\*       sets the idle flag around the deadline-guarded http.ReadRequest and
+\*       discards a request that was read after shutdown began. writeResponse
+\*       (422-436) sends Connection: close when shutdown began before the
+\*       header was serialized, so a busy connection ends after the response
+\*       it is sending.
+\*   main.go (81-84): SIGINT or SIGTERM cancels ctx; when Serve returns,
 \*       provider.Close() runs and the process ends.
 \*
-\* Time is abstract, except that the fix's urgent step (closing idle
+\* Time is abstract, except that the code's urgent step (closing idle
 \* connections at shutdown) happens before any step that needs time to pass:
 \* a read deadline or the drain timeout.
 EXTENDS Naturals
@@ -21,10 +27,10 @@ EXTENDS Naturals
 CONSTANTS
   K,              \* client connections
   R,              \* requests each client sends at most
-  WaitAcceptDone, \* TRUE: the code (<-acceptDone before wg.Wait). FALSE: sabotage.
-  DrainCloses     \* FALSE: the code. TRUE: fix direction: at shutdown the proxy
-                  \* closes connections idle between requests, and ends each
-                  \* connection after the response it is sending.
+  WaitAcceptDone,       \* TRUE: the code (<-acceptDone before wg.Wait). FALSE: sabotage.
+  DrainCloses           \* TRUE: the code: at shutdown the proxy closes connections
+                        \* idle between requests. FALSE: sabotage, the ecd1990
+                        \* shape: idle connections wait out their read deadlines.
 
 Conns == 1..K
 None == 0
@@ -45,7 +51,7 @@ VARIABLES
 
 vars == <<ctxDone, listener, loop, cur, phase, conn, served, wg, waitStarted, addAfterWait, waitedOnIdle>>
 
-Idle(i) == conn[i] = "waiting" /\ served[i] > 0
+Idle(i) == conn[i] = "waiting"
 Running == phase \notin {"drained", "forced"}
 
 TypeOK ==
@@ -67,7 +73,7 @@ Init ==
   /\ addAfterWait = FALSE
   /\ waitedOnIdle = FALSE
 
-\* The fix's urgent step is pending.
+\* The code's urgent idle-close step is pending.
 UrgentPending == DrainCloses /\ ctxDone /\ \E i \in Conns : Idle(i)
 
 \* Effect of a step that needs time to pass.
@@ -93,7 +99,7 @@ LoopAccepts(i) ==
   /\ conn' = [conn EXCEPT ![i] = "accepted"]
   /\ UNCHANGED <<ctxDone, listener, phase, served, wg, waitStarted, addAfterWait, waitedOnIdle>>
 
-\* wg.Go(handleClient); run starts reading the first request.
+\* wg.Go(handleClientCtx); run starts reading the first request.
 LoopSpawns ==
   /\ Running
   /\ loop = "spawning"
@@ -138,22 +144,38 @@ StartDrain ==
   /\ waitStarted' = TRUE
   /\ UNCHANGED <<ctxDone, listener, loop, cur, conn, served, wg, addAfterWait, waitedOnIdle>>
 
-\* readNextRequest returns a request.
+\* readRequest returns a request. Shutdown stops admission in both the code
+\* and the sabotage configurations.
 ClientSendsRequest(i) ==
   /\ Running
+  /\ ~ctxDone
   /\ conn[i] = "waiting"
   /\ served[i] < R
   /\ conn' = [conn EXCEPT ![i] = "busy"]
   /\ served' = [served EXCEPT ![i] = @ + 1]
   /\ UNCHANGED <<ctxDone, listener, loop, cur, phase, wg, waitStarted, addAfterWait, waitedOnIdle>>
 
+\* readRequest read a request after shutdown began and discards it: the
+\* context check after http.ReadRequest ends the session without routing or
+\* answering it.
+ShutdownDiscardsRequest(i) ==
+  /\ Running
+  /\ conn[i] = "waiting"
+  /\ served[i] < R
+  /\ ctxDone
+  /\ served' = [served EXCEPT ![i] = @ + 1]
+  /\ conn' = [conn EXCEPT ![i] = "closed"]
+  /\ wg' = wg - 1
+  /\ UNCHANGED <<ctxDone, listener, loop, cur, phase, waitStarted, addAfterWait, waitedOnIdle>>
+
 \* The response is relayed. run loops for the next request when both sides keep
-\* the connection alive; otherwise handleClient returns.
+\* the connection alive and shutdown has not begun; otherwise handleClientCtx
+\* returns. Both the code and the sabotage configurations keep this check.
 RequestDone(i) ==
   /\ Running
   /\ conn[i] = "busy"
   /\ \E keep \in BOOLEAN :
-       IF keep /\ ~(DrainCloses /\ ctxDone)
+       IF keep /\ ~ctxDone
          THEN /\ conn' = [conn EXCEPT ![i] = "waiting"]
               /\ UNCHANGED wg
          ELSE /\ conn' = [conn EXCEPT ![i] = "closed"]
@@ -168,7 +190,7 @@ ClientCloses(i) ==
   /\ wg' = wg - 1
   /\ UNCHANGED <<ctxDone, listener, loop, cur, phase, served, waitStarted, addAfterWait, waitedOnIdle>>
 
-\* The ReadTimeout deadline passes in readNextRequest.
+\* The ReadTimeout deadline passes in readRequest.
 ReadTimeoutPasses(i) ==
   /\ Running
   /\ conn[i] = "waiting"
@@ -178,8 +200,8 @@ ReadTimeoutPasses(i) ==
   /\ Timed
   /\ UNCHANGED <<ctxDone, listener, loop, cur, phase, served, waitStarted, addAfterWait>>
 
-\* Fix direction only: shutdown interrupts the read of a connection idle
-\* between requests.
+\* Shutdown interrupts a pending request read, including the wait for the
+\* first request. The idle-close sabotage omits this step.
 CloseIdle(i) ==
   /\ Running
   /\ DrainCloses
@@ -211,7 +233,7 @@ Done ==
 Next ==
   \/ \E i \in Conns :
        \/ ClientDials(i) \/ LoopAccepts(i) \/ ClientSendsRequest(i) \/ RequestDone(i)
-       \/ ClientCloses(i) \/ ReadTimeoutPasses(i) \/ CloseIdle(i)
+       \/ ClientCloses(i) \/ ReadTimeoutPasses(i) \/ CloseIdle(i) \/ ShutdownDiscardsRequest(i)
   \/ LoopSpawns \/ LoopStops \/ Signal \/ CloseListener \/ StartDrain
   \/ Drained \/ DrainTimesOut \/ Done
 
@@ -219,7 +241,7 @@ Spec == Init /\ [][Next]_vars
 
 \* ---- Promises.
 
-\* No wg.Go runs after wg.Wait has started (server.go 41-43).
+\* No wg.Go runs after wg.Wait has started (server.go 80-86).
 NoAddAfterWait == ~addAfterWait
 
 \* Shutdown waits only for requests in flight: it never waits for a read
