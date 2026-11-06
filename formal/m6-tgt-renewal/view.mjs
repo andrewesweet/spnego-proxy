@@ -7,7 +7,7 @@ const brWords = { closed: "Closed", open: "Open", half_open: "Half-open" };
 export const state = (v) => ({
   TGT: tgtWords[v.tgt],
   Password: v.stale ? "Password stale" : v.pwChanged ? "Password file corrected" : "Password works",
-  Logins: v.latched ? "Refused until the password changes" : "Allowed",
+  Logins: v.latched && !v.pwChanged ? "Refused until the password changes" : "Allowed",
   Breaker: brWords[v.br],
 });
 
@@ -28,10 +28,10 @@ export const step = (action, from, to) => {
         : "the renewal goroutine gets a fresh TGT";
     case "Call":
       if (from.br === "open") return "the open breaker rejects a GetToken call";
-      if (to.latched && !from.latched) return "a GetToken call logs in with the old password; the KDC rejects it and the provider refuses further logins";
-      if (from.latched && to.latched) return "the provider refuses the call; no login is sent";
-      if (from.latched && !to.latched) return "a GetToken call logs in with the corrected password";
-      return to.failedAS > from.failedAS ? "a GetToken call logs in with the old password and fails" : "a GetToken call succeeds";
+      if (to.failedAS > from.failedAS) return "a GetToken call logs in with the old password; the KDC rejects it and the provider refuses further logins";
+      if (from.latched && !from.pwChanged) return "the provider refuses the call; no login is sent";
+      if (from.tgt !== "fresh") return "a GetToken call logs in successfully";
+      return "a GetToken call succeeds";
     case "BreakerTimeout":
       return "the breaker timeout passes";
     case "Done":

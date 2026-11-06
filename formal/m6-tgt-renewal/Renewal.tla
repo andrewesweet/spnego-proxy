@@ -142,6 +142,7 @@ Call ==
             IN /\ probes' = IF probe THEN probes + 1 ELSE probes
                /\ failedAS' = IF rejected THEN failedAS + 1 ELSE failedAS
                /\ counted' = IF rejected THEN counted + 1 ELSE counted
+               /\ pwChanged' = IF rejected THEN FALSE ELSE pwChanged
                /\ latched' = IF rejected
                                THEN TRUE
                                ELSE IF latched /\ pwChanged THEN FALSE ELSE latched
@@ -155,7 +156,7 @@ Call ==
                            /\ fails' = 0
                       ELSE /\ br' = br
                            /\ fails' = fails + 1
-  /\ UNCHANGED <<stale, pwChanged, tries>>
+  /\ UNCHANGED <<stale, tries>>
 
 \* currentState: Open past its timeout becomes HalfOpen.
 BreakerTimeout ==

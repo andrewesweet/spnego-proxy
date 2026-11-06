@@ -11,13 +11,18 @@
 \*       beforeRequest and afterRequest runs under cb.mutex, and nothing holds
 \*       cb.mutex while the request function runs
 \*   internal/proxy/auth_gokrb5.go  GetToken (187-216) holds p.mu for the whole
-\*       ticketGrantingClient + InitSecContext, so KDC exchanges are serialised
+\*       ticketGrantingClient + InitSecContext, so KDC exchanges are serialised;
+\*       its password-rejection latch is omitted from this backend abstraction
 \*   internal/proxy/forward.go dialAndAuthUpstream (112-139): one GetToken per
 \*       upstream connection, so each concurrent client connection is a caller
 \*
-\* Scenario: the configured password no longer works and no valid TGT is
-\* cached, so every inner GetToken makes one AS exchange that the KDC rejects
-\* (a failed pre-authentication, which KDC lockout policies count).
+\* Scenario: the configured password no longer works and the abstract backend
+\* has no cached TGT or password-rejection latch. Every inner GetToken makes
+\* one AS exchange that the KDC rejects (a failed pre-authentication, which
+\* KDC lockout policies count). This conservatively checks the breaker alone;
+\* current gokrb5 instead refuses repeat logins for a rejected fingerprint,
+\* as modelled in Renewal.tla. Removing only Execute's mutex cannot reproduce
+\* the sabotage KDC failures with that provider and an unchanged password.
 \* Time is abstract: TimeoutElapses is the Open -> HalfOpen expiry that
 \* currentState applies under cb.mutex once Timeout has passed.
 EXTENDS Naturals
@@ -104,8 +109,8 @@ CallerAdmitted(c) ==
   /\ execHolder' = IF SerializeExecute THEN c ELSE execHolder
   /\ UNCHANGED <<state, gen, consecFail, made, innerHolder, badLogins, startedOpen>>
 
-\* Gokrb5TokenProvider.GetToken: take p.mu; AcquireCred -> AffirmLogin -> Login
-\* sends an AS-REQ that the KDC rejects.
+\* Abstract backend: take its mutex and send an AS-REQ that the KDC rejects,
+\* without a cached TGT or a password-rejection latch.
 InnerSendsLogin(c) ==
   /\ pc[c] = "admitted"
   /\ innerHolder = None

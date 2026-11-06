@@ -1,6 +1,8 @@
 m1-relay-keepalive/Relay breaks=- unchecked=-
 m1-relay-keepalive/RelaySabotageBodyDrain breaks=EveryRequestAnswered,KeepAliveKept unchecked=-
 m1-relay-keepalive/RelaySabotageSingleRead breaks=EveryRequestAnswered,ProxyReadsOwnResponse unchecked=-
+# m2 uses a latch-free backend abstraction; its sabotage KDC failures do not
+# reproduce current gokrb5 with only the Execute mutex removed and unchanged credentials.
 m2-token-breaker/Breaker breaks=- unchecked=-
 m2-token-breaker/BreakerSabotageMaxRequests breaks=SingleProbe unchecked=NoDeadlock,TypeOK
 m2-token-breaker/BreakerSabotageUnserialised breaks=KDCFailuresBounded,NoLoginWhileOpen unchecked=-

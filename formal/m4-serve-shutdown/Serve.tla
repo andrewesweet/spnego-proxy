@@ -148,6 +148,7 @@ StartDrain ==
 \* readRequest returns a request.
 ClientSendsRequest(i) ==
   /\ Running
+  /\ ~ctxDone
   /\ conn[i] = "waiting"
   /\ served[i] < R
   /\ conn' = [conn EXCEPT ![i] = "busy"]

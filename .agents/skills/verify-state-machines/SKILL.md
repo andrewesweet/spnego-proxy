@@ -148,16 +148,20 @@ restored, where `EveryRequestAnswered` and `KeepAliveKept` must break).
 ### m2-token-breaker — `Breaker.tla`
 
 The circuit breaker around SPNEGO token acquisition, with concurrent callers,
-while the configured password no longer works. `beforeRequest` and
-`afterRequest` are separate atomic steps as in gobreaker, the inner `GetToken`
-calls are serialised both by the provider's own mutex and by the mutex held
-across the whole `Execute`, and the open-to-half-open expiry is one abstract
-step.
+while the configured password no longer works. The backend abstraction has
+neither a cached TGT nor a password-rejection latch: every admitted inner call
+attempts one rejected login. This conservatively checks the breaker's bounds;
+current gokrb5 rejects repeat calls for the same rejected fingerprint without
+KDC contact, as m6 models. `beforeRequest` and `afterRequest` are separate atomic
+steps as in gobreaker. Inner calls are serialised by the backend mutex and by
+the mutex held across the whole `Execute`; open-to-half-open expiry is one
+abstract step.
 
 Covers `internal/proxy/circuit_breaker.go` (`NewCircuitBreakerTokenProvider`,
 `GetToken`), gobreaker's `Execute`, `beforeRequest`, `afterRequest`,
-`onFailure` and `currentState`, `internal/proxy/auth_gokrb5.go` (`GetToken`,
-which holds its mutex across `ticketGrantingClient` and `InitSecContext`), and
+`onFailure` and `currentState`, the mutex in `internal/proxy/auth_gokrb5.go`
+(`GetToken`, held across `ticketGrantingClient` and `InitSecContext`, with the
+password-rejection latch omitted), and
 `internal/proxy/forward.go` (`dialAndAuthUpstream`, one `GetToken` per upstream
 connection, so each client connection is a caller).
 
@@ -169,12 +173,15 @@ connection, so each client connection is a caller).
 - `SingleProbe` — while half-open, one probe is in flight. Holds in the code
   config and breaks only in `BreakerSabotageMaxRequests.cfg`.
 
-Configs: `Breaker.cfg` (the code, four callers and two calls each, which also
-crosses open → half-open → open; all rules hold),
-`BreakerSabotageUnserialised.cfg` (deliberately broken: the `Execute` mutex
+Configs use this latch-free backend abstraction: `Breaker.cfg` (current
+breaker settings, four callers and two calls each, crossing open → half-open →
+open; all rules hold), `BreakerSabotageUnserialised.cfg` (the `Execute` mutex
 removed, the ecd1990 shape, where `KDCFailuresBounded` and `NoLoginWhileOpen`
-must break), `BreakerSabotageMaxRequests.cfg` (deliberately broken: the mutex
-removed and `MaxRequests` 2, where `SingleProbe` must break).
+must break), and `BreakerSabotageMaxRequests.cfg` (the mutex removed and
+`MaxRequests` 2, where `SingleProbe` must break). The first sabotage's KDC
+failures do not reproduce current gokrb5 with only the outer mutex removed:
+its inner mutex and fingerprint latch allow only one rejected login for an
+unchanged password.
 
 ### m3-connect-tunnel — `Tunnel.tla`
 
@@ -344,7 +351,7 @@ For the current user-facing contract, see
 | Model | Code at `52034ab` |
 | --- | --- |
 | m1 | `internal/proxy/forward.go`, `internal/proxy/response.go` |
-| m2 | `internal/proxy/circuit_breaker.go`, `internal/proxy/auth_gokrb5.go`, `internal/proxy/forward.go`, gobreaker v2.4.0 |
+| m2 | `internal/proxy/circuit_breaker.go`, `internal/proxy/auth_gokrb5.go` (mutex only; cached TGT and password-rejection latch omitted), `internal/proxy/forward.go`, gobreaker v2.4.0 |
 | m3 | `internal/proxy/connect.go`, `internal/proxy/tunnel_write.go`, `internal/proxy/forward.go`, `cli.go` (`-idle-timeout`) |
 | m4 | `internal/proxy/server.go`, `internal/proxy/forward.go`, `main.go` |
 | m5 | `internal/proxy/direct.go`, `internal/proxy/forward.go` |
