@@ -21,6 +21,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1378,7 +1379,10 @@ func TestForwardTunnelStalledReaderClosesBothDirections(t *testing.T) {
 					select {
 					case <-tunnelDone:
 					case <-time.After(2 * timeout):
-						t.Fatal("stalled reader kept tunnel alive with reverse traffic")
+						dump := make([]byte, 1<<20)
+						n := runtime.Stack(dump, true)
+						t.Logf("goroutines at failure:\n%s", dump[:n])
+						t.Fatalf("stalled reader kept tunnel alive with reverse traffic (reverse=%d bytes, budget %v)", reverseBytes.Load(), 2*timeout)
 					}
 				}
 				if transport == "pipe" {

@@ -55,6 +55,9 @@ jobs:
           CGO_ENABLED: "1"
           INTEGRATION: "1"
         run: |
+          # Without pipefail the step's exit status is tee's, so a failed
+          # go test run reports success.
+          set -o pipefail
           KRB5_PREFIX="$(brew --prefix krb5)"
           export PATH="${KRB5_PREFIX}/bin:${KRB5_PREFIX}/sbin:$PATH"
           go test -v -count=1 ./... 2>&1 | tee test-output.txt
