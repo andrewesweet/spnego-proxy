@@ -102,10 +102,17 @@ jobs:
 
       - name: Checkout
         # zizmor: ignore[artipacked] credentials are persisted intentionally so the
-        # subsequent `git push origin HEAD:master --tags` step can authenticate
+        # subsequent `git push --atomic origin HEAD:master` step can authenticate
         # using the GitHub App token.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # For a workflow_run trigger, actions/checkout without an explicit ref
+          # checks out the default branch tip at checkout time, not the commit
+          # that triggered the upstream run. Pin the checkout to the verified
+          # head_sha so the release commit is always built on the triggering
+          # commit. The tip check in "Compute next version" skips superseded
+          # runs; the atomic push rejects later non-fast-forward updates.
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
           fetch-tags: true
           token: ${{ steps.app-token.outputs.token }}
@@ -117,14 +124,33 @@ jobs:
 
       - name: Compute next version
         id: version
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
+          # Skip when the triggering commit is no longer the tip of master: a
+          # newer push to master superseded this run, and tagging here would
+          # collide with the run for that newer commit. The next green run on
+          # master tags instead.
+          git fetch --quiet origin master
+          tip=$(git rev-parse origin/master)
+          if [ "${tip}" != "${SHA}" ]; then
+            echo "::notice::Skipping auto-tag: triggering commit ${SHA} is no longer the tip of master (current tip ${tip})."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "skip_reason=Superseded: triggering commit is no longer the tip of master." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           git tag -l 'v*'
-          raw=$(git cliff --bumped-version || true)
+          # No "|| true" here on purpose: if git-cliff fails, this step must
+          # fail visibly rather than fall through to the no-bump skip below.
+          # A genuine empty result (exit 0) still means no bump-worthy commits.
+          raw=$(git cliff --bumped-version)
           latest=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
 
           if [ -z "${raw}" ]; then
             echo "No bump-worthy commits found. Skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "skip_reason=No version bump required. No bump-worthy commits since last tag." >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -134,6 +160,7 @@ jobs:
           if [ "${next}" = "${latest}" ]; then
             echo "Computed version ${next} matches latest tag. Skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "skip_reason=No version bump required. Computed version ${next} matches latest tag." >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -142,6 +169,7 @@ jobs:
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: Generate changelog, commit, tag, and push
+        id: release
         if: steps.version.outputs.skip != 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -155,23 +183,38 @@ jobs:
           git commit -m "docs: update changelog for ${VERSION}"
 
           git tag "${VERSION}"
-          git push origin HEAD:master --tags
+          # Push the release commit and its tag atomically: either both land or
+          # neither does. If master moved between the tip check above and this
+          # push, the push is rejected as non-fast-forward and the job fails
+          # visibly with nothing pushed; the next green run on master retries.
+          git push --atomic origin HEAD:master "refs/tags/${VERSION}"
+          # Only reached when both refs landed; the job summary gates its
+          # success text on this output so a rejected push is never reported
+          # as "Tagged and pushed".
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
 
       - name: Job summary
         if: always()
         env:
           VERSION: ${{ steps.version.outputs.version }}
           SKIP: ${{ steps.version.outputs.skip }}
+          SKIP_REASON: ${{ steps.version.outputs.skip_reason }}
+          PUSHED: ${{ steps.release.outputs.pushed }}
         run: |
           if [ "${SKIP}" = "true" ]; then
             {
               echo "### Auto Tag"
-              echo "No version bump required. No bump-worthy commits since last tag."
+              echo "${SKIP_REASON}"
             } >> "$GITHUB_STEP_SUMMARY"
-          elif [ -n "${VERSION}" ]; then
+          elif [ "${PUSHED}" = "true" ]; then
             {
               echo "### Auto Tag"
               echo "Tagged and pushed **${VERSION}**."
               echo "The release pipeline will now build and publish the release."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### Auto Tag"
+              echo "Auto-tag did not complete successfully. Check the preceding steps for details."
             } >> "$GITHUB_STEP_SUMMARY"
           fi

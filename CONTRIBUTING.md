@@ -366,9 +366,14 @@ When a pull request is merged to `master`:
 
 1. The "Build and Test" workflow runs.
 2. On success, Auto Tag verifies all required CI checks passed for the commit.
-3. It runs `git cliff --bumped-version` to compute the next SemVer version.
-4. If a version bump is needed, it generates the changelog, commits it, creates
-   the tag, and pushes — triggering the release pipeline.
+3. It checks out that verified commit and skips tagging if the commit is no
+   longer the tip of `master`.
+4. It runs `git cliff --bumped-version` to compute the next SemVer version.
+5. If a version bump is needed, it generates the changelog, commits it, creates
+   the tag, and atomically pushes the release commit and that tag — triggering
+   the release pipeline. If `master` advances before the push, the push fails
+   without publishing either ref; the next successful CI run on `master` can
+   release instead.
 
 **Commit types that trigger a release:**
 
