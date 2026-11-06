@@ -215,6 +215,6 @@ jobs:
           else
             {
               echo "### Auto Tag"
-              echo "Release **${VERSION}** was NOT pushed: the atomic push of the release commit and its tag was rejected (master moved or tag conflict). Nothing was published; the next green run on master retries."
+              echo "Auto-tag did not complete successfully. Check the preceding steps for details."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
