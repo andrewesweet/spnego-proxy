@@ -1,20 +1,46 @@
 name: Auto Tag
 
 on:
-  # zizmor: ignore[dangerous-triggers] workflow_run only fires after the
-  # "Build and Test" workflow succeeds on the master branch. The workflow does
-  # not check out or execute any code from pull requests, so the elevated
-  # privileges granted to workflow_run cannot be exploited by a fork PR.
+  # zizmor: ignore[dangerous-triggers] workflow_run grants an elevated
+  # github.token, but this workflow only reacts to runs of this repository's
+  # own required CI workflows on the master branch (branches: [master]
+  # excludes fork and PR branches). It never checks out or executes code from
+  # a pull request: the checkout below is pinned to the verified head SHA of
+  # a master push, and pushes authenticate with a dedicated GitHub App token.
   workflow_run:
-    workflows: ["Build and Test"]
+    # One completion event per required workflow: Auto Tag fires each time
+    # any of these finishes, and the Verify step below tags a commit only
+    # once ALL of them have succeeded for it. The release therefore waits
+    # for the last required workflow to finish instead of failing when the
+    # first-completed trigger still finds the rest running. Keep this list
+    # in sync with required_workflows in the Verify step (the gate test
+    # enforces the match).
+    workflows:
+      - "Build and Test"
+      - "golangci-lint"
+      - "govulncheck"
+      - "Lint Workflows"
+      - "Lint Markdown"
     types: [completed]
     branches: [master]
 
 permissions: {}
 
+concurrency:
+  # Two required workflows can complete for the same head commit within
+  # seconds of each other; serialise their Auto Tag runs so only one is
+  # ever mid-release. The tip check and the atomic push in the release
+  # steps remain the guard when the concurrent runs are for DIFFERENT
+  # commits (one push superseding another).
+  group: auto-tag-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
 jobs:
   auto-tag:
-    if: github.event.workflow_run.conclusion == 'success'
+    # No conclusion filter here: the Verify step decides per completion
+    # whether to skip cleanly (a required workflow has not completed yet),
+    # fail (every required workflow completed and one did not succeed), or
+    # proceed to tag.
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -25,8 +51,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ github.event.workflow_run.head_sha }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          # Workflows that run on every push to master
+          # --- gating decision (inputs and pure function; exercised by .github/scripts/test-auto-tag-gate.sh against recorded API JSON) ---
+
+          # Workflows that run on every push to master. Auto Tag is
+          # triggered by each one's completion (see workflow_run above);
+          # keep this list in sync with that trigger (the gate test
+          # enforces the match).
           required_workflows=(
             "Build and Test"
             "golangci-lint"
@@ -36,61 +68,92 @@ jobs:
           )
 
           # Path-filtered workflows that may not run for every commit.
-          # If they ran, they must have succeeded; if absent, that's OK.
+          # They block the release only when they completed without
+          # success: an absent or still-running optional workflow never
+          # blocks, because its completion does not trigger Auto Tag, so
+          # waiting for it could strand a release forever.
           optional_workflows=(
             "CodeQL"
           )
 
-          check_workflow() {
-            local workflow="$1" required="$2"
-            echo "Checking: ${workflow}"
-
-            local conclusion="" attempt
-            for attempt in 1 2 3 4 5; do
-              conclusion=$(gh api \
-                "repos/${{ github.repository }}/actions/runs?head_sha=${SHA}&status=completed" \
-                --jq ".workflow_runs[] | select(.name == \"${workflow}\") | .conclusion" \
-                | head -1)
-
-              if [ -n "${conclusion}" ]; then
-                break
-              fi
-
-              if [ "${required}" != "true" ]; then
-                break
-              fi
-
-              if [ "${attempt}" -lt 5 ]; then
-                echo "  -> not found yet, retrying in 15s (attempt ${attempt}/5)..."
-                sleep 15
-              fi
-            done
-
-            if [ -z "${conclusion}" ]; then
-              if [ "${required}" = "true" ]; then
-                echo "::error::Required workflow '${workflow}' not found for SHA ${SHA}"
-                return 1
-              fi
-              echo "  -> not found (optional, skipping)"
-              return 0
-            fi
-
-            if [ "${conclusion}" != "success" ]; then
-              echo "::error::Workflow '${workflow}' did not succeed (got: ${conclusion})"
-              return 1
-            fi
-            echo "  -> ${conclusion}"
+          # Reads this commit's workflow runs on stdin (a flat JSON array
+          # of run objects) and prints exactly one decision line:
+          #   tag|<reason>   every required workflow succeeded
+          #   skip|<csv>     some required workflow has not completed yet
+          #   no-tag|<csv>   every required workflow completed; one failed
+          # The most recent run of a workflow wins, so a re-run supersedes
+          # earlier runs of the same workflow.
+          decide() {
+            local req opt
+            req=$(jq -cn '$ARGS.positional' --args -- "${required_workflows[@]}")
+            opt=$(jq -cn '$ARGS.positional' --args -- "${optional_workflows[@]}")
+            # shellcheck disable=SC2016  # jq program, not shell expansion
+            jq -r --argjson req "${req}" --argjson opt "${opt}" '
+              if ($req | length) == 0
+              then "no-tag|required workflow list is empty"
+              else
+              . as $runs
+              | ([ $runs
+                   | sort_by(.id)
+                   | .[]
+                   | {(.name): (
+                       if .status != "completed" then "pending"
+                       elif .conclusion == "success" then "success"
+                       else "failed"
+                       end)}
+                 ]
+                 | add // {}) as $latest
+              | [ $req[]
+                  | {workflow: ., state: ($latest[.] // "absent"), required: true} ]
+                + [ $opt[]
+                    | {workflow: ., state: ($latest[.] // "absent"), required: false} ]
+              | {
+                  pending: ([ .[]
+                    | select(.required and (.state == "pending" or .state == "absent"))
+                    | .workflow ]),
+                  failed: ([ .[]
+                    | select(.state == "failed")
+                    | .workflow ])
+                }
+              | if   (.pending | length) > 0 then "skip|"   + (.pending | join(", "))
+                elif (.failed  | length) > 0 then "no-tag|" + (.failed  | join(", "))
+                else                              "tag|"    + "all required workflows succeeded"
+                end
+              end'
           }
+          # --- end gating decision ---
 
-          for workflow in "${required_workflows[@]}"; do
-            check_workflow "${workflow}" true
-          done
+          # Every workflow run whose head SHA is the triggering commit,
+          # across all pages. This includes Auto Tag's own runs and any
+          # unrelated workflows for the same SHA; decide() looks only at
+          # the required and optional names above. A required workflow
+          # with no run listed yet counts as not completed, so the run
+          # ends as a clean skip and a later completion re-runs the gate.
+          # gh --slurp cannot be combined with gh --jq, so the page array
+          # is flattened by jq instead.
+          runs_json=$(gh api --paginate --slurp \
+            "repos/${REPOSITORY}/actions/runs?head_sha=${SHA}&per_page=100" \
+            | jq -c '[.[].workflow_runs[]]')
 
-          for workflow in "${optional_workflows[@]}"; do
-            check_workflow "${workflow}" false
-          done
+          decision=$(decide <<<"${runs_json}")
 
-          echo "All required CI checks passed."
+          case "${decision}" in
+            "tag|"*)
+              echo "All required CI checks passed."
+              ;;
+            "skip|"*)
+              echo "::notice::Auto Tag skipping: required CI not complete yet for ${SHA}: ${decision#skip|}. Auto Tag runs again when each of them completes."
+              exit 0
+              ;;
+            "no-tag|"*)
+              echo "::error::Required CI did not succeed for ${SHA}: ${decision#no-tag|}. No tag will be created."
+              exit 1
+              ;;
+            *)
+              echo "::error::Auto Tag gate produced an unexpected decision: ${decision}"
+              exit 1
+              ;;
+          esac
 
       - name: Generate GitHub App token
         id: app-token

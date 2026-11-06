@@ -364,8 +364,15 @@ publishing automatically.
 The **Auto Tag** workflow (`auto-tag.yml`) automates the tag-and-release cycle.
 When a pull request is merged to `master`:
 
-1. The "Build and Test" workflow runs.
-2. On success, Auto Tag verifies all required CI checks passed for the commit.
+1. Every required workflow runs on the push: Build and Test, golangci-lint,
+   govulncheck, Lint Workflows, and Lint Markdown.
+2. Each time one of them completes, Auto Tag checks that commit. If any
+   required workflow has not completed yet, the run ends as a clean skip;
+   the completion of the missing workflow triggers Auto Tag again. Once all
+   required workflows have completed, Auto Tag continues only when all of
+   them (and any optional workflow that completed, such as CodeQL)
+   succeeded. Its runs for one commit are serialised through a
+   `concurrency` group, so near-simultaneous completions cannot both tag.
 3. It checks out that verified commit and skips tagging if the commit is no
    longer the tip of `master`.
 4. It runs `git cliff --bumped-version` to compute the next SemVer version.
