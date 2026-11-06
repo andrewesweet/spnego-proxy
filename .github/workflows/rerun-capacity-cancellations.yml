@@ -77,6 +77,9 @@ jobs:
             .[].jobs[];
             if .conclusion == "cancelled" then
               (.runner_name // "") == "" and ((.steps // []) | length == 0)
+              and ((.labels // []) |
+                index("self-hosted") == null
+                and any(.[]; test("^macos-(latest|[0-9]+)(-(intel|large|xlarge))?$")))
             else
               .conclusion == "success" or .conclusion == "skipped"
             end

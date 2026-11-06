@@ -93,6 +93,30 @@ check "composite: capacity cancel plus genuine failure" \
   "$composite_a" failure false
 check "composite: cancelled job that acquired a runner and ran" \
   "$composite_b" failure false
+check "policy: run-level cancellation with capacity-shaped macOS job" \
+  "$testdata/cap-bt-attempt5.json" cancelled false
+
+jq '(.jobs[] | select(.conclusion == "cancelled") | .labels) = ["ubuntu-latest"]' \
+  "$testdata/cap-bt-attempt5.json" > "$step_temp/linux.json"
+jq '(.jobs[] | select(.conclusion == "cancelled")) |=
+  if .name == "build-macos (arm64)" then .labels = ["ubuntu-latest"] else . end' \
+  "$testdata/cap-bt-both-macos.json" > "$step_temp/mixed.json"
+jq '(.jobs[] | select(.conclusion == "cancelled") | .conclusion) = "timed_out"' \
+  "$testdata/cap-bt-attempt5.json" > "$step_temp/timeout.json"
+check "policy: Linux cancellation alongside successful macOS jobs" "$step_temp/linux.json" failure false
+check "policy: mixed macOS and Linux cancellations" "$step_temp/mixed.json" failure false
+check "policy: macOS timeout" "$step_temp/timeout.json" failure false
+
+for labels in '["macos-15"]' '["macos-26-intel"]' '["macos-latest-large"]' '["macos-15-xlarge"]'; do
+  jq --argjson labels "$labels" '(.jobs[] | select(.conclusion == "cancelled") | .labels) = $labels' \
+    "$testdata/cap-bt-attempt5.json" > "$step_temp/labels.json"
+  check "policy: hosted macOS $labels" "$step_temp/labels.json" failure true
+done
+for labels in '["windows-latest"]' '["self-hosted","macos-latest"]' '["self-hosted","macOS"]' '["macos-custom"]' '[]' 'null'; do
+  jq --argjson labels "$labels" '(.jobs[] | select(.conclusion == "cancelled") | .labels) = $labels' \
+    "$testdata/cap-bt-attempt5.json" > "$step_temp/labels.json"
+  check "policy: unsupported runner labels $labels" "$step_temp/labels.json" failure false
+done
 
 sed -n '/^        run: |$/,$p' "$workflow" | sed '1d; s/^          //' > "$step_file"
 
@@ -117,11 +141,12 @@ export -f gh
 
 check_step() {
   local label="$1" attempt="$2" metadata="$3" expected_calls="$4" expected_status="${5:-0}" status=0
+  local jobs="${6:-$testdata/cap-bt-attempt5.json}"
   : > "$step_temp/api.log"
   RUNNER_TEMP="$step_temp" GITHUB_REPOSITORY=test/repo RUN_ID=123 \
     RUN_ATTEMPT="$attempt" RUN_CONCLUSION=failure \
     TEST_API_LOG="$step_temp/api.log" TEST_RUN_METADATA="$metadata" \
-    TEST_JOBS_FILE="$testdata/cap-bt-attempt5.json" \
+    TEST_JOBS_FILE="$jobs" \
     bash -e -o pipefail "$step_file" > "$step_temp/output" 2>&1 || status=$?
   if [ "$status" -eq "$expected_status" ] && [ "$(cat "$step_temp/api.log")" = "$expected_calls" ]; then
     pass=$((pass + 1))
@@ -146,6 +171,14 @@ check_step "current attempt must still be completed" 5 \
 check_step "current conclusion must match evaluated conclusion" 5 \
   '{"run_attempt":5,"status":"completed","conclusion":"success"}' $'jobs\nrun'
 check_step "metadata lookup failure prevents POST" 5 error $'jobs\nrun' 1
+check_step "policy: genuine failure plus capacity cancellation prevents POST" 5 \
+  '{"run_attempt":5,"status":"completed","conclusion":"failure"}' jobs 0 "$composite_a"
+check_step "policy: Linux cancellation prevents POST" 5 \
+  '{"run_attempt":5,"status":"completed","conclusion":"failure"}' jobs 0 "$step_temp/linux.json"
+check_step "policy: mixed macOS and Linux cancellations prevent POST" 5 \
+  '{"run_attempt":5,"status":"completed","conclusion":"failure"}' jobs 0 "$step_temp/mixed.json"
+check_step "policy: timeout prevents POST" 5 \
+  '{"run_attempt":5,"status":"completed","conclusion":"failure"}' jobs 0 "$step_temp/timeout.json"
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
