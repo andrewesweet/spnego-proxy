@@ -8,8 +8,7 @@
 # heredoc markers. This test extracts those exact lines and evaluates them
 # against recorded Actions API responses
 # (GET /repos/{owner}/{repo}/actions/runs/<id>/attempts/<n>/jobs) from
-# andrewesweet/spnego-proxy, plus two composites assembled from the same
-# recorded responses.
+# andrewesweet/spnego-proxy, plus synthetic policy and attempt-metadata cases.
 #
 # Usage: .github/scripts/test-rerun-capacity-cancellations.sh
 # Requires: jq, sed

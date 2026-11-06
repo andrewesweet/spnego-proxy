@@ -1,17 +1,14 @@
 name: Re-run Capacity Cancellations
 
-# Re-runs CI attempts whose jobs were cancelled only because no hosted
-# runner could be acquired (the 2026-11-05 macOS runner drought cancelled
-# 36 attempts across these four workflows).
+# Re-runs CI attempts blocked only by hosted macOS runner capacity.
+# See JQ_CAPACITY_PREDICATE below for the eligibility rules.
 #
 # The attempt conclusion is checked against "failure", not "cancelled":
 # when a job cannot acquire a runner, GitHub cancels the JOB and the
 # attempt concludes "failure". An attempt that concludes "cancelled" was
 # cancelled at the run level by a person (or a concurrency group), and is
-# never re-run here. Genuine failures are never re-run either: the capacity
-# test below re-runs only when every job of the attempt is success,
-# skipped, or a cancelled job that never acquired a runner and ran no
-# steps, so re-run-failed-jobs never repeats a real result.
+# never re-run here. The predicate below also excludes genuine failures,
+# so re-run-failed-jobs never repeats a real result.
 #
 # This workflow never checks out or executes repository or pull request
 # code: it reads run and job metadata through the API and calls the
@@ -21,8 +18,8 @@ on:
   # can observe completed runs of other workflows. This workflow does not
   # check out or execute any repository or pull request code, passes event
   # fields to the run block only via env:, and holds nothing but
-  # actions: write for the re-run call, so fork-supplied input cannot
-  # reach it.
+  # actions: write for the re-run call. Event fields are not interpreted
+  # as shell code.
   workflow_run:
     workflows:
       # Every workflow that runs macOS jobs except "Build Release Binaries":
@@ -63,14 +60,15 @@ jobs:
           # heredoc markers intact.
           cat > "$RUNNER_TEMP/capacity-cancellation.jq" <<'JQ_CAPACITY_PREDICATE'
           # True when the completed attempt failed only because of hosted
-          # runner capacity cancellations and may be re-run. Input is the
+          # macOS runner capacity cancellations and may be re-run. Input is the
           # array of job-list pages produced by
           # "gh api --paginate --slurp .../attempts/<n>/jobs":
           # - the attempt concluded "failure" (a run-level cancellation
           #   concludes "cancelled" and is excluded here), and
           # - at least one job was cancelled, and
           # - every job is success, skipped, or a cancelled job that never
-          #   acquired a runner (empty runner_name) and ran no steps.
+          #   acquired a runner (empty runner_name), ran no steps, and targets
+          #   a hosted macOS label without the self-hosted label.
           $capacity_conclusion == "failure"
           and ([.[].jobs[] | select(.conclusion == "cancelled")] | length > 0)
           and all(
