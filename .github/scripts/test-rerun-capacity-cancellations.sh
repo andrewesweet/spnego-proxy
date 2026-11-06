@@ -160,11 +160,6 @@ if [ ! -s "$step_file" ]; then
   echo "FAIL: no run block containing rerun-failed-jobs extracted from $workflow" >&2
   exit 1
 fi
-if ! grep -q 'rerun-failed-jobs' "$step_file"; then
-  echo "FAIL: extracted step does not contain the rerun-failed-jobs call" >&2
-  exit 1
-fi
-
 # Evaluate the workflow's job-level if: expression (the attempt cap and
 # conclusion gate) the way GitHub would: substitute the two event fields and
 # translate GitHub operators and string quoting to jq. This pins the cap
