@@ -36,20 +36,18 @@ check(summary.fetch('env').fetch('GATE_REASON') == "${{ steps.#{gate_id}.outputs
       'summary must consume the gate reason')
 puts 'ok   normalized workflow gates every release operation and propagates gate outputs'
 
-# The required list must exist exactly twice in the workflow: the workflow_run
-# trigger and the gate's required_workflows array. Derive one from the other
-# and assert they match, so drift cannot leave a required workflow unable to
-# trigger the release (its completion would never re-fire the gate).
+required = ['Build and Test', 'golangci-lint', 'govulncheck', 'Lint Workflows', 'Lint Markdown']
 trigger = (doc['on'] || doc[true]).fetch('workflow_run').fetch('workflows')
-required = gate.fetch('run')[/required_workflows=\(\n(.*?)\n\s*\)/m, 1].scan(/"([^"]+)"/).flatten
-check(trigger == required, 'workflow_run trigger list must match required_workflows')
+check(trigger.sort == required.sort, 'workflow_run triggers must cover the five workflows required by CONTRIBUTING.md')
 
 runs = JSON.parse(STDIN.read)
-scenarios = required.map { |name| [name, 'in_progress', nil, 'skip', 0] }
-scenarios += [
-  ['govulncheck', 'completed', 'failure', 'no-tag', 1],
-  [nil, nil, nil, 'tag', 0]
-]
+scenarios = required.flat_map do |name|
+  [
+    [name, 'in_progress', nil, 'skip', 0],
+    [name, 'completed', 'failure', 'no-tag', 1]
+  ]
+end
+scenarios << [nil, nil, nil, 'tag', 0]
 
 Dir.mktmpdir('auto-tag-test-', __dir__) do |directory|
   scenarios.each do |name, status, conclusion, expected, exit_code|
