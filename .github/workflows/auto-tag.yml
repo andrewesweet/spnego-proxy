@@ -47,6 +47,7 @@ jobs:
       actions: read
     steps:
       - name: Verify all CI checks passed
+        id: gate
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ github.event.workflow_run.head_sha }}
@@ -134,6 +135,10 @@ jobs:
             | jq -c '[.[].workflow_runs[]]')
 
           decision=$(decide <<<"${runs_json}")
+          {
+            echo "decision=${decision%%|*}"
+            echo "reason=${decision#*|}"
+          } >> "$GITHUB_OUTPUT"
 
           case "${decision}" in
             "tag|"*)
@@ -155,6 +160,7 @@ jobs:
 
       - name: Generate GitHub App token
         id: app-token
+        if: steps.gate.outputs.decision == 'tag'
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           app-id: ${{ secrets.APP_ID }}
@@ -162,6 +168,7 @@ jobs:
           permission-contents: write
 
       - name: Checkout
+        if: steps.gate.outputs.decision == 'tag'
         # zizmor: ignore[artipacked] credentials are persisted intentionally so the
         # subsequent `git push --atomic origin HEAD:master` step can authenticate
         # using the GitHub App token.
@@ -179,12 +186,14 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Install git-cliff
+        if: steps.gate.outputs.decision == 'tag'
         uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: git-cliff
 
       - name: Compute next version
         id: version
+        if: steps.gate.outputs.decision == 'tag'
         env:
           SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
@@ -231,7 +240,7 @@ jobs:
 
       - name: Generate changelog, commit, tag, and push
         id: release
-        if: steps.version.outputs.skip != 'true'
+        if: steps.gate.outputs.decision == 'tag' && steps.version.outputs.skip != 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
@@ -257,12 +266,24 @@ jobs:
       - name: Job summary
         if: always()
         env:
+          GATE_DECISION: ${{ steps.gate.outputs.decision }}
+          GATE_REASON: ${{ steps.gate.outputs.reason }}
           VERSION: ${{ steps.version.outputs.version }}
           SKIP: ${{ steps.version.outputs.skip }}
           SKIP_REASON: ${{ steps.version.outputs.skip_reason }}
           PUSHED: ${{ steps.release.outputs.pushed }}
         run: |
-          if [ "${SKIP}" = "true" ]; then
+          if [ "${GATE_DECISION}" = "skip" ]; then
+            {
+              echo "### Auto Tag"
+              echo "Skipped: required CI not complete yet: ${GATE_REASON}."
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${GATE_DECISION}" = "no-tag" ]; then
+            {
+              echo "### Auto Tag"
+              echo "No tag created: CI did not succeed: ${GATE_REASON}."
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${SKIP}" = "true" ]; then
             {
               echo "### Auto Tag"
               echo "${SKIP_REASON}"

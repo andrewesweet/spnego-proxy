@@ -12,7 +12,7 @@
 #
 #   .github/scripts/test-auto-tag-gate.sh
 #
-# Dependencies: bash, jq. Not yet wired into CI; run it locally when
+# Dependencies: bash, jq, ruby (with YAML). Not yet wired into CI; run it locally when
 # touching the Auto Tag workflow.
 
 set -euo pipefail
@@ -142,5 +142,7 @@ expect "golangci-lint re-run success supersedes an earlier failure -> tag" \
 expect "an older failure after a newer success does not regress the state -> tag" \
   "$(derive '. + [{"id": 42167031190, "name": "golangci-lint", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "failure", "event": "workflow_run", "created_at": "2026-11-06T05:11:00Z"}]')" \
   "tag|all required workflows succeeded"
+
+recorded_all_success | ruby "${script_dir}/test-auto-tag-workflow.rb" "${workflow}"
 
 echo "all gate tests passed"
