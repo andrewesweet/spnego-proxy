@@ -29,8 +29,7 @@ CONSTANTS
   R,              \* requests each client sends at most
   WaitAcceptDone,       \* TRUE: the code (<-acceptDone before wg.Wait). FALSE: sabotage.
   DrainCloses,          \* TRUE: the code: at shutdown the proxy closes connections
-                        \* idle between requests, and ends each connection after the
-                        \* response it is sending. FALSE: sabotage, the ecd1990
+                        \* idle between requests. FALSE: sabotage, the ecd1990
                         \* shape: idle connections wait out their read deadlines.
   DiscardsAfterShutdown \* TRUE: the code: shutdown stops admitting new requests,
                         \* and a request read after shutdown began is discarded
@@ -181,7 +180,7 @@ RequestDone(i) ==
   /\ Running
   /\ conn[i] = "busy"
   /\ \E keep \in BOOLEAN :
-       IF keep /\ ~(DrainCloses /\ ctxDone)
+       IF keep /\ ~ctxDone
          THEN /\ conn' = [conn EXCEPT ![i] = "waiting"]
               /\ UNCHANGED wg
          ELSE /\ conn' = [conn EXCEPT ![i] = "closed"]

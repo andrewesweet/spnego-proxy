@@ -235,8 +235,9 @@ connection after its response), and `main.go`'s signal handling.
 
 Configs: `Serve.cfg` (the code; all rules hold), `ServeSabotageNoIdleClose.cfg`
 (deliberately broken: only the idle-connection close removed; shutdown still
-stops admission and discards requests read after it began, which is the
-ecd1990 close behaviour in isolation — `DrainSkipsIdle` must break),
+stops admission, discards requests read after it began, and ends busy connections
+after their responses, which isolates the ecd1990 idle-close behaviour —
+`DrainSkipsIdle` must break),
 `ServeSabotageNoAcceptDone.cfg` (deliberately broken: the `<-acceptDone` wait
 removed, where `NoAddAfterWait` must break).
 
