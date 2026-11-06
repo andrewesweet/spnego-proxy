@@ -262,6 +262,7 @@ Pull requests run the following checks automatically:
 | C static analysis | clang-tidy, cppcheck | `*.c` (macOS) |
 | Markdown linting | markdownlint-cli2 | `*.md` |
 | Workflow linting | actionlint | `.github/workflows/` |
+| Auto Tag regression tests | Bash, Ruby | [Auto Tag gate test scripts](.github/scripts/test-auto-tag-gate.sh) |
 | Security analysis | CodeQL | Go, C, Actions |
 | Build + unit tests | go build, go test | macOS (CGO) + Linux |
 | PR title format | action-semantic-pull-request | PR titles |
@@ -377,9 +378,9 @@ When a pull request is merged to `master`:
    workflows have completed, Auto Tag continues only when all of them (and
    any optional workflow that completed, such as CodeQL) succeeded. CodeQL
    is advisory: only a CodeQL failure that is already completed when the
-   gate decides blocks the release; a CodeQL failure finishing after the
-   last required workflow does not block the release or re-trigger it. Its
-   runs for one commit are serialised through a `concurrency` group, so
+   gate decides blocks the release. Auto Tag does not wait for CodeQL, and
+   a later CodeQL completion does not re-trigger it. Auto Tag runs for one
+   commit are serialised through a `concurrency` group, so
    near-simultaneous completions cannot both tag.
 3. It checks out that verified commit and skips tagging if the commit is no
    longer the tip of `master`.

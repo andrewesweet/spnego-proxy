@@ -87,9 +87,9 @@ jobs:
 
           # Reads this commit's workflow runs on stdin (a flat JSON array
           # of run objects) and prints exactly one decision line:
-          #   tag|<reason>   every required workflow succeeded
-          #   skip|<csv>     some required workflow has not completed yet
-          #   no-tag|<csv>   every required workflow completed; one failed
+          #   tag|<reason>   every required workflow succeeded; no optional failure
+          #   skip|<csv>     required workflow pending, absent, or API record stale
+          #   no-tag|<csv>   required workflows completed; required or optional failure
           # The most recent run of a workflow wins, so a re-run supersedes
           # earlier runs of the same workflow.
           decide() {
@@ -156,13 +156,12 @@ jobs:
           }
 
           # API indexing can lag the completion event that started this
-          # run: the run that just finished may not be listed yet, and if
-          # that was the LAST required completion, a premature skip would
-          # strand the release with nothing left to re-trigger it. Before
-          # accepting a required workflow as pending or absent, re-query a
-          # bounded number of times over about a minute; a genuinely
-          # running workflow only delays its clean skip, and a later
-          # completion re-runs the gate anyway.
+          # run, including a re-run's attempt or terminal conclusion. A
+          # premature skip could strand the release after the last required
+          # completion. Re-query pending, absent, or stale records within
+          # the same bounded budget, then let decide() use the event for a
+          # still-lagging triggering run. Newer attempts and other pending
+          # required workflows retain their API state.
           decision=""
           attempt=0
           max_attempts=3        # one initial fetch plus two re-queries
