@@ -1330,7 +1330,7 @@ func TestForwardTunnelStalledReaderClosesBothDirections(t *testing.T) {
 				run := func(t *testing.T) {
 					const timeout = time.Second
 					// The budget absorbs the platform ramp before the stall
-					// solidifies (see floodLimit): darwin's receive autotuning
+					// solidifies: darwin's receive autotuning
 					// delays the solid stall past Linux's millisecond-scale
 					// saturation. pipe has no kernel buffer, so the virtual-time
 					// budget stays tight.
@@ -1360,16 +1360,9 @@ func TestForwardTunnelStalledReaderClosesBothDirections(t *testing.T) {
 						_ = upstream.Close()
 						workers.Wait()
 					}()
-					// Cap the flood so this goroutine always terminates: the
-					// stall arises once the destination's kernel buffers
-					// saturate, and every platform's ceiling sits well below
-					// the cap. darwin's TCP receive autotuning keeps accepting
-					// bytes beyond the configured buffer while it ramps, so
-					// saturation there lands later than on Linux.
-					const floodLimit = 256 << 20
 					workers.Go(func() {
 						payload := strings.Repeat("blocked", 16*1024)
-						for sent := 0; sent < floodLimit; sent += len(payload) {
+						for {
 							if _, err := io.WriteString(src, payload); err != nil {
 								return
 							}
