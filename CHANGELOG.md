@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [1.3.8] - 2026-11-06
+
+
+### Fixed
+- Enforce CONNECT timeouts using shared transport activity (#304)
+- Prevent Kerberos retries from driving account lockout (#303)
+- Restore safe keep-alive routing and shutdown (#301)
+
+### No-mistakes
+- Document atomic releases and superseded-run handling
+- Report accurate auto-tag skip reasons
+- Fix: report auto-tag failures without assuming push rejection
+
 ## [1.3.7] - 2026-11-05
 
 
@@ -166,6 +179,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Default -connect-ports to 443 instead of allowing all ports
 - Return 502 instead of raw relay when upstream response is unparseable
 - Zero password bytes after Kerberos client initialization
+[1.3.8]: https://github.com/andrewesweet/spnego-proxy/compare/v1.3.7...v1.3.8
 [1.3.7]: https://github.com/andrewesweet/spnego-proxy/compare/v1.3.6...v1.3.7
 [1.3.6]: https://github.com/andrewesweet/spnego-proxy/compare/v1.3.5...v1.3.6
 [1.3.5]: https://github.com/andrewesweet/spnego-proxy/compare/v1.3.4...v1.3.5
