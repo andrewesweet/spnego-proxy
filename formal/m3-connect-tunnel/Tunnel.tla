@@ -50,7 +50,7 @@ VARIABLES
                   \* while the other direction had moved data in this read window
   timeoutReArms,  \* read deadlines that passed while the other direction was
                   \* active and were re-armed instead of ending anything
-                  \* (fix direction only)
+                  \* (ConnectionIdle = TRUE only)
   abandoned,      \* the write deadline closed the tunnel while the stalled sink
                   \* still had data in flight or queued
   dropped         \* a side sent data that nothing will read, while the tunnel is open

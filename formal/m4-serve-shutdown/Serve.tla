@@ -74,7 +74,7 @@ Init ==
   /\ addAfterWait = FALSE
   /\ waitedOnIdle = FALSE
 
-\* The fix's urgent step is pending.
+\* The code's urgent idle-close step is pending.
 UrgentPending == DrainCloses /\ ctxDone /\ \E i \in Conns : Idle(i)
 
 \* Effect of a step that needs time to pass.

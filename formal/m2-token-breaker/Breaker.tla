@@ -48,7 +48,7 @@ VARIABLES
   callGen,      \* per caller: generation beforeRequest returned
   made,         \* per caller: GetToken calls made
   innerHolder,  \* caller holding Gokrb5TokenProvider.mu, or None
-  execHolder,   \* caller holding the fix's Execute mutex, or None
+  execHolder,   \* caller holding the code's Execute mutex, or None
   badLogins,    \* AS exchanges the KDC rejected
   probes,       \* calls admitted while half-open
   startedOpen   \* an AS exchange started while the breaker was open
