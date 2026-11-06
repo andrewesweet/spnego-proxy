@@ -110,8 +110,8 @@ jobs:
           # checks out the default branch tip at checkout time, not the commit
           # that triggered the upstream run. Pin the checkout to the verified
           # head_sha so the release commit is always built on the triggering
-          # commit; the tip check in "Compute next version" guarantees that
-          # commit is still master's tip before anything is pushed.
+          # commit. The tip check in "Compute next version" skips superseded
+          # runs; the atomic push rejects later non-fast-forward updates.
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
           fetch-tags: true
