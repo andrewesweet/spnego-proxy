@@ -12,7 +12,7 @@
 # recorded responses.
 #
 # Usage: .github/scripts/test-rerun-capacity-cancellations.sh
-# Requires: jq, sed, grep
+# Requires: jq, sed
 set -euo pipefail
 
 script_dir="$(dirname "$0")"
@@ -22,7 +22,9 @@ testdata="$script_dir/testdata/rerun-capacity-cancellations"
 predicate_file="$(mktemp)"
 composite_a="$(mktemp)"
 composite_b="$(mktemp)"
-trap 'rm -f "$predicate_file" "$composite_a" "$composite_b"' EXIT
+step_file="$(mktemp)"
+step_temp="$(mktemp -d)"
+trap 'rm -f "$predicate_file" "$composite_a" "$composite_b" "$step_file"; rm -rf "$step_temp"' EXIT
 
 # Extract the predicate verbatim from the workflow's run block (the block
 # scalar indents every line uniformly, so stripping leading whitespace on
@@ -30,7 +32,7 @@ trap 'rm -f "$predicate_file" "$composite_a" "$composite_b"' EXIT
 sed -n "/<<'JQ_CAPACITY_PREDICATE'/,/^[[:space:]]*JQ_CAPACITY_PREDICATE[[:space:]]*\$/p" \
   "$workflow" | sed '1d;$d; s/^[[:space:]]*//' > "$predicate_file"
 
-if [ ! -s "$predicate_file" ] || ! grep -q 'capacity_conclusion' "$predicate_file"; then
+if [ ! -s "$predicate_file" ]; then
   echo "FAIL: predicate not extracted from $workflow" >&2
   exit 1
 fi
@@ -91,6 +93,59 @@ check "composite: capacity cancel plus genuine failure" \
   "$composite_a" failure false
 check "composite: cancelled job that acquired a runner and ran" \
   "$composite_b" failure false
+
+sed -n '/^        run: |$/,$p' "$workflow" | sed '1d; s/^          //' > "$step_file"
+
+gh() {
+  case "$*" in
+    "api --paginate --slurp /repos/test/repo/actions/runs/123/attempts/$RUN_ATTEMPT/jobs?per_page=100")
+      echo jobs >> "$TEST_API_LOG"
+      jq '[.]' "$TEST_JOBS_FILE"
+      ;;
+    "api /repos/test/repo/actions/runs/123")
+      echo run >> "$TEST_API_LOG"
+      if [ "$TEST_RUN_METADATA" = error ]; then return 1; fi
+      printf '%s\n' "$TEST_RUN_METADATA"
+      ;;
+    "api --method POST /repos/test/repo/actions/runs/123/rerun-failed-jobs")
+      echo post >> "$TEST_API_LOG"
+      ;;
+    *) return 1 ;;
+  esac
+}
+export -f gh
+
+check_step() {
+  local label="$1" attempt="$2" metadata="$3" expected_calls="$4" expected_status="${5:-0}" status=0
+  : > "$step_temp/api.log"
+  RUNNER_TEMP="$step_temp" GITHUB_REPOSITORY=test/repo RUN_ID=123 \
+    RUN_ATTEMPT="$attempt" RUN_CONCLUSION=failure \
+    TEST_API_LOG="$step_temp/api.log" TEST_RUN_METADATA="$metadata" \
+    TEST_JOBS_FILE="$testdata/cap-bt-attempt5.json" \
+    bash -e -o pipefail "$step_file" > "$step_temp/output" 2>&1 || status=$?
+  if [ "$status" -eq "$expected_status" ] && [ "$(cat "$step_temp/api.log")" = "$expected_calls" ]; then
+    pass=$((pass + 1))
+    echo "ok   $label"
+  else
+    fail=$((fail + 1))
+    echo "FAIL $label: status $status; calls $(cat "$step_temp/api.log")" >&2
+    cat "$step_temp/output" >&2
+  fi
+}
+
+check_step "current completed attempt is re-run" 5 \
+  '{"run_attempt":5,"status":"completed","conclusion":"failure"}' $'jobs\nrun\npost'
+check_step "superseded attempt cannot re-run a later failure" 5 \
+  '{"run_attempt":6,"status":"completed","conclusion":"failure"}' $'jobs\nrun'
+check_step "stale attempt cannot bypass cap" 11 \
+  '{"run_attempt":12,"status":"completed","conclusion":"failure"}' $'jobs\nrun'
+check_step "superseded attempt cannot re-run an active run" 5 \
+  '{"run_attempt":6,"status":"in_progress","conclusion":null}' $'jobs\nrun'
+check_step "current attempt must still be completed" 5 \
+  '{"run_attempt":5,"status":"queued","conclusion":null}' $'jobs\nrun'
+check_step "current conclusion must match evaluated conclusion" 5 \
+  '{"run_attempt":5,"status":"completed","conclusion":"success"}' $'jobs\nrun'
+check_step "metadata lookup failure prevents POST" 5 error $'jobs\nrun' 1
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -88,6 +88,14 @@ jobs:
 
           if jq -e --arg capacity_conclusion "$RUN_CONCLUSION" \
             -f "$RUNNER_TEMP/capacity-cancellation.jq" > /dev/null <<<"$pages"; then
+            current_run="$(gh api \
+              "/repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID")"
+            if ! jq -e --argjson attempt "$RUN_ATTEMPT" --arg conclusion "$RUN_CONCLUSION" \
+              '.run_attempt == $attempt and .status == "completed" and .conclusion == $conclusion' \
+              > /dev/null <<<"$current_run"; then
+              echo "Attempt $RUN_ATTEMPT of run $RUN_ID is no longer the current completed attempt; not re-running."
+              exit 0
+            fi
             echo "Attempt $RUN_ATTEMPT of run $RUN_ID is a capacity cancellation; requesting re-run of its cancelled jobs."
             gh api --method POST \
               "/repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/rerun-failed-jobs"
