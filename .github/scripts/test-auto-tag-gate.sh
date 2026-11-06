@@ -51,14 +51,14 @@ command -v decide >/dev/null || { echo "FAIL: decide() did not extract"; exit 1;
 recorded_all_success() {
   cat <<'EOF'
 [
-  {"id": 42167209597, "name": "Auto Tag", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "failure", "event": "workflow_run", "created_at": "2026-11-06T05:14:13Z"},
-  {"id": 42167031277, "name": "Lint Workflows", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "success", "event": "push", "created_at": "2026-11-06T05:11:52Z"},
-  {"id": 42167031250, "name": "golangci-lint", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "success", "event": "push", "created_at": "2026-11-06T05:11:52Z"},
-  {"id": 42167031229, "name": "Build and Test", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "success", "event": "push", "created_at": "2026-11-06T05:11:52Z"},
-  {"id": 42167031683, "name": "Release", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "failure", "event": "push", "created_at": "2026-11-06T05:11:53Z"},
-  {"id": 42167031213, "name": "govulncheck", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "success", "event": "push", "created_at": "2026-11-06T05:11:52Z"},
-  {"id": 42167031202, "name": "Lint Markdown", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "success", "event": "push", "created_at": "2026-11-06T05:11:52Z"},
-  {"id": 42167031195, "name": "CodeQL", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "success", "event": "push", "created_at": "2026-11-06T05:11:52Z"}
+  {"id": 42167209597, "run_attempt": 1, "name": "Auto Tag", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "failure", "event": "workflow_run", "created_at": "2026-11-06T05:14:13Z"},
+  {"id": 42167031277, "run_attempt": 1, "name": "Lint Workflows", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "success", "event": "push", "created_at": "2026-11-06T05:11:52Z"},
+  {"id": 42167031250, "run_attempt": 1, "name": "golangci-lint", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "success", "event": "push", "created_at": "2026-11-06T05:11:52Z"},
+  {"id": 42167031229, "run_attempt": 1, "name": "Build and Test", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "success", "event": "push", "created_at": "2026-11-06T05:11:52Z"},
+  {"id": 42167031683, "run_attempt": 1, "name": "Release", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "failure", "event": "push", "created_at": "2026-11-06T05:11:53Z"},
+  {"id": 42167031213, "run_attempt": 1, "name": "govulncheck", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "success", "event": "push", "created_at": "2026-11-06T05:11:52Z"},
+  {"id": 42167031202, "run_attempt": 1, "name": "Lint Markdown", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "success", "event": "push", "created_at": "2026-11-06T05:11:52Z"},
+  {"id": 42167031195, "run_attempt": 1, "name": "CodeQL", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "success", "event": "push", "created_at": "2026-11-06T05:11:52Z"}
 ]
 EOF
 }
@@ -66,6 +66,9 @@ EOF
 derive() { # derive <jq filter> -> runs JSON
   recorded_all_success | jq -c "${1}"
 }
+
+TRIGGER_RUN=$(derive '.[] | select(.name == "Lint Workflows")')
+export TRIGGER_RUN
 
 expect() { # expect <scenario> <runs-json> <want>
   local scenario="$1" input="$2" want="$3" got
@@ -134,17 +137,64 @@ expect "CodeQL absent -> tag" \
   "$(derive 'map(select(.name != "CodeQL"))')" \
   "tag|all required workflows succeeded"
 
-# Re-runs: the most recent run of a workflow supersedes earlier ones (ids
-# grow with time; jq keeps the highest id per name).
-expect "golangci-lint re-run in progress supersedes its success -> skip" \
-  "$(derive '. + [{"id": 42167031251, "name": "golangci-lint", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "in_progress", "conclusion": null, "event": "workflow_run", "created_at": "2026-11-06T05:12:01Z"}]')" \
+expect "golangci-lint re-run in progress -> skip" \
+  "$(derive 'map(if .name == "golangci-lint" then .run_attempt = 2 | .status = "in_progress" | .conclusion = null else . end)')" \
   "skip|golangci-lint"
-expect "golangci-lint re-run success supersedes an earlier failure -> tag" \
-  "$(derive 'map(if .name == "golangci-lint" then .conclusion = "failure" else . end) | . + [{"id": 42167031252, "name": "golangci-lint", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "success", "event": "workflow_run", "created_at": "2026-11-06T05:12:02Z"}]')" \
+expect "golangci-lint re-run success -> tag" \
+  "$(derive 'map(if .name == "golangci-lint" then .run_attempt = 2 else . end)')" \
   "tag|all required workflows succeeded"
-expect "an older failure after a newer success does not regress the state -> tag" \
-  "$(derive '. + [{"id": 42167031190, "name": "golangci-lint", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "failure", "event": "workflow_run", "created_at": "2026-11-06T05:11:00Z"}]')" \
+expect "an older push failure after a newer success does not regress the state -> tag" \
+  "$(derive '. + [{"id": 42167031190, "run_attempt": 1, "name": "golangci-lint", "head_branch": "master", "head_sha": "52034ab2f35bd04a7b91f1a044284a234399c688", "status": "completed", "conclusion": "failure", "event": "push"}]')" \
   "tag|all required workflows succeeded"
+
+rerun_success=$(derive '.[] | select(.name == "golangci-lint") | .run_attempt = 2')
+rerun_failure=$(jq -c '.conclusion = "failure"' <<<"${rerun_success}")
+stale_failure=$(derive 'map(if .name == "golangci-lint" then .conclusion = "failure" else . end)')
+stale_success=$(recorded_all_success)
+current_success=$(derive 'map(if .name == "golangci-lint" then .run_attempt = 2 else . end)')
+current_failure=$(jq -c 'map(if .name == "golangci-lint" then .conclusion = "failure" else . end)' <<<"${current_success}")
+
+TRIGGER_RUN="${rerun_success}" expect "stale failure -> retry" "${stale_failure}" "skip|golangci-lint"
+TRIGGER_RUN="${rerun_success}" FINAL=1 expect "stale failure -> event success at budget exhaustion" \
+  "${stale_failure}" "tag|all required workflows succeeded"
+TRIGGER_RUN="${rerun_failure}" expect "stale success -> retry" "${stale_success}" "skip|golangci-lint"
+TRIGGER_RUN="${rerun_failure}" FINAL=1 expect "stale success -> event failure at budget exhaustion" \
+  "${stale_success}" "no-tag|golangci-lint"
+
+for event_conclusion in success failure; do
+  trigger_event=$(jq -c --arg conclusion "${event_conclusion}" '.conclusion = $conclusion' <<<"${rerun_success}")
+  if [ "${event_conclusion}" = success ]; then
+    final_decision="tag|all required workflows succeeded"
+    conflicting="${current_failure}"
+  else
+    final_decision="no-tag|golangci-lint"
+    conflicting="${current_success}"
+  fi
+  for lag in missing different-id older-attempt pending conflicting-conclusion; do
+    case "${lag}" in
+      missing) input=$(jq -c 'map(select(.name != "golangci-lint"))' <<<"${current_success}") ;;
+      different-id) input=$(jq -c 'map(if .name == "golangci-lint" then .id -= 1 else . end)' <<<"${current_success}") ;;
+      older-attempt) input="${stale_success}" ;;
+      pending) input=$(jq -c 'map(if .name == "golangci-lint" then .status = "in_progress" | .conclusion = null else . end)' <<<"${current_success}") ;;
+      conflicting-conclusion) input="${conflicting}" ;;
+    esac
+    TRIGGER_RUN="${trigger_event}" expect "${lag} -> retry event ${event_conclusion}" "${input}" "skip|golangci-lint"
+    TRIGGER_RUN="${trigger_event}" FINAL=1 expect "${lag} -> event ${event_conclusion} at budget exhaustion" \
+      "${input}" "${final_decision}"
+  done
+done
+
+TRIGGER_RUN=$(jq -c '.event = "pull_request"' <<<"${rerun_success}") FINAL=1 \
+  expect "pull request event cannot replace push failure" "${stale_failure}" "no-tag|golangci-lint"
+TRIGGER_RUN=$(jq -c '.head_branch = "feature"' <<<"${rerun_success}") FINAL=1 \
+  expect "non-master event cannot replace master failure" "${stale_failure}" "no-tag|golangci-lint"
+
+TRIGGER_RUN="${rerun_success}" FINAL=1 expect "newer attempt pending supersedes event -> skip" \
+  "$(jq -c 'map(if .name == "golangci-lint" then .run_attempt = 3 | .status = "in_progress" | .conclusion = null else . end)' <<<"${current_success}")" \
+  "skip|golangci-lint"
+TRIGGER_RUN="${rerun_success}" FINAL=1 expect "newer attempt failure supersedes event -> no tag" \
+  "$(jq -c 'map(if .name == "golangci-lint" then .run_attempt = 3 else . end)' <<<"${current_failure}")" \
+  "no-tag|golangci-lint"
 
 recorded_all_success | ruby "${script_dir}/test-auto-tag-workflow.rb" "${workflow}"
 
@@ -234,5 +284,21 @@ gh_responses=()
 gh_responses+=("$(page "$(recorded_all_success)")")
 expect_loop "no lag -> single fetch, no re-query" \
   "tag|all required workflows succeeded" 1 0
+
+gh_responses=("$(page "${stale_failure}")" "$(page "${current_success}")")
+TRIGGER_RUN="${rerun_success}" expect_loop "stale failure on same ID -> retry then tag" \
+  "tag|all required workflows succeeded" 2 1
+
+gh_responses=("$(page "${stale_failure}")")
+TRIGGER_RUN="${rerun_success}" expect_loop "persistent stale failure -> event success after bounded retries" \
+  "tag|all required workflows succeeded" 3 2
+
+gh_responses=("$(page "${stale_success}")" "$(page "${current_failure}")")
+TRIGGER_RUN="${rerun_failure}" expect_loop "stale success on same ID -> retry then no tag" \
+  "no-tag|golangci-lint" 2 1
+
+gh_responses=("$(page "${stale_success}")")
+TRIGGER_RUN="${rerun_failure}" expect_loop "persistent stale success -> event failure after bounded retries" \
+  "no-tag|golangci-lint" 3 2
 
 echo "all gate tests passed"

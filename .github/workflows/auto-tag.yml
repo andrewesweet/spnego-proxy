@@ -60,6 +60,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ github.event.workflow_run.head_sha }}
           REPOSITORY: ${{ github.repository }}
+          TRIGGER_RUN: ${{ toJSON(github.event.workflow_run) }}
         run: |
           set -o pipefail
           # --- gating decision (inputs and pure function; exercised by .github/scripts/test-auto-tag-gate.sh against recorded API JSON) ---
@@ -96,21 +97,29 @@ jobs:
             req=$(jq -cn '$ARGS.positional' --args -- "${required_workflows[@]}")
             opt=$(jq -cn '$ARGS.positional' --args -- "${optional_workflows[@]}")
             # shellcheck disable=SC2016  # jq program, not shell expansion
-            jq -r --argjson req "${req}" --argjson opt "${opt}" '
+            jq -r --argjson req "${req}" --argjson opt "${opt}" \
+              --argjson trigger "${TRIGGER_RUN}" --argjson final "${FINAL:-0}" '
               if ($req | length) == 0
               then "no-tag|required workflow list is empty"
               else
-              . as $runs
-              | ([ $runs
-                   | sort_by(.id)
-                   | .[]
-                   | {(.name): (
-                       if .status != "completed" then "pending"
-                       elif .conclusion == "success" then "success"
-                       else "failed"
-                       end)}
-                 ]
-                 | add // {}) as $latest
+              (sort_by(.id) | map({(.name): .}) | add // {})
+              | .[$trigger.name] as $observed
+              | if $trigger.event == "push" and $trigger.head_branch == "master"
+                   and ($req | index($trigger.name)) != null
+                   and ($observed.id != $trigger.id
+                        or $observed.run_attempt < $trigger.run_attempt
+                        or ($observed.run_attempt == $trigger.run_attempt
+                            and ($observed.status != "completed"
+                                 or $observed.conclusion != $trigger.conclusion)))
+                then .[$trigger.name] = ($trigger | .status = (
+                  if $final == 1 then "completed" else "in_progress" end))
+                else .
+                end
+              | with_entries(.value |= (
+                  if .status != "completed" then "pending"
+                  elif .conclusion == "success" then "success"
+                  else "failed"
+                  end)) as $latest
               | [ $req[]
                   | {workflow: ., state: ($latest[.] // "absent"), required: true} ]
                 + [ $opt[]
@@ -160,7 +169,7 @@ jobs:
           requery_delay_secs=30 # re-queries span about 60s worst case
           while :; do
             runs_json=$(fetch_runs)
-            decision=$(decide <<<"${runs_json}")
+            decision=$(FINAL=$((attempt + 1 == max_attempts)) decide <<<"${runs_json}")
             case "${decision}" in
               "skip|"*)
                 if [ $((attempt += 1)) -ge "${max_attempts}" ]; then

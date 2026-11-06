@@ -369,9 +369,11 @@ When a pull request is merged to `master`:
 2. Each time one of them completes, Auto Tag checks that commit. If any
    required workflow has not completed yet, the run ends as a clean skip;
    the completion of the missing workflow triggers Auto Tag again. Because
-   API indexing can briefly lag a completion event, Auto Tag re-queries for
-   about a minute before it accepts a required workflow as pending, so the
-   final completion cannot be mis-read as a skip. Once all required
+   API indexing can briefly lag a completion event, Auto Tag compares the
+   triggering run's ID, attempt, status, and conclusion with the event.
+   If the API record is missing or stale, Auto Tag re-queries for about a
+   minute, then uses the event's conclusion if the record still lags.
+   Other pending workflows still cause a clean skip. Once all required
    workflows have completed, Auto Tag continues only when all of them (and
    any optional workflow that completed, such as CodeQL) succeeded. CodeQL
    is advisory: only a CodeQL failure that is already completed when the
