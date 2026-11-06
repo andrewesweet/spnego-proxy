@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -134,14 +136,20 @@ func (s *ClientSession) dialAndAuthUpstream(req *http.Request) net.Conn {
 // timeouts, CONNECT port restrictions (D4, RFC 9110 §9.3.6), and
 // forwarding header injection (RFC 7239 Forwarded, X-Forwarded-For, etc.).
 //
-// handleClient is the stable seam called by Serve and the test harness;
-// its signature is deliberately unchanged. It performs the connection-level
-// guards (pseudonym, IP allowlist), owns the conn close / closeWrite and
-// proxyConn cleanup defers (issue #75 LIFO ordering), constructs the
-// per-connection ClientSession, and delegates the request lifecycle to
-// ClientSession.run. All per-connection handlers are methods on
-// ClientSession; cfg is no longer threaded through them individually.
+// handleClient is the stable test-harness seam. It delegates to handleClientCtx
+// with a background context, so callers retain the same signature without
+// participating in Serve's shutdown lifecycle.
 func handleClient(conn net.Conn, cfg Config) {
+	handleClientCtx(context.Background(), conn, cfg)
+}
+
+// handleClientCtx is Serve's session entry point. It performs the connection-level
+// guards (pseudonym, IP allowlist), owns the conn close / closeWrite and proxyConn
+// cleanup defers (issue #75 LIFO ordering), constructs the per-connection
+// ClientSession, and delegates the request lifecycle to ClientSession.run.
+// Context cancellation closes an idle connection immediately and ends a busy
+// HTTP connection after its response.
+func handleClientCtx(ctx context.Context, conn net.Conn, cfg Config) {
 	defer func() { _ = conn.Close() }()
 	// Half-close the write half before the full close so the client
 	// reads EOF on the response stream rather than receiving a RST that
@@ -174,11 +182,25 @@ func handleClient(conn net.Conn, cfg Config) {
 	defer slog.Debug("stop processing request", "client_addr", clientAddr)
 
 	s := &ClientSession{
+		ctx:        ctx,
 		conn:       conn,
 		cfg:        cfg,
 		clientAddr: clientAddr,
 		reqReader:  bufio.NewReader(conn),
 	}
+	// Shutdown closes a connection that is idle between requests at once: the
+	// blocked request read would otherwise hold the drain for its whole
+	// read-timeout. A busy connection is left alone so the request in flight
+	// still gets an answer.
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.beginShutdown()
+		case <-stopWatch:
+		}
+	}()
 	defer func() {
 		if s.proxyConn != nil {
 			_ = s.proxyConn.Close()
@@ -191,14 +213,20 @@ func handleClient(conn net.Conn, cfg Config) {
 // run executes the client-facing keep-alive loop: read a request, run the
 // validation pipeline, route it (noproxy bypass, CONNECT-via-upstream, or
 // plain HTTP through the upstream proxy), and repeat until either side
-// signals close or an error occurs. The session's conn close / closeWrite
-// and proxyConn cleanup defers stay in handleClient and fire when run
-// returns, preserving the issue #75 LIFO ordering.
+// signals close or an error occurs. Connection cleanup follows handleClientCtx's
+// ownership rules when run returns.
 func (s *ClientSession) run() {
+	// pending carries a request that arrived on a direct (noproxy) connection
+	// which is bound to another host: it has already been read and must now
+	// be routed again on a fresh connection instead of being refused (D6).
+	var pending *http.Request
 	for iter := 0; ; iter++ {
-		req := s.readNextRequest(iter)
+		req := pending
 		if req == nil {
-			return
+			req = s.readNextRequest(iter)
+			if req == nil {
+				return
+			}
 		}
 
 		proceed, pe := s.validateRequest(req)
@@ -209,20 +237,80 @@ func (s *ClientSession) run() {
 			return
 		}
 
-		// Noproxy bypass and CONNECT-via-upstream both terminate the
-		// keep-alive loop: neither can share the authenticated upstream
-		// connection with further HTTP requests.
-		if s.routeNoProxy(req) {
+		next, cont := s.routeRequest(req, iter)
+		if !cont {
 			return
 		}
-		if req.Method == http.MethodConnect {
-			s.tunnelViaUpstream(req)
-			return
-		}
+		pending = next
+	}
+}
 
-		if !s.relayViaUpstream(req, iter) {
-			return
+// routeRequest sends one validated request down the routing decision:
+// noproxy bypass, CONNECT-via-upstream, or plain HTTP through the upstream
+// proxy. It reports whether the session may continue, and returns a non-nil
+// request when the request could not be served on the direct connection it
+// arrived on: the caller must route that request again, which is what keeps
+// a direct connection bound to the single host it was dialled for.
+func (s *ClientSession) routeRequest(req *http.Request, iter int) (*http.Request, bool) {
+	if s.cfg.NoProxy != nil {
+		if matched, pattern := s.cfg.NoProxy.Match(req.Host); matched {
+			slog.Debug("noproxy bypass", "host", req.Host, "pattern", pattern, "method", req.Method, "client_addr", s.clientAddr)
+			if req.Method == http.MethodConnect {
+				s.tunnelDirect(req)
+				return nil, false
+			}
+			injectVia(req.Header, req.Proto, s.cfg.Pseudonym)
+			return s.forwardDirect(req)
 		}
+	}
+	// CONNECT-via-upstream terminates the keep-alive loop: a tunnel cannot
+	// share the authenticated upstream connection with further HTTP requests.
+	if req.Method == http.MethodConnect {
+		s.tunnelViaUpstream(req)
+		return nil, false
+	}
+	if !s.relayViaUpstream(req, iter) {
+		return nil, false
+	}
+	return nil, true
+}
+
+// errSessionShutdown reports that the session stopped waiting for the next
+// request because shutdown started.
+var errSessionShutdown = errors.New("proxy: shutdown")
+
+// readRequest reads the next request from the client under the read timeout.
+// The session counts as idle while it waits, which lets shutdown close the
+// connection at once instead of waiting for the deadline (D8).
+func (s *ClientSession) readRequest() (*http.Request, error) {
+	_ = s.conn.SetReadDeadline(time.Now().Add(s.cfg.ReadTimeout))
+	s.mu.Lock()
+	select {
+	case <-s.ctx.Done():
+		s.mu.Unlock()
+		return nil, errSessionShutdown
+	default:
+	}
+	s.idle = true
+	s.mu.Unlock()
+	req, err := http.ReadRequest(s.reqReader)
+	s.mu.Lock()
+	s.idle = false
+	s.mu.Unlock()
+	_ = s.conn.SetReadDeadline(time.Time{})
+	select {
+	case <-s.ctx.Done():
+		return nil, errSessionShutdown
+	default:
+	}
+	return req, err
+}
+
+func (s *ClientSession) beginShutdown() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.idle {
+		_ = s.conn.Close()
 	}
 }
 
@@ -232,13 +320,13 @@ func (s *ClientSession) run() {
 // answers the latter with a 400), while a failure on a later iteration just
 // ends the keep-alive loop.
 func (s *ClientSession) readNextRequest(iter int) *http.Request {
-	_ = s.conn.SetReadDeadline(time.Now().Add(s.cfg.ReadTimeout))
-	req, err := http.ReadRequest(s.reqReader)
-	_ = s.conn.SetReadDeadline(time.Time{})
+	req, err := s.readRequest()
 	if err == nil {
 		return req
 	}
 	switch {
+	case errors.Is(err, errSessionShutdown):
+		slog.Debug("shutdown, closing idle connection", "iter", iter, "client_addr", s.clientAddr)
 	case iter > 0:
 		slog.Debug("keep-alive loop ended", "error", err, "iter", iter, "client_addr", s.clientAddr)
 	case isExpectedCloseError(err):
@@ -248,28 +336,6 @@ func (s *ClientSession) readNextRequest(iter int) *http.Request {
 		writeHTTPError(s.conn, errHTTPRequestError)
 	}
 	return nil
-}
-
-// routeNoProxy handles a request whose host matches the noproxy matcher by
-// dialling the target directly, bypassing the upstream proxy and SPNEGO. It
-// reports whether it took the request; false means the caller must route it
-// via the upstream proxy.
-func (s *ClientSession) routeNoProxy(req *http.Request) bool {
-	if s.cfg.NoProxy == nil {
-		return false
-	}
-	matched, pattern := s.cfg.NoProxy.Match(req.Host)
-	if !matched {
-		return false
-	}
-	slog.Debug("noproxy bypass", "host", req.Host, "pattern", pattern, "method", req.Method, "client_addr", s.clientAddr)
-	if req.Method == http.MethodConnect {
-		s.tunnelDirect(req)
-		return true
-	}
-	injectVia(req.Header, req.Proto, s.cfg.Pseudonym)
-	s.forwardDirect(req)
-	return true
 }
 
 // relayViaUpstream forwards one plain-HTTP request through the upstream
@@ -309,8 +375,8 @@ func (s *ClientSession) relayViaUpstream(req *http.Request, iter int) bool {
 		return false
 	}
 
-	if writeErr := writeResponse(s.conn, resp); writeErr != nil {
-		logForwardError(writeErr, s.proxyConn.RemoteAddr(), s.conn.RemoteAddr())
+	if err := s.writeResponse(resp); err != nil {
+		logForwardError(err, s.proxyConn.RemoteAddr(), s.conn.RemoteAddr())
 		return false
 	}
 
@@ -345,11 +411,23 @@ func (s *ClientSession) tunnelViaUpstream(req *http.Request) {
 	handleConnectTunnel(s.conn, proxyConn, s.reqReader, req, s.cfg.Pseudonym, s.clientAddr, s.cfg.IdleTimeout)
 }
 
-// writeResponse writes a response and ensures its body is closed even on error.
-// Response.Write consumes and closes the body on success; reading it again
-// would fail and incorrectly prevent connection reuse.
-func writeResponse(conn net.Conn, resp *http.Response) error {
-	writeErr := resp.Write(conn)
+// writeResponse relays one response to the client.
+// Response.Write reads the body to its end and closes
+// it, so no separate drain follows: a read or close failure on the body comes
+// back from Write as the error, and callers treat it as fatal because a failed
+// write leaves the client stream misaligned (D2).
+// Shutdown is checked against the context before serialization, independently
+// of the idle-connection watcher. Do not hold s.mu across Write: cancellation
+// must not block on or alter a response whose serialization has already begun.
+func (s *ClientSession) writeResponse(resp *http.Response) error {
+	select {
+	case <-s.ctx.Done():
+		resp.Close = true
+	default:
+	}
+	err := resp.Write(s.conn)
+	// Write has already closed the body when it succeeded; this close only
+	// releases it on the error path.
 	_ = resp.Body.Close()
-	return writeErr
+	return err
 }

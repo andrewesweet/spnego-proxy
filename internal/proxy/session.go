@@ -2,11 +2,13 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"net"
+	"sync"
 )
 
 // ClientSession holds the per-connection state for one accepted client
-// connection. Exactly one ClientSession is constructed per handleClient
+// connection. Exactly one ClientSession is constructed per handleClientCtx
 // invocation and lives for the duration of that connection.
 //
 // It replaces the previous convention of threading the
@@ -16,22 +18,26 @@ import (
 // every keep-alive iteration and stays a method parameter.
 //
 // Ownership rules (enforced by structure, previously by convention):
-//   - conn is owned by handleClient, which retains the close/closeWrite
+//   - conn is owned by handleClientCtx, which retains the close/closeWrite
 //     defers in their original LIFO order (issue #75).
 //   - reqReader is created exactly once over conn and reused on every
 //     keep-alive iteration; recreating it would drop buffered bytes for
 //     pipelined requests.
 //   - proxyConn / upstreamReader are lazily dialled on the first
 //     via-upstream plain-HTTP request and reused on subsequent ones
-//     (RFC 4559 §5); they are closed by the handleClient defer. The
+//     (RFC 4559 §5); they are closed by the handleClientCtx defer. The
 //     CONNECT-via-upstream and noproxy-direct flows use their own
 //     method-local connections and never touch these fields.
 //   - cfg is a read-only value snapshot, identical to the previous
 //     pass-by-value Config parameter.
 type ClientSession struct {
+	ctx        context.Context
 	conn       net.Conn
 	cfg        Config
 	clientAddr string
+
+	mu   sync.Mutex
+	idle bool
 
 	reqReader *bufio.Reader
 
