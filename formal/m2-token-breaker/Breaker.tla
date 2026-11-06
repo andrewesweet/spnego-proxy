@@ -1,17 +1,18 @@
 ---- MODULE Breaker ----
 \* Circuit breaker around SPNEGO token acquisition, with concurrent callers.
 \*
-\* Code (spnego-proxy at ecd1990, gobreaker v2.4.0, gokrb5 v8.4.4):
-\*   internal/proxy/circuit_breaker.go  NewCircuitBreakerTokenProvider (41-55):
+\* Code (spnego-proxy at 52034ab, gobreaker v2.4.0, gokrb5 v8.4.4):
+\*   internal/proxy/circuit_breaker.go  NewCircuitBreakerTokenProvider (50-66):
 \*       MaxRequests 1, ReadyToTrip ConsecutiveFailures >= threshold;
-\*       GetToken (73-90): p.cb.Execute(func() { return p.inner.GetToken() })
+\*       GetToken (83-103): p.mu held across the whole
+\*       p.cb.Execute(func() { return p.inner.GetToken() })
 \*   gobreaker.go  Execute (217-235), beforeRequest (237-252), afterRequest
 \*       (254-274), onFailure (288-298), currentState (304-318); each of
 \*       beforeRequest and afterRequest runs under cb.mutex, and nothing holds
 \*       cb.mutex while the request function runs
-\*   internal/proxy/auth_gokrb5.go  GetToken (118-133) holds p.mu for the whole
-\*       AcquireCred + InitSecContext, so KDC exchanges are serialised
-\*   internal/proxy/forward.go dialAndAuthUpstream (110-130): one GetToken per
+\*   internal/proxy/auth_gokrb5.go  GetToken (187-216) holds p.mu for the whole
+\*       ticketGrantingClient + InitSecContext, so KDC exchanges are serialised
+\*   internal/proxy/forward.go dialAndAuthUpstream (112-139): one GetToken per
 \*       upstream connection, so each concurrent client connection is a caller
 \*
 \* Scenario: the configured password no longer works and no valid TGT is
@@ -26,8 +27,9 @@ CONSTANTS
   Calls,             \* GetToken calls each caller makes
   Threshold,         \* -cb-threshold (default 3)
   MaxRequests,       \* gobreaker MaxRequests (the code sets 1)
-  SerializeExecute   \* FALSE: the code. TRUE: fix direction, a mutex held across
-                     \* the whole cb.Execute call
+  SerializeExecute   \* TRUE: the code: a mutex held across the whole cb.Execute
+                     \* call (circuit_breaker.go 83-103). FALSE: sabotage, the
+                     \* ecd1990 shape without that mutex.
 
 Callers == 1..K
 None == 0
@@ -157,7 +159,7 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
-\* ---- Promises (circuit_breaker.go 26-29 and 36-40).
+\* ---- Promises (circuit_breaker.go 27-29 and 39-43).
 
 \* The KDC sees at most Threshold rejected logins, plus one per half-open probe.
 \* Breaking it: a burst of client connections makes more failed logins than the

@@ -1,28 +1,16 @@
-# Expected verdict of each config, checked by formal/run-model.sh.
-#
-#   <model>/<config> breaks=<rules TLC finds a counterexample for, or -> unchecked=<rules TLC did not finish checking, or ->
-#
-# Rule names and sets are sorted, so the line is compared as a whole string.
-#
-# For config purposes, known defects, and the procedure when a verdict differs,
-# see .agents/skills/verify-state-machines/SKILL.md.
-
-m1-relay-keepalive/Relay breaks=EveryRequestAnswered,KeepAliveKept,ProxyReadsOwnResponse unchecked=-
-m1-relay-keepalive/RelayDrainFixed breaks=EveryRequestAnswered,ProxyReadsOwnResponse unchecked=-
-m1-relay-keepalive/RelayFixed breaks=- unchecked=-
-m1-relay-keepalive/RelayInterimFixed breaks=EveryRequestAnswered,KeepAliveKept unchecked=-
-m2-token-breaker/Breaker breaks=KDCFailuresBounded,NoLoginWhileOpen unchecked=-
-m2-token-breaker/BreakerFixed breaks=- unchecked=-
+m1-relay-keepalive/Relay breaks=- unchecked=-
+m1-relay-keepalive/RelaySabotageBodyDrain breaks=EveryRequestAnswered,KeepAliveKept unchecked=-
+m1-relay-keepalive/RelaySabotageSingleRead breaks=EveryRequestAnswered,ProxyReadsOwnResponse unchecked=-
+m2-token-breaker/Breaker breaks=- unchecked=-
 m2-token-breaker/BreakerSabotageMaxRequests breaks=SingleProbe unchecked=NoDeadlock,TypeOK
-m3-connect-tunnel/Tunnel breaks=IdleCutOnlyWhenIdle,NoDataDroppedWhileOpen,NoDeadlock unchecked=-
-m3-connect-tunnel/TunnelFixed breaks=- unchecked=-
-m4-serve-shutdown/Serve breaks=DrainSkipsIdle unchecked=-
-m4-serve-shutdown/ServeFixed breaks=- unchecked=-
+m2-token-breaker/BreakerSabotageUnserialised breaks=KDCFailuresBounded,NoLoginWhileOpen unchecked=-
+m3-connect-tunnel/Tunnel breaks=- unchecked=-
+m3-connect-tunnel/TunnelSabotagePerDirection breaks=IdleCutOnlyWhenIdle,NoDataDroppedWhileOpen,NoDeadlock unchecked=-
+m4-serve-shutdown/Serve breaks=- unchecked=-
 m4-serve-shutdown/ServeSabotageNoAcceptDone breaks=NoAddAfterWait unchecked=-
-m5-direct-loop/DirectLoop breaks=MixedHostsServed unchecked=-
-m5-direct-loop/DirectLoopReroute breaks=- unchecked=-
+m4-serve-shutdown/ServeSabotageNoIdleClose breaks=DrainSkipsIdle unchecked=-
+m5-direct-loop/DirectLoop breaks=- unchecked=-
 m5-direct-loop/DirectLoopSabotageNoCheck breaks=BoundHostOnly,PolicyRouting unchecked=-
-m6-tgt-renewal/RenewalFixed breaks=- unchecked=-
-m6-tgt-renewal/RenewalNonRenewable breaks=BreakerSeesEveryRejectedLogin,RejectedLoginsBounded unchecked=-
-# RenewalRenewable assumes every refresh occurs before renew-till; expiry is outside its coverage.
-m6-tgt-renewal/RenewalRenewable breaks=- unchecked=-
+m5-direct-loop/DirectLoopSabotageRefuse breaks=MixedHostsServed unchecked=-
+m6-tgt-renewal/Renewal breaks=- unchecked=-
+m6-tgt-renewal/RenewalSabotageGoroutineRefresh breaks=BreakerSeesEveryRejectedLogin,RejectedLoginsBounded unchecked=-

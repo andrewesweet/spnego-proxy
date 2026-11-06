@@ -1,28 +1,38 @@
 ---- MODULE Tunnel ----
 \* An established CONNECT tunnel with the -idle-timeout check enabled.
 \*
-\* Code (spnego-proxy at ecd1990):
-\*   internal/proxy/connect.go  idleCopy (37-60): before each src.Read it sets
-\*       srcConn's read deadline to now + timeout; dst.Write has no deadline;
-\*       a read error (deadline, EOF) ends the copy.
-\*     forwardHalf (95-106): defer closeWrite(dst) when the copy ends.
-\*     forwardTunnel (110-119): one forwardHalf per direction, wg.Wait for both.
-\*   internal/proxy/forward.go  handleClient (144-189): the connections close
-\*       after run returns, which is after forwardTunnel returns.
-\*   cli.go -idle-timeout help: "idle timeout for CONNECT tunnels; connections
-\*       with no data flow are closed after this duration (0 to disable)"
+\* Code (spnego-proxy at 52034ab):
+\*   internal/proxy/connect.go  the tunnelClock (44-88): one clock records the
+\*       last byte moved in either direction; idleCopy (101-142) arms the read
+\*       deadline from the tunnel's remaining idle budget, re-arms when a
+\*       read times out while the tunnel is not idle, and ends the copy with
+\*       errTunnelIdle when it is; forwardHalf (188-200) closeWrites dst
+\*       after a normal EOF; forwardTunnel (202-228) wraps both connections
+\*       in tunnelConn, runs one forwardHalf per direction, and closes both
+\*       connections when either copy fails.
+\*   internal/proxy/tunnel_write.go  tunnelConn.Read (17-42) re-arms the read
+\*       deadline and touches the clock; tunnelConn.Write (44-68) arms a
+\*       write deadline for the idle budget before each chunk, so a sink
+\*       stalled past the timeout ends the tunnel.
+\*   internal/proxy/forward.go  handleClientCtx (152-216): the connections
+\*       close after run returns, which is after forwardTunnel returns.
+\*   cli.go (65-66) -idle-timeout help: "idle timeout for CONNECT tunnels;
+\*       connections with no data flow are closed after this duration (0 to
+\*       disable)"
 \*
-\* Time is abstract. HalfTimesOut(d) is the read deadline of direction d
-\* passing while d's source sends nothing. otherActive[d] records whether the
-\* other direction moved data since d's current read began, which is when d's
-\* deadline was set.
+\* Time is abstract. HalfTimesOut(d) is a read deadline of direction d passing
+\* while d's source sends nothing. otherActive[d] records whether the other
+\* direction moved data during d's current read window, which is when d's
+\* deadline was armed; in the code that is the shared tunnelClock, whose last
+\* touch can come from either half.
 EXTENDS Naturals
 
 CONSTANTS
   C,               \* data chunks each side may send
-  ConnectionIdle   \* FALSE: the code (per-direction deadline, no write deadline).
-                   \* TRUE: fix direction (a deadline that sees both directions,
-                   \* and a write deadline).
+  ConnectionIdle   \* TRUE: the code: one deadline that sees both directions
+                   \* (the shared tunnelClock), plus a write deadline.
+                   \* FALSE: sabotage, one read deadline per direction and no
+                   \* write deadline (the ecd1990 code).
 
 Dirs == {"up", "down"}       \* up: client to upstream; down: upstream to client
 Other(d) == IF d = "up" THEN "down" ELSE "up"
@@ -131,16 +141,16 @@ HalfSeesEOF(d) ==
   /\ UNCHANGED <<phase, avail, sentN, srcFin, sinkOK, otherActive,
                 cutWhileFlowing, timeoutReArms, abandoned, dropped>>
 
-\* src.Read fails with the read deadline. The code ends this half only, and
-\* closeWrite(dst) sends a FIN to the sink. The fix re-arms when the other
-\* direction moved data, and otherwise closes the whole tunnel.
+\* src.Read fails with the read deadline. The code re-arms when the tunnel as
+\* a whole is not idle, and closes the whole tunnel when it is; the sabotage
+\* shape ends this half only, and closeWrite(dst) sends a FIN to the sink.
 \*
 \* Both ways of reacting to the deadline are recorded, so the promise below is
 \* about the deadline itself and not only about the code's way of cutting:
-\* timeoutReArms counts the fix's re-arms, and cutWhileFlowing counts every
-\* cut. In the fix direction the guard makes the close branch reachable only
-\* when the other direction is idle, which is what the promise asks for; the
-\* code direction is the config that breaks it.
+\* timeoutReArms counts the code's re-arms, and cutWhileFlowing counts every
+\* cut. In the code shape the guard makes the close branch reachable only
+\* when the whole tunnel is idle, which is what the promise asks for; the
+\* sabotage shape is the config that breaks it.
 HalfTimesOut(d) ==
   /\ phase = "open"
   /\ half[d] = "reading"
@@ -162,7 +172,7 @@ HalfTimesOut(d) ==
               /\ UNCHANGED <<half, otherActive, cutWhileFlowing>>
   /\ UNCHANGED <<avail, sentN, srcFin, sinkOK, abandoned, dropped>>
 
-\* Fix direction only: a write deadline ends a write to a stalled sink. The
+\* The code only: a write deadline ends a write to a stalled sink. The
 \* chunk in flight, and any chunk still queued for that direction, is never
 \* read, so the model records the loss as abandoned rather than dropped:
 \* giving up on a peer that stopped reading is what the write deadline is for,
