@@ -3,6 +3,11 @@
 STRIDE-based threat model of the spnego-proxy codebase, generated on
 2026-02-28.
 
+The generated reports describe the code at assessment time. For current
+credential lifetimes and login safeguards, see
+[Password handling](../../README.md#password-handling) and
+[Kerberos account lockout protection](../../README.md#kerberos-account-lockout-protection).
+
 ## How this was generated
 
 The assessment was performed using the

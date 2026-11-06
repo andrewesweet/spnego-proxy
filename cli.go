@@ -71,7 +71,7 @@ func parseFlags(args []string) (*cliConfig, *flag.FlagSet, error) {
 	fs.StringVar(&c.NoProxy, "noproxy", "",
 		"comma-separated list of hosts/domains/IPs/CIDRs to bypass upstream proxy (supports *.domain, .domain, CIDR, * for all; also reads NO_PROXY/no_proxy env vars)")
 	fs.Int64Var(&c.CBThreshold, "cb-threshold", int64(proxy.CBConsecutiveFailures),
-		"consecutive failures before circuit breaker opens")
+		"consecutive failures before circuit breaker opens (token acquisitions are serialised, so a burst of requests cannot exceed this count)")
 	fs.DurationVar(&c.CBTimeout, "cb-timeout", proxy.CBTimeout,
 		"circuit breaker cooldown duration")
 
@@ -89,7 +89,7 @@ func parseFlags(args []string) (*cliConfig, *flag.FlagSet, error) {
 	fs.StringVar(&c.CfgFile, "config", "", "kerberos config file")
 	fs.StringVar(&c.User, "user", "", "kerberos user name")
 	fs.StringVar(&c.Realm, "realm", "", "kerberos realm")
-	fs.StringVar(&c.PasswordFile, "password-file", "", "password file path")
+	fs.StringVar(&c.PasswordFile, "password-file", "", "password file path (re-read for each login; logins stop after a KDC password rejection until the password value changes; trailing CR/LF ignored)")
 	fs.BoolVar(&c.ShowVersion, "version", false, "print version information and exit")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "%s\n\n", versionString())

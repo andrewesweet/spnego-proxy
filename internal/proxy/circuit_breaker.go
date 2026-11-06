@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	gobreaker "github.com/sony/gobreaker/v2"
@@ -31,6 +32,14 @@ type CircuitBreakerTokenProvider struct {
 	inner     TokenProvider
 	cb        *gobreaker.CircuitBreaker[string]
 	threshold uint32
+
+	// mu serialises token acquisition. gobreaker admits every caller while the
+	// circuit is Closed and only records a result afterwards, so without this
+	// a burst of concurrent callers each reaches the credential backend before
+	// the failure count can trip the circuit, sending one failed login per
+	// caller instead of at most threshold. Both providers already serialise
+	// their own KDC exchanges, so this costs no throughput.
+	mu sync.Mutex
 }
 
 // NewCircuitBreakerTokenProvider wraps the given TokenProvider with a circuit
@@ -67,10 +76,13 @@ func newCircuitBreakerTokenProvider(inner TokenProvider, settings gobreaker.Sett
 type CircuitBreakerError struct{ authError }
 
 // GetToken acquires a token from the wrapped provider, subject to circuit
-// breaker policy. Returns a *CircuitBreakerError when the circuit is open
-// or half-open, allowing callers to distinguish circuit breaker rejections
+// breaker policy. Concurrent callers wait for the previous result, including
+// a half-open probe. Returns a *CircuitBreakerError when the breaker rejects
+// the attempt, allowing callers to distinguish circuit breaker rejections
 // from other token acquisition failures using errors.As.
 func (p *CircuitBreakerTokenProvider) GetToken() (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	token, err := p.cb.Execute(func() (string, error) {
 		return p.inner.GetToken()
 	})

@@ -2,7 +2,7 @@
 
 ## Context
 
-Testing spnego-proxy currently requires:
+Manual end-to-end testing against a corporate proxy requires:
 
 - Linux x64, macOS Intel x64, and macOS aarch64 hosts
 - That sit behind a proxy requiring Kerberos authentication
@@ -14,18 +14,20 @@ development and (2) CI, without requiring corporate-style Kerberos DC setups.
 
 ## Current Test Coverage
 
-The existing test suite (~1,395 lines across 5 files) covers:
+The existing test suite covers:
 
 | Area | What's Tested | What's NOT Tested |
 | ------ | --------------- | ------------------- |
-| Proxy mechanics | Dial timeout, read timeout, token injection, bidirectional forwarding, half-close, keepalive, connection limiting, graceful shutdown | Full end-to-end proxy chain with real Kerberos auth |
-| gokrb5 path | Password file handling (perms, size, CRLF), provider construction, SPN inference/normalization, error handling | Actual TGT acquisition, SPNEGO token generation against a real KDC |
+| Proxy mechanics | Dial timeout, read timeout, token injection, bidirectional forwarding, half-close, keepalive, connection limiting, graceful shutdown; full proxy chain with mock-KDC tokens in [TestProxyChainWithRealToken](../internal/proxy/gokrb5_integration_test.go) | Corporate upstream-proxy interoperability |
+| gokrb5 path | Password file handling (perms, size, CRLF), provider construction, SPN inference/normalization, error handling; mock-KDC lockout regressions linked below | SPNEGO token acceptance by a corporate upstream proxy |
 | macOS GSS-API | SPN derivation, SPN normalization, graceful error without credentials | Actual token acquisition via Heimdal GSS-API |
-| Circuit breaker | Open/closed/half-open state transitions | Circuit breaker with real token provider |
+| Circuit breaker | Open/closed/half-open state transitions, concurrent admission, real token provider with a mock KDC | Directory lockout policy interoperability |
 
-**The gap**: No tests exercise the actual Kerberos protocol — acquiring a TGT
-from a KDC, generating a real SPNEGO token, and using it to authenticate to an
-upstream proxy. This is where all manual testing effort is concentrated.
+The [lockout regression tests](../internal/proxy/auth_gokrb5_lockout_test.go)
+exercise TGT acquisition and SPNEGO token generation against a mock KDC.
+They cover delayed exchanges, password changes, rejection warnings, and recovery
+from clock skew. Acceptance by a corporate upstream proxy still needs manual
+verification.
 
 ---
 
@@ -40,21 +42,8 @@ implements:
 - **AS Exchange**: Responds to initial login to obtain a TGT
 - **TGS Exchange**: Grants service tickets
 
-Usage:
-
-```go
-principals := map[string][]string{
-    "testuser1": {"testgroup1"},
-    "HTTP/proxy.example.com": {},
-}
-kdc := krb5test.NewKDC(principals, logger)
-kdc.Start()
-defer kdc.Close()
-
-// kdc.KRB5Conf — auto-generated krb5.conf pointing to ephemeral localhost port
-// kdc.Keytab   — generated keytab for all principals
-// kdc.Realm    — realm name
-```
+For a working setup, see `startLockoutKDC` and `newLockoutProvider` in the tests
+linked in [Current Test Coverage](#current-test-coverage).
 
 ### What it enables
 
@@ -64,7 +53,7 @@ defer kdc.Close()
 - **Test the full proxy chain (gokrb5 path)**: Start the mock KDC, start a
   fake upstream "proxy" that validates the `Proxy-Authorization: Negotiate`
   header, start spnego-proxy pointed at both, and send HTTP requests through.
-- **No Docker, no system packages, no network**: Runs entirely in-process on
+- **No Docker, no system packages, no external network**: Runs in-process on
   ephemeral localhost ports. Works in any CI environment.
 - **Parallel test safety**: Each test gets its own KDC on a unique port.
 
@@ -79,13 +68,14 @@ defer kdc.Close()
 
 ### Effort: Low
 
-Add `github.com/jcmturner/krb5test` as a test dependency. Write integration
-tests using it. No infrastructure changes needed.
+`github.com/jcmturner/krb5test` is already a test dependency, used by the
+lockout regression tests linked in [Current Test Coverage](#current-test-coverage).
+Extending these tests needs no external KDC infrastructure.
 
-### Recommendation: **Do this first.**
+### Recommendation: Extend mock-KDC coverage
 
-This is the highest-value, lowest-effort option. It closes the biggest testing
-gap (gokrb5 token acquisition) with zero infrastructure overhead.
+Use the existing mock-KDC tests as the starting point for broader proxy-chain
+coverage. Keep corporate-proxy interoperability checks separate.
 
 ---
 
@@ -391,18 +381,13 @@ networks:
 
 ## Recommended Phased Approach
 
-### Phase 1: Pure Go Mock KDC (Days)
+### Phase 1: Extend Pure Go Mock KDC Coverage
 
-1. Add `github.com/jcmturner/krb5test` as a test dependency
-2. Write integration tests that:
-   - Start a mock KDC with test principals
-   - Create a `Gokrb5TokenProvider` using the mock's `krb5.conf`
-   - Verify `GetToken()` returns a valid base64-encoded SPNEGO token
-   - Start spnego-proxy with a fake upstream, verify the `Proxy-Authorization`
-     header is injected correctly with a real token
-3. Run these tests in the existing CI pipeline (no infrastructure changes)
-
-**Eliminates**: Most manual testing of the gokrb5 code path.
+For implemented coverage, see [Current Test Coverage](#current-test-coverage).
+The remaining gap is coverage the mock KDC cannot give: enctypes, pre-auth
+policy, and ticket lifetimes that a real KDC negotiates. Extend the existing
+mock-KDC tests only for scenarios they do not already assert; the protocol
+fidelity gap is what Phase 2 closes.
 
 ### Phase 2: Docker-Based Integration Tests (Weeks)
 
@@ -441,10 +426,6 @@ Even with all the above, some scenarios will still require manual testing:
   chains, PAC files, etc.
 - **Long-lived operation**: Ticket renewal, credential expiry, cache
   rotation over hours/days.
-
-However, these are relatively narrow scenarios compared to the broad "does
-Kerberos auth work at all" testing that currently requires a full corporate
-setup.
 
 ---
 

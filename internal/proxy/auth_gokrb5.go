@@ -2,32 +2,81 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/jcmturner/gokrb5/v8/client"
 	"github.com/jcmturner/gokrb5/v8/config"
+	"github.com/jcmturner/gokrb5/v8/credentials"
+	"github.com/jcmturner/gokrb5/v8/messages"
 	"github.com/jcmturner/gokrb5/v8/spnego"
 	"golang.org/x/term"
 )
 
+// passwordRejectWarnInterval rate-limits the warning that logins are refused
+// after the KDC rejected the configured password. The rejection is terminal
+// until the password file changes, so a warning per request would only add log
+// noise while the condition persists.
+const passwordRejectWarnInterval = 5 * time.Minute
+
+// isPasswordRejection reports whether err is the KDC rejecting the configured
+// password, as opposed to a transient failure such as an unreachable KDC.
+func isPasswordRejection(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "KDC_ERR_PREAUTH_FAILED")
+}
+
 // Gokrb5TokenProvider uses the pure-Go gokrb5 library for SPNEGO token acquisition.
 // This is the fallback path used on non-macOS platforms or when -user is specified.
 //
-// Note: the gokrb5 client retains the password string in memory for the
-// lifetime of the process so it can re-authenticate when the TGT expires.
-// Go does not provide primitives to scrub string-backed memory, so the
-// password cannot be reliably zeroed. Use a keytab instead of a password
-// in environments where this is a concern.
+// The provider keeps a ticket-cache client between acquisitions and reuses it
+// while its TGT has lifetime left, so a valid TGT costs no password login. When
+// the TGT is missing or near expiry, the password login runs inside GetToken;
+// the password client never outlives that call. The ticket-cache client holds
+// no password and starts no renewal goroutine. Go does not provide primitives
+// to scrub string-backed memory, so the library's password string cannot be
+// reliably zeroed and may remain in memory after the call. Use a keytab where
+// this is a concern.
 type Gokrb5TokenProvider struct {
-	krbClient    *client.Client
-	spnegoClient *spnego.SPNEGO
-	mu           sync.Mutex
+	// Construction inputs for replacing a missing or near-expiry cached TGT.
+	user         string
+	realm        string
+	cfg          *config.Config
+	spn          string
+	passwordFile string
+	settings     []func(*client.Settings)
+
+	mu sync.Mutex
+	// ticketClient caches the TGT and service tickets between acquisitions. It
+	// is reused while ticketRefreshAt is in the future; past that point the next
+	// acquisition logs in again and replaces it. It holds no password and runs
+	// no renewal goroutine, so reusing it cannot log in outside GetToken.
+	ticketClient    *client.Client
+	ticketRefreshAt time.Time
+	// stdinPassword holds the password when it was typed at a terminal
+	// (-password-file omitted): there is no file to re-read, so the provider
+	// keeps it for the lifetime of the process.
+	stdinPassword []byte
+	closed        bool
+
+	// passwordRejected records that the KDC rejected the configured password.
+	// rejectedFingerprint is a keyed HMAC of the rejected password. A random
+	// per-provider key prevents offline guessing from the fingerprint alone;
+	// this is a transient change detector, not a stored password verifier.
+	passwordRejected    bool
+	fingerprintKey      [sha256.Size]byte
+	rejectedFingerprint [sha256.Size]byte
+	rejectWarnTicker    *time.Ticker
+	rejectWarnStop      chan struct{}
 }
 
 func getPassword(passwordFile string) ([]byte, error) {
@@ -87,29 +136,49 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 		return nil, fmt.Errorf("failed to load kerberos config: %w", err)
 	}
 
+	// Read the password once at start-up so a missing file, insecure
+	// permissions, or a non-terminal stdin fail here rather than on the first
+	// request.
 	passwd, err := getPassword(passwordFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get password: %w", err)
 	}
 
-	opts := []func(*client.Settings){
+	settings := []func(*client.Settings){
 		client.DisablePAFXFAST(true),
 	}
 	if debug {
-		opts = append(opts, client.Logger(slog.NewLogLogger(slog.Default().Handler(), slog.LevelDebug)))
+		settings = append(settings, client.Logger(slog.NewLogLogger(slog.Default().Handler(), slog.LevelDebug)))
 	}
-	cli := client.NewWithPassword(user, realm, string(passwd), cfg, opts...)
 
-	// Zero the password bytes immediately after the Kerberos client has
-	// copied them. string(passwd) creates a copy for the client; this
-	// zeroing reduces the window during which plaintext credentials exist
-	// in process memory (CWE-316).
-	clear(passwd)
+	p := &Gokrb5TokenProvider{
+		user:         user,
+		realm:        realm,
+		cfg:          cfg,
+		spn:          spnVal,
+		passwordFile: passwordFile,
+		settings:     settings,
+	}
+	_, _ = rand.Read(p.fingerprintKey[:]) // Always fills the buffer and returns a nil error (Go 1.24+).
+	if passwordFile == "" {
+		// Nothing to re-read: keep the typed password for future logins.
+		p.stdinPassword = passwd
+	} else {
+		// Zeroing the start-up validation copy narrows the window in which
+		// plaintext credentials exist in process memory (CWE-316).
+		clear(passwd)
+	}
+	return p, nil
+}
 
-	return &Gokrb5TokenProvider{
-		krbClient:    cli,
-		spnegoClient: spnego.SPNEGOClient(cli, spnVal),
-	}, nil
+// readPassword returns the password for a login or rejection check: the current
+// content of -password-file, or the password typed at start-up when no file
+// was given. The caller owns the returned bytes and must zero them.
+func (p *Gokrb5TokenProvider) readPassword() ([]byte, error) {
+	if p.passwordFile == "" {
+		return bytes.Clone(p.stdinPassword), nil
+	}
+	return getPassword(p.passwordFile)
 }
 
 // GetToken acquires a SPNEGO credential and initializes a security context
@@ -118,10 +187,20 @@ func NewGokrb5TokenProvider(user, realm, cfgFile, passwordFile, proxy, explicitS
 func (p *Gokrb5TokenProvider) GetToken() (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := p.spnegoClient.AcquireCred(); err != nil {
-		return "", &CredentialError{authError{msg: fmt.Sprintf("could not acquire client credential: %v", err), cause: err}}
+
+	if p.closed {
+		return "", &CredentialError{authError{msg: "token provider is closed"}}
 	}
-	token, err := p.spnegoClient.InitSecContext()
+	if err := p.checkPasswordRejected(); err != nil {
+		return "", err
+	}
+
+	krbClient, err := p.ticketGrantingClient()
+	if err != nil {
+		return "", err
+	}
+	spnegoClient := spnego.SPNEGOClient(krbClient, p.spn)
+	token, err := spnegoClient.InitSecContext()
 	if err != nil {
 		return "", &NegotiationError{authError{msg: fmt.Sprintf("could not initialize context: %v", err), cause: err}}
 	}
@@ -132,14 +211,190 @@ func (p *Gokrb5TokenProvider) GetToken() (string, error) {
 	return base64.StdEncoding.EncodeToString(b), nil
 }
 
-// Close destroys the underlying gokrb5 client, releasing its session and
-// cached credentials. It is idempotent and safe for concurrent use.
+// ticketGrantingClient returns a client that mints service tickets without a
+// password login. A cached client is reused while its TGT has lifetime left;
+// otherwise the password login runs here, inside GetToken, where the circuit
+// breaker counts it.
+func (p *Gokrb5TokenProvider) ticketGrantingClient() (*client.Client, error) {
+	if p.ticketClient != nil && time.Now().Before(p.ticketRefreshAt) {
+		return p.ticketClient, nil
+	}
+	passwd, err := p.readPassword()
+	if err != nil {
+		return nil, &CredentialError{authError{msg: "failed to get password: check password input and file permissions"}}
+	}
+	fingerprint := p.passwordFingerprint(passwd)
+	krbClient, refreshAt, err := p.acquireCredential(passwd)
+	if err != nil {
+		if isPasswordRejection(err) {
+			p.rejectPassword(fingerprint)
+		}
+		return nil, &CredentialError{authError{msg: fmt.Sprintf("could not acquire client credential: %v", err), cause: err}}
+	}
+	if p.ticketClient != nil {
+		p.ticketClient.Destroy()
+	}
+	p.ticketClient = krbClient
+	p.ticketRefreshAt = refreshAt
+	return krbClient, nil
+}
+
+// acquireCredential uses ASExchange directly because Login starts automatic
+// renewal, which can retry password logins outside the counted token path.
+// The returned client has only cached tickets, so service-ticket acquisition
+// cannot fall back to a password login, even if the TGT expires during the call.
+// The returned deadline is when the cached TGT should be replaced.
+func (p *Gokrb5TokenProvider) acquireCredential(passwd []byte) (*client.Client, time.Time, error) {
+	passwordClient := client.NewWithPassword(p.user, p.realm, string(passwd), p.cfg, p.settings...)
+	clear(passwd)
+	defer passwordClient.Destroy()
+	req, err := messages.NewASReqForTGT(passwordClient.Credentials.Domain(), p.cfg, passwordClient.Credentials.CName())
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	rep, err := passwordClient.ASExchange(passwordClient.Credentials.Domain(), req, 0)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	ticket, err := rep.Ticket.Marshal()
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	cache := new(credentials.CCache)
+	cache.DefaultPrincipal.Realm = rep.CRealm
+	cache.DefaultPrincipal.PrincipalName = rep.CName
+	entry := &credentials.Credential{
+		Key:       rep.DecryptedEncPart.Key,
+		AuthTime:  rep.DecryptedEncPart.AuthTime,
+		StartTime: rep.DecryptedEncPart.StartTime,
+		EndTime:   rep.DecryptedEncPart.EndTime,
+		RenewTill: rep.DecryptedEncPart.RenewTill,
+		Ticket:    ticket,
+	}
+	entry.Client = cache.DefaultPrincipal
+	entry.Server.Realm = rep.Ticket.Realm
+	entry.Server.PrincipalName = rep.Ticket.SName
+	cache.Credentials = []*credentials.Credential{entry}
+	krbClient, err := client.NewFromCCache(cache, p.cfg, p.settings...)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	return krbClient, tgtRefreshDeadline(rep.DecryptedEncPart), nil
+}
+
+// tgtRefreshDeadline is when a cached TGT should be replaced: 5/6 through its
+// lifetime, the point gokrb5's own session logic treats as needing renewal, so
+// the cached client is replaced before its ticket stops being usable.
+func tgtRefreshDeadline(part messages.EncKDCRepPart) time.Time {
+	lifetime := part.EndTime.Sub(part.AuthTime)
+	if part.AuthTime.IsZero() || lifetime <= 0 {
+		lifetime = time.Until(part.EndTime)
+	}
+	return part.EndTime.Add(-lifetime / 6)
+}
+
+// passwordFingerprint detects password changes without keeping the password
+// or an unkeyed digest that could be tested against a password dictionary.
+func (p *Gokrb5TokenProvider) passwordFingerprint(passwd []byte) [sha256.Size]byte {
+	mac := hmac.New(sha256.New, p.fingerprintKey[:])
+	_, _ = mac.Write(passwd)
+	return [sha256.Size]byte(mac.Sum(nil))
+}
+
+// rejectPassword records that the KDC rejected the password whose HMAC is
+// fingerprint, starts periodic warnings, and stops further logins until the
+// effective password changes.
+func (p *Gokrb5TokenProvider) rejectPassword(fingerprint [sha256.Size]byte) {
+	p.passwordRejected = true
+	p.rejectedFingerprint = fingerprint
+	p.warnPasswordRejected()
+	if p.rejectWarnTicker != nil {
+		p.rejectWarnTicker.Reset(passwordRejectWarnInterval)
+		return
+	}
+	p.rejectWarnTicker = time.NewTicker(passwordRejectWarnInterval)
+	p.rejectWarnStop = make(chan struct{})
+	go p.repeatPasswordRejectionWarnings(p.rejectWarnTicker, p.rejectWarnStop)
+}
+
+// warnPasswordRejected logs that logins are refused.
+func (p *Gokrb5TokenProvider) warnPasswordRejected() {
+	slog.Warn("KDC rejected the configured password; refusing Kerberos logins until the password changes",
+		"password_source", p.passwordSource(), "recheck_interval", passwordRejectWarnInterval.String())
+}
+
+func (p *Gokrb5TokenProvider) repeatPasswordRejectionWarnings(ticker *time.Ticker, stop <-chan struct{}) {
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			p.mu.Lock()
+			if !p.closed && p.passwordRejected {
+				_ = p.checkPasswordRejected()
+				if p.passwordRejected {
+					p.warnPasswordRejected()
+				}
+			}
+			p.mu.Unlock()
+		}
+	}
+}
+
+// checkPasswordRejected enforces the lockout guard: once the KDC has rejected
+// the configured password, no further login is sent until the password
+// changes. It checks for a correction both on refused attempts and on the
+// warning timer, so detection does not depend on traffic or breaker state.
+func (p *Gokrb5TokenProvider) checkPasswordRejected() error {
+	if !p.passwordRejected {
+		return nil
+	}
+	passwd, err := p.readPassword()
+	if err != nil {
+		return &CredentialError{authError{
+			msg: "KDC rejected the configured password and the password cannot be re-read to check for a correction; check password input and file permissions",
+		}}
+	}
+	fingerprint := p.passwordFingerprint(passwd)
+	clear(passwd)
+	if fingerprint != p.rejectedFingerprint {
+		p.passwordRejected = false
+		p.rejectWarnTicker.Stop()
+		slog.Info("password changed; resuming Kerberos logins", "password_source", p.passwordSource())
+		return nil
+	}
+	return &CredentialError{authError{
+		msg: fmt.Sprintf("KDC rejected the configured password; refusing Kerberos logins until the password changes (source: %s)", p.passwordSource()),
+	}}
+}
+
+// passwordSource names where the password comes from, for logs and errors.
+func (p *Gokrb5TokenProvider) passwordSource() string {
+	if p.passwordFile == "" {
+		return "terminal input at start-up"
+	}
+	return "password file"
+}
+
+// Close stops further token acquisition, destroys the cached ticket client, and
+// zeroes any password typed at a terminal. It is idempotent and safe for
+// concurrent use.
 func (p *Gokrb5TokenProvider) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.krbClient != nil {
-		p.krbClient.Destroy()
-		p.krbClient = nil
+	p.closed = true
+	if p.ticketClient != nil {
+		p.ticketClient.Destroy()
+		p.ticketClient = nil
 	}
+	if p.rejectWarnTicker != nil {
+		p.rejectWarnTicker.Stop()
+		close(p.rejectWarnStop)
+		p.rejectWarnTicker = nil
+	}
+	clear(p.stdinPassword)
+	p.stdinPassword = nil
+	clear(p.fingerprintKey[:])
+	clear(p.rejectedFingerprint[:])
 	return nil
 }
