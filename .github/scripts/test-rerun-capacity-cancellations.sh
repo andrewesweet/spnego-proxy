@@ -11,7 +11,7 @@
 # andrewesweet/spnego-proxy, plus synthetic policy and attempt-metadata cases.
 #
 # Usage: .github/scripts/test-rerun-capacity-cancellations.sh
-# Requires: jq, sed
+# Requires: jq, sed, awk
 set -euo pipefail
 
 script_dir="$(dirname "$0")"
@@ -117,7 +117,72 @@ for labels in '["windows-latest"]' '["self-hosted","macos-latest"]' '["self-host
   check "policy: unsupported runner labels $labels" "$step_temp/labels.json" failure false
 done
 
-sed -n '/^        run: |$/,$p' "$workflow" | sed '1d; s/^          //' > "$step_file"
+# Extract the step script verbatim: locate the run: | block containing the
+# rerun-failed-jobs call (instead of assuming the first block or a fixed
+# indentation), derive the block's actual content indentation, and strip it.
+awk '
+  function ind(s) { return match(s, /[^ \t]/) - 1 }
+  /^[ \t]*run: \|[ \t]*$/ && (!in_block || ind($0) <= block_indent) {
+    if (in_block && index(block, "rerun-failed-jobs") && found == "") found = block
+    in_block = 1
+    block_indent = ind($0)
+    block = ""
+    next
+  }
+  in_block {
+    if ($0 ~ /^[ \t]*$/) { block = block "\n"; next }
+    if (ind($0) <= block_indent) {
+      if (index(block, "rerun-failed-jobs") && found == "") found = block
+      in_block = 0
+    } else {
+      block = block $0 "\n"
+    }
+  }
+  END {
+    if (in_block && index(block, "rerun-failed-jobs") && found == "") found = block
+    if (found == "") exit 0
+    n = split(found, lines, "\n")
+    min = -1
+    for (i = 1; i <= n; i++) {
+      if (lines[i] ~ /^[ \t]*$/) continue
+      p = ind(lines[i])
+      if (min == -1 || p < min) min = p
+    }
+    if (min == -1) min = 0
+    for (i = 1; i <= n; i++) {
+      if (lines[i] ~ /^[ \t]*$/) print ""
+      else print substr(lines[i], min + 1)
+    }
+  }
+' "$workflow" > "$step_file"
+
+if [ ! -s "$step_file" ]; then
+  echo "FAIL: no run block containing rerun-failed-jobs extracted from $workflow" >&2
+  exit 1
+fi
+if ! grep -q 'rerun-failed-jobs' "$step_file"; then
+  echo "FAIL: extracted step does not contain the rerun-failed-jobs call" >&2
+  exit 1
+fi
+
+# Evaluate the workflow's job-level if: expression (the attempt cap and
+# conclusion gate) the way GitHub would: substitute the two event fields and
+# translate GitHub operators and string quoting to jq. This pins the cap
+# boundary to the workflow file itself, so removing the cap fails a test.
+if_expr="$(awk '/^[ \t]*if: >-[ \t]*$/ {in_if = 1; next} in_if && /^[ \t]*[A-Za-z_-]+:/ {in_if = 0} in_if {print}' "$workflow" | sed 's/^[[:space:]]*//')"
+if [ -z "$if_expr" ]; then
+  echo "FAIL: could not extract the job if: expression from $workflow" >&2
+  exit 1
+fi
+# The $conclusion and $attempt tokens below are jq program text, not shell
+# expansions.
+# shellcheck disable=SC2016
+jq_if_expr="$(printf '%s' "$if_expr" \
+  | sed -e 's/github\.event\.workflow_run\.conclusion/$conclusion/g' \
+         -e 's/github\.event\.workflow_run\.run_attempt/($attempt|tonumber)/g' \
+         -e 's/&&/ and /g' \
+         -e 's/||/ or /g' \
+         -e "s/'/\"/g")"
 
 gh() {
   case "$*" in
@@ -161,7 +226,7 @@ check_step "current completed attempt is re-run" 5 \
   '{"run_attempt":5,"status":"completed","conclusion":"failure"}' $'jobs\nrun\npost'
 check_step "superseded attempt cannot re-run a later failure" 5 \
   '{"run_attempt":6,"status":"completed","conclusion":"failure"}' $'jobs\nrun'
-check_step "stale attempt cannot bypass cap" 11 \
+check_step "stale event attempt cannot re-run the superseded attempt" 11 \
   '{"run_attempt":12,"status":"completed","conclusion":"failure"}' $'jobs\nrun'
 check_step "superseded attempt cannot re-run an active run" 5 \
   '{"run_attempt":6,"status":"in_progress","conclusion":null}' $'jobs\nrun'
@@ -178,6 +243,27 @@ check_step "policy: mixed macOS and Linux cancellations prevent POST" 5 \
   '{"run_attempt":5,"status":"completed","conclusion":"failure"}' jobs 0 "$step_temp/mixed.json"
 check_step "policy: timeout prevents POST" 5 \
   '{"run_attempt":5,"status":"completed","conclusion":"failure"}' jobs 0 "$step_temp/timeout.json"
+
+check_if() {
+  local label="$1" attempt="$2" conclusion="$3" expected="$4" got
+  if jq -n --arg conclusion "$conclusion" --arg attempt "$attempt" \
+       "$jq_if_expr" > "$step_temp/if.out" 2>&1; then
+    got="$(cat "$step_temp/if.out")"
+  else
+    got="error: $(cat "$step_temp/if.out")"
+  fi
+  if [ "$got" = "$expected" ]; then
+    pass=$((pass + 1))
+    echo "ok   $label"
+  else
+    fail=$((fail + 1))
+    echo "FAIL $label -> $got, want $expected" >&2
+  fi
+}
+
+check_if "if cap boundary: attempt 11 is eligible" 11 failure true
+check_if "if cap boundary: attempt 12 is never re-run" 12 failure false
+check_if "if cap boundary: non-failure conclusion is never eligible" 11 success false
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
