@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Tests the capacity-cancellation predicate embedded in
+# .github/workflows/rerun-capacity-cancellations.yml.
+#
+# That workflow checks out nothing by design, so the predicate cannot live
+# in a repository script the workflow would read at run time. Instead the
+# predicate is embedded in the workflow YAML between the JQ_CAPACITY_PREDICATE
+# heredoc markers. This test extracts those exact lines and evaluates them
+# against recorded Actions API responses
+# (GET /repos/{owner}/{repo}/actions/runs/<id>/attempts/<n>/jobs) from
+# andrewesweet/spnego-proxy, plus two composites assembled from the same
+# recorded responses.
+#
+# Usage: .github/scripts/test-rerun-capacity-cancellations.sh
+# Requires: jq, sed, grep
+set -euo pipefail
+
+script_dir="$(dirname "$0")"
+workflow="$script_dir/../workflows/rerun-capacity-cancellations.yml"
+testdata="$script_dir/testdata/rerun-capacity-cancellations"
+
+predicate_file="$(mktemp)"
+composite_a="$(mktemp)"
+composite_b="$(mktemp)"
+trap 'rm -f "$predicate_file" "$composite_a" "$composite_b"' EXIT
+
+# Extract the predicate verbatim from the workflow's run block (the block
+# scalar indents every line uniformly, so stripping leading whitespace on
+# each line reproduces the executed script).
+sed -n "/<<'JQ_CAPACITY_PREDICATE'/,/^[[:space:]]*JQ_CAPACITY_PREDICATE[[:space:]]*\$/p" \
+  "$workflow" | sed '1d;$d; s/^[[:space:]]*//' > "$predicate_file"
+
+if [ ! -s "$predicate_file" ] || ! grep -q 'capacity_conclusion' "$predicate_file"; then
+  echo "FAIL: predicate not extracted from $workflow" >&2
+  exit 1
+fi
+
+# Composite 1: a capacity-cancelled job alongside a genuinely failed job.
+# Re-run-failed-jobs would repeat the real failure, so this must be false.
+jq --slurpfile gf "$testdata/genuine-failure.json" \
+  '.jobs += [($gf[0].jobs[] | select(.conclusion == "failure"))]' \
+  "$testdata/cap-bt-attempt5.json" > "$composite_a"
+
+# Composite 2: the cancelled job acquired a runner and ran a step (a
+# mid-run cancellation or a timeout), so the shape is not capacity.
+jq '.jobs[0].runner_name = "GitHub Actions 1000000000"
+    | .jobs[0].steps = [{"name": "Set up job", "conclusion": "success", "number": 1, "started_at": "2026-11-05T16:20:00Z", "completed_at": "2026-11-05T16:20:10Z"}]' \
+  "$testdata/cap-bt-attempt5.json" > "$composite_b"
+
+# Evaluate the predicate exactly as production does. The workflow reads it
+# with "gh api --paginate --slurp", which wraps the response pages in a JSON
+# array; "jq '[.]'" wraps a recorded single-page fixture the same way.
+evaluate() {
+  jq '[.]' "$1" | jq -e --arg capacity_conclusion "$2" -f "$predicate_file" > /dev/null
+}
+
+pass=0
+fail=0
+
+check() {
+  local label="$1" file="$2" conclusion="$3" expected="$4" got
+  if evaluate "$file" "$conclusion"; then
+    got=true
+  else
+    got=false
+  fi
+  if [ "$got" = "$expected" ]; then
+    pass=$((pass + 1))
+    echo "ok   $label -> $got"
+  else
+    fail=$((fail + 1))
+    echo "FAIL $label -> $got, want $expected" >&2
+  fi
+}
+
+check "capacity: golangci-lint attempt 8 (recorded)" \
+  "$testdata/cap-lint-attempt8.json" failure true
+check "capacity: build-and-test attempt 5 (recorded)" \
+  "$testdata/cap-bt-attempt5.json" failure true
+check "capacity: both macOS legs cancelled (recorded)" \
+  "$testdata/cap-bt-both-macos.json" failure true
+check "capacity: codeql with skipped jobs (recorded)" \
+  "$testdata/cap-codeql-skipped.json" failure true
+check "genuine failure: lint jobs failed (recorded)" \
+  "$testdata/genuine-failure.json" failure false
+check "manual cancel: run-level cancel with queued job (recorded)" \
+  "$testdata/manual-cancel-queued.json" cancelled false
+check "release cancel: run-level cancel (recorded)" \
+  "$testdata/release-run-cancelled.json" cancelled false
+check "composite: capacity cancel plus genuine failure" \
+  "$composite_a" failure false
+check "composite: cancelled job that acquired a runner and ran" \
+  "$composite_b" failure false
+
+echo "$pass passed, $fail failed"
+[ "$fail" -eq 0 ]

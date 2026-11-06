@@ -1,0 +1,96 @@
+name: Re-run Capacity Cancellations
+
+# Re-runs CI attempts whose jobs were cancelled only because no hosted
+# runner could be acquired (the 2026-11-05 macOS runner drought cancelled
+# 36 attempts across these four workflows).
+#
+# The attempt conclusion is checked against "failure", not "cancelled":
+# when a job cannot acquire a runner, GitHub cancels the JOB and the
+# attempt concludes "failure". An attempt that concludes "cancelled" was
+# cancelled at the run level by a person (or a concurrency group), and is
+# never re-run here. Genuine failures are never re-run either: the capacity
+# test below re-runs only when every job of the attempt is success,
+# skipped, or a cancelled job that never acquired a runner and ran no
+# steps, so re-run-failed-jobs never repeats a real result.
+#
+# This workflow never checks out or executes repository or pull request
+# code: it reads run and job metadata through the API and calls the
+# re-run-failed-jobs endpoint, nothing else.
+on:
+  # zizmor: ignore[dangerous-triggers] workflow_run is the only event that
+  # can observe completed runs of other workflows. This workflow does not
+  # check out or execute any repository or pull request code, passes event
+  # fields to the run block only via env:, and holds nothing but
+  # actions: write for the re-run call, so fork-supplied input cannot
+  # reach it.
+  workflow_run:
+    workflows:
+      # Every workflow that runs macOS jobs except "Build Release Binaries":
+      # it is reusable-workflow-only (workflow_call), so it never produces
+      # runs of its own for workflow_run to observe. Its macOS jobs execute
+      # inside the Release workflow, which holds privileged permissions and
+      # secrets, and is re-run by a person, never by this automation.
+      - "Build and Test"
+      - "C Static Analysis"
+      - "CodeQL"
+      - "golangci-lint"
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  rerun:
+    # Cap above the worst observed chain (9 attempts on 2026-11-05); bounds
+    # the retry loop if capacity never recovers (attempt 12 is never re-run).
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.run_attempt < 12
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Re-run capacity-cancelled jobs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          # The predicate decides whether the completed attempt is a capacity
+          # cancellation. It is extracted verbatim by
+          # .github/scripts/test-rerun-capacity-cancellations.sh, so keep the
+          # heredoc markers intact.
+          cat > "$RUNNER_TEMP/capacity-cancellation.jq" <<'JQ_CAPACITY_PREDICATE'
+          # True when the completed attempt failed only because of hosted
+          # runner capacity cancellations and may be re-run. Input is the
+          # array of job-list pages produced by
+          # "gh api --paginate --slurp .../attempts/<n>/jobs":
+          # - the attempt concluded "failure" (a run-level cancellation
+          #   concludes "cancelled" and is excluded here), and
+          # - at least one job was cancelled, and
+          # - every job is success, skipped, or a cancelled job that never
+          #   acquired a runner (empty runner_name) and ran no steps.
+          $capacity_conclusion == "failure"
+          and ([.[].jobs[] | select(.conclusion == "cancelled")] | length > 0)
+          and all(
+            .[].jobs[];
+            if .conclusion == "cancelled" then
+              (.runner_name // "") == "" and ((.steps // []) | length == 0)
+            else
+              .conclusion == "success" or .conclusion == "skipped"
+            end
+          )
+          JQ_CAPACITY_PREDICATE
+
+          pages="$(gh api --paginate --slurp \
+            "/repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs?per_page=100")"
+
+          if jq -e --arg capacity_conclusion "$RUN_CONCLUSION" \
+            -f "$RUNNER_TEMP/capacity-cancellation.jq" > /dev/null <<<"$pages"; then
+            echo "Attempt $RUN_ATTEMPT of run $RUN_ID is a capacity cancellation; requesting re-run of its cancelled jobs."
+            gh api --method POST \
+              "/repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/rerun-failed-jobs"
+          else
+            echo "Attempt $RUN_ATTEMPT of run $RUN_ID is not a capacity cancellation; not re-running."
+          fi
