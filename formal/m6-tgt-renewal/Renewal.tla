@@ -7,8 +7,9 @@
 \*   internal/proxy/circuit_breaker.go  GetToken (83-103): p.mu held across
 \*       the whole cb.Execute around the inner GetToken.
 \*   internal/proxy/auth_gokrb5.go  GetToken (187-216): checkPasswordRejected
-\*       (348-370) refuses every login until the password file's content
-\*       changes, so a latched provider sends no KDC message at all; then
+\*       (348-370) refuses logins for the rejected fingerprint. Every rejection
+\*       re-baselines the latch to the file's current fingerprint; the next
+\*       admitted call after the file changes clears the latch. Then
 \*       ticketGrantingClient (218-245) reuses the cached TGT client while
 \*       ticketRefreshAt is ahead (tgtRefreshDeadline, 288-296: 5/6 through
 \*       the lifetime) and otherwise replaces it with acquireCredential
@@ -78,11 +79,11 @@ PasswordStopsWorking ==
   /\ UNCHANGED <<tgt, latched, pwChanged, cached, br, fails, made, failedAS,
                  counted, probes, tries>>
 
-\* The operator corrects the password file: the next check reads a new
-\* fingerprint and clears the latch (checkPasswordRejected), and the new
+\* The operator may correct the password file repeatedly. Every rejection
+\* re-baselines the latch to the file's current fingerprint; the next admitted
+\* call after the file changes clears it (checkPasswordRejected). The corrected
 \* password works.
 PasswordFileChanged ==
-  /\ ~pwChanged
   /\ pwChanged' = TRUE
   /\ stale' = FALSE
   /\ UNCHANGED <<tgt, latched, cached, br, fails, made, failedAS, counted,
