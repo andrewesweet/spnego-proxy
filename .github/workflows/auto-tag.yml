@@ -141,7 +141,10 @@ jobs:
           fi
 
           git tag -l 'v*'
-          raw=$(git cliff --bumped-version || true)
+          # No "|| true" here on purpose: if git-cliff fails, this step must
+          # fail visibly rather than fall through to the no-bump skip below.
+          # A genuine empty result (exit 0) still means no bump-worthy commits.
+          raw=$(git cliff --bumped-version)
           latest=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
 
           if [ -z "${raw}" ]; then
@@ -166,6 +169,7 @@ jobs:
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: Generate changelog, commit, tag, and push
+        id: release
         if: steps.version.outputs.skip != 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -184,6 +188,10 @@ jobs:
           # push, the push is rejected as non-fast-forward and the job fails
           # visibly with nothing pushed; the next green run on master retries.
           git push --atomic origin HEAD:master "refs/tags/${VERSION}"
+          # Only reached when both refs landed; the job summary gates its
+          # success text on this output so a rejected push is never reported
+          # as "Tagged and pushed".
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
 
       - name: Job summary
         if: always()
@@ -191,16 +199,22 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           SKIP: ${{ steps.version.outputs.skip }}
           SKIP_REASON: ${{ steps.version.outputs.skip_reason }}
+          PUSHED: ${{ steps.release.outputs.pushed }}
         run: |
           if [ "${SKIP}" = "true" ]; then
             {
               echo "### Auto Tag"
               echo "${SKIP_REASON}"
             } >> "$GITHUB_STEP_SUMMARY"
-          elif [ -n "${VERSION}" ]; then
+          elif [ "${PUSHED}" = "true" ]; then
             {
               echo "### Auto Tag"
               echo "Tagged and pushed **${VERSION}**."
               echo "The release pipeline will now build and publish the release."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### Auto Tag"
+              echo "Release **${VERSION}** was NOT pushed: the atomic push of the release commit and its tag was rejected (master moved or tag conflict). Nothing was published; the next green run on master retries."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
