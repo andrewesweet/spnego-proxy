@@ -120,8 +120,10 @@ is one blocking I/O call of the session goroutine, or one message from the
 client or the upstream; dialling, the SPNEGO token and header rewriting are
 folded into the forwarding step because they do not change which response is
 paired with which request. A request may receive up to two 1xx messages before
-its final response, and `readThroughInterim` relays each non-101 1xx and keeps
-reading until the final response.
+its final response, and `readThroughInterim` relays each non-101 1xx to an
+HTTP/1.1-or-later client and keeps reading until the final response; for an
+HTTP/1.0 client the interim is dropped instead of relayed (RFC 9110 §15.2,
+`clientCannotParseInterim`). The model covers the HTTP/1.1 path.
 
 Covers `internal/proxy/forward.go` (`run`, `readNextRequest`,
 `relayViaUpstream`, `writeResponse`), `internal/proxy/response.go`
@@ -232,10 +234,11 @@ connection after its response), and `main.go`'s signal handling.
   read deadline on a connection sitting idle between requests.
 
 Configs: `Serve.cfg` (the code; all rules hold), `ServeSabotageNoIdleClose.cfg`
-(deliberately broken: the idle-connection close removed, the ecd1990 shape,
-where `DrainSkipsIdle` must break), `ServeSabotageNoAcceptDone.cfg`
-(deliberately broken: the `<-acceptDone` wait removed, where `NoAddAfterWait`
-must break).
+(deliberately broken: only the idle-connection close removed; shutdown still
+stops admission and discards requests read after it began, which is the
+ecd1990 close behaviour in isolation — `DrainSkipsIdle` must break),
+`ServeSabotageNoAcceptDone.cfg` (deliberately broken: the `<-acceptDone` wait
+removed, where `NoAddAfterWait` must break).
 
 ### m5-direct-loop — `DirectLoop.tla`
 
@@ -271,9 +274,13 @@ stops working. Time is abstract: the TGT moves fresh → past its refresh point
 (5/6 of the lifetime) → expired, and every state past the refresh point makes
 the next `GetToken` replace the TGT with one password AS exchange. The only
 password login is that replacement, inside `GetToken`; `checkPasswordRejected`
-refuses every login without KDC contact until the password file's content
-changes. One caller makes its `GetToken` calls one at a time, so m2's burst
-plays no part here.
+refuses every login without KDC contact until the password value changes. The
+recovery path depends on the source: a `-password-file` is re-read on every
+check, so an edited file clears the latch on the next admitted call (the
+`PasswordFileChanged` step); a password typed at a terminal lives in the
+provider for the life of the process, so it cannot change and only a restart
+clears the latch — that path has no model step. One caller makes its
+`GetToken` calls one at a time, so m2's burst plays no part here.
 
 Covers `internal/proxy/circuit_breaker.go` (`GetToken`, the mutex held across
 `Execute`), `internal/proxy/auth_gokrb5.go` (`GetToken`,

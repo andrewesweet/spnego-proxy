@@ -27,11 +27,16 @@ EXTENDS Naturals
 CONSTANTS
   K,              \* client connections
   R,              \* requests each client sends at most
-  WaitAcceptDone, \* TRUE: the code (<-acceptDone before wg.Wait). FALSE: sabotage.
-  DrainCloses     \* TRUE: the code: at shutdown the proxy closes connections
-                  \* idle between requests, and ends each connection after the
-                  \* response it is sending. FALSE: sabotage, the ecd1990
-                  \* shape: idle connections wait out their read deadlines.
+  WaitAcceptDone,       \* TRUE: the code (<-acceptDone before wg.Wait). FALSE: sabotage.
+  DrainCloses,          \* TRUE: the code: at shutdown the proxy closes connections
+                        \* idle between requests, and ends each connection after the
+                        \* response it is sending. FALSE: sabotage, the ecd1990
+                        \* shape: idle connections wait out their read deadlines.
+  DiscardsAfterShutdown \* TRUE: the code: shutdown stops admitting new requests,
+                        \* and a request read after shutdown began is discarded
+                        \* (the context check in readRequest). FALSE: sabotage,
+                        \* the ecd1990 shape: a post-shutdown request is admitted
+                        \* and answered like any other.
 
 Conns == 1..K
 None == 0
@@ -145,10 +150,11 @@ StartDrain ==
   /\ waitStarted' = TRUE
   /\ UNCHANGED <<ctxDone, listener, loop, cur, conn, served, wg, addAfterWait, waitedOnIdle>>
 
-\* readRequest returns a request.
+\* readRequest returns a request. In the code shutdown stops admission; the
+\* ecd1990 shape admits a post-shutdown request like any other.
 ClientSendsRequest(i) ==
   /\ Running
-  /\ ~ctxDone
+  /\ IF DiscardsAfterShutdown THEN ~ctxDone ELSE TRUE
   /\ conn[i] = "waiting"
   /\ served[i] < R
   /\ conn' = [conn EXCEPT ![i] = "busy"]
@@ -157,9 +163,10 @@ ClientSendsRequest(i) ==
 
 \* readRequest read a request after shutdown began and discards it: the
 \* context check after http.ReadRequest ends the session without routing or
-\* answering it.
+\* answering it (DiscardsAfterShutdown = TRUE only).
 ShutdownDiscardsRequest(i) ==
   /\ Running
+  /\ DiscardsAfterShutdown
   /\ conn[i] = "waiting"
   /\ served[i] < R
   /\ ctxDone
