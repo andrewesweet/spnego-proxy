@@ -1329,7 +1329,22 @@ func TestForwardTunnelStalledReaderClosesBothDirections(t *testing.T) {
 			t.Run(transport+"/"+direction, func(t *testing.T) {
 				run := func(t *testing.T) {
 					const timeout = time.Second
+					// The budget absorbs the platform ramp before the stall
+					// solidifies (see floodLimit): darwin's receive autotuning
+					// delays the solid stall past Linux's millisecond-scale
+					// saturation. pipe has no kernel buffer, so the virtual-time
+					// budget stays tight.
+					closeBudget := 30 * timeout
+					if transport == "pipe" {
+						closeBudget = 2 * timeout
+					}
 					client, conn, peer, upstream := newTunnelTestConnections(t, transport)
+					fixtureDeadline := time.Now().Add(2 * closeBudget)
+					for _, c := range []net.Conn{client, conn, peer, upstream} {
+						if err := c.SetDeadline(fixtureDeadline); err != nil {
+							t.Fatal(err)
+						}
+					}
 					tunnelDone := make(chan struct{})
 					go func() {
 						defer close(tunnelDone)
@@ -1383,17 +1398,11 @@ func TestForwardTunnelStalledReaderClosesBothDirections(t *testing.T) {
 					if got := reverseBytes.Load(); got < 2 {
 						t.Fatalf("reverse traffic delivered %d bytes, want at least two", got)
 					}
-					// The budget absorbs the platform ramp before the stall
-					// solidifies (see floodLimit): darwin's receive autotuning
-					// delays the solid stall past Linux's millisecond-scale
-					// saturation. pipe has no kernel buffer, so the virtual-time
-					// budget stays tight.
-					closeBudget := 30 * timeout
-					if transport == "pipe" {
-						closeBudget = 2 * timeout
-					}
 					select {
 					case <-tunnelDone:
+						if !time.Now().Before(fixtureDeadline) {
+							t.Fatal("tunnel closed after test fixture deadline expired")
+						}
 					case <-time.After(closeBudget):
 						dump := make([]byte, 1<<20)
 						n := runtime.Stack(dump, true)
