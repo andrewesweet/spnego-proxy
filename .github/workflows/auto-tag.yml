@@ -136,6 +136,7 @@ jobs:
           if [ "${tip}" != "${SHA}" ]; then
             echo "::notice::Skipping auto-tag: triggering commit ${SHA} is no longer the tip of master (current tip ${tip})."
             echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "skip_reason=Superseded: triggering commit is no longer the tip of master." >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -146,6 +147,7 @@ jobs:
           if [ -z "${raw}" ]; then
             echo "No bump-worthy commits found. Skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "skip_reason=No version bump required. No bump-worthy commits since last tag." >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -155,6 +157,7 @@ jobs:
           if [ "${next}" = "${latest}" ]; then
             echo "Computed version ${next} matches latest tag. Skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "skip_reason=No version bump required. Computed version ${next} matches latest tag." >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -187,11 +190,12 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
           SKIP: ${{ steps.version.outputs.skip }}
+          SKIP_REASON: ${{ steps.version.outputs.skip_reason }}
         run: |
           if [ "${SKIP}" = "true" ]; then
             {
               echo "### Auto Tag"
-              echo "No version bump required. No bump-worthy commits since last tag."
+              echo "${SKIP_REASON}"
             } >> "$GITHUB_STEP_SUMMARY"
           elif [ -n "${VERSION}" ]; then
             {
