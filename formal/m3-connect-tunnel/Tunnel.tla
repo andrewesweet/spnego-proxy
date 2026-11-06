@@ -126,7 +126,7 @@ HalfWrites(d) ==
   /\ half[d] = "writing"
   /\ sinkOK[d]
   /\ half' = [half EXCEPT ![d] = "reading"]
-  /\ otherActive' = [otherActive EXCEPT ![d] = FALSE]
+  /\ otherActive' = [otherActive EXCEPT ![d] = FALSE, ![Other(d)] = TRUE]
   /\ UNCHANGED <<phase, ended, avail, sentN, srcFin, sinkOK, cutWhileFlowing,
                 timeoutReArms, abandoned, dropped>>
 
