@@ -47,7 +47,7 @@ VARIABLES
   failedAS,  \* AS exchanges the KDC rejected
   counted,   \* rejected AS exchanges the breaker saw as a failed GetToken
   probes,    \* calls admitted while half-open
-  tries      \* failed logins the sabotage goroutine made
+  tries      \* total failed logins the sabotage goroutine made
 
 vars == <<tgt, stale, latched, pwChanged, cached, br, fails, made, failedAS,
           counted, probes, tries>>
@@ -108,7 +108,7 @@ TicketExpires ==
 
 \* Sabotage only: the ecd1990 renewal goroutine refreshes outside GetToken
 \* and the breaker. With a stale password its login is a rejected AS exchange
-\* the breaker never sees.
+\* the breaker never sees. Successful refreshes do not replenish the R budget.
 GoroutineRefreshes ==
   /\ ~ProviderOwnsRefresh
   /\ tgt = "last_sixth"
@@ -118,8 +118,7 @@ GoroutineRefreshes ==
             /\ tries' = tries + 1
             /\ UNCHANGED tgt
        ELSE /\ tgt' = "fresh"
-            /\ tries' = 0
-            /\ UNCHANGED failedAS
+            /\ UNCHANGED <<failedAS, tries>>
   /\ UNCHANGED <<stale, latched, pwChanged, cached, br, fails, made, counted,
                  probes>>
 
