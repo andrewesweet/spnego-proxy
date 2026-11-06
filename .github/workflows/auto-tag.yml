@@ -13,8 +13,7 @@ on:
     # once ALL of them have succeeded for it. The release therefore waits
     # for the last required workflow to finish instead of failing when the
     # first-completed trigger still finds the rest running. Keep this list
-    # in sync with required_workflows in the Verify step (the gate test
-    # enforces the match).
+    # in sync with required_workflows in the Verify step.
     workflows:
       - "Build and Test"
       - "golangci-lint"
@@ -57,8 +56,7 @@ jobs:
 
           # Workflows that run on every push to master. Auto Tag is
           # triggered by each one's completion (see workflow_run above);
-          # keep this list in sync with that trigger (the gate test
-          # enforces the match).
+          # keep this list in sync with that trigger.
           required_workflows=(
             "Build and Test"
             "golangci-lint"
