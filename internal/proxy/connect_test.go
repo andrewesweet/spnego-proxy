@@ -1345,9 +1345,16 @@ func TestForwardTunnelStalledReaderClosesBothDirections(t *testing.T) {
 						_ = upstream.Close()
 						workers.Wait()
 					}()
+					// Cap the flood so this goroutine always terminates: the
+					// stall arises once the destination's kernel buffers
+					// saturate, and every platform's ceiling sits well below
+					// the cap. darwin's TCP receive autotuning keeps accepting
+					// bytes beyond the configured buffer while it ramps, so
+					// saturation there lands later than on Linux.
+					const floodLimit = 256 << 20
 					workers.Go(func() {
 						payload := strings.Repeat("blocked", 16*1024)
-						for {
+						for sent := 0; sent < floodLimit; sent += len(payload) {
 							if _, err := io.WriteString(src, payload); err != nil {
 								return
 							}
@@ -1376,13 +1383,22 @@ func TestForwardTunnelStalledReaderClosesBothDirections(t *testing.T) {
 					if got := reverseBytes.Load(); got < 2 {
 						t.Fatalf("reverse traffic delivered %d bytes, want at least two", got)
 					}
+					// The budget absorbs the platform ramp before the stall
+					// solidifies (see floodLimit): darwin's receive autotuning
+					// delays the solid stall past Linux's millisecond-scale
+					// saturation. pipe has no kernel buffer, so the virtual-time
+					// budget stays tight.
+					closeBudget := 30 * timeout
+					if transport == "pipe" {
+						closeBudget = 2 * timeout
+					}
 					select {
 					case <-tunnelDone:
-					case <-time.After(2 * timeout):
+					case <-time.After(closeBudget):
 						dump := make([]byte, 1<<20)
 						n := runtime.Stack(dump, true)
 						t.Logf("goroutines at failure:\n%s", dump[:n])
-						t.Fatalf("stalled reader kept tunnel alive with reverse traffic (reverse=%d bytes, budget %v)", reverseBytes.Load(), 2*timeout)
+						t.Fatalf("stalled reader kept tunnel alive with reverse traffic (reverse=%d bytes, budget %v)", reverseBytes.Load(), closeBudget)
 					}
 				}
 				if transport == "pipe" {
