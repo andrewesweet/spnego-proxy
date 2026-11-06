@@ -45,6 +45,7 @@ jobs:
           TAG: ${{ inputs.tag_name || github.event.release.tag_name }}
           REPO: ${{ github.repository }}
         run: |
+          set -o pipefail
           url="https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz"
           sha256=$(curl -sfL "${url}" | sha256sum | cut -d ' ' -f 1)
           if [ -z "${sha256}" ] || [ "${sha256}" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]; then
@@ -72,6 +73,9 @@ jobs:
           # rather than trusting whatever the SSH path serves (ssh-keyscan is
           # trust-on-first-use). Auto-adapts to GitHub host-key rotation. See
           # issue #226.
+          # pipefail keeps a curl failure from publishing a truncated
+          # known_hosts file that still passes the size check below.
+          set -o pipefail
           curl -fsSL --retry 3 https://api.github.com/meta \
             | jq -r '.ssh_keys[] | "github.com " + .' > ~/.ssh/known_hosts
           if [ ! -s ~/.ssh/known_hosts ]; then
