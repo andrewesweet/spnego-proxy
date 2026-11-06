@@ -99,7 +99,7 @@ LoopAccepts(i) ==
   /\ conn' = [conn EXCEPT ![i] = "accepted"]
   /\ UNCHANGED <<ctxDone, listener, phase, served, wg, waitStarted, addAfterWait, waitedOnIdle>>
 
-\* wg.Go(handleClient); run starts reading the first request.
+\* wg.Go(handleClientCtx); run starts reading the first request.
 LoopSpawns ==
   /\ Running
   /\ loop = "spawning"
@@ -169,7 +169,8 @@ ShutdownDiscardsRequest(i) ==
   /\ UNCHANGED <<ctxDone, listener, loop, cur, phase, waitStarted, addAfterWait, waitedOnIdle>>
 
 \* The response is relayed. run loops for the next request when both sides keep
-\* the connection alive; otherwise handleClient returns.
+\* the connection alive and shutdown has not begun; otherwise handleClientCtx
+\* returns. Both the code and the sabotage configurations keep this check.
 RequestDone(i) ==
   /\ Running
   /\ conn[i] = "busy"
@@ -199,8 +200,8 @@ ReadTimeoutPasses(i) ==
   /\ Timed
   /\ UNCHANGED <<ctxDone, listener, loop, cur, phase, served, waitStarted, addAfterWait>>
 
-\* Fix direction only: shutdown interrupts the read of a connection idle
-\* between requests.
+\* Shutdown interrupts a pending request read, including the wait for the
+\* first request. The idle-close sabotage omits this step.
 CloseIdle(i) ==
   /\ Running
   /\ DrainCloses
@@ -240,7 +241,7 @@ Spec == Init /\ [][Next]_vars
 
 \* ---- Promises.
 
-\* No wg.Go runs after wg.Wait has started (server.go 41-43).
+\* No wg.Go runs after wg.Wait has started (server.go 80-86).
 NoAddAfterWait == ~addAfterWait
 
 \* Shutdown waits only for requests in flight: it never waits for a read

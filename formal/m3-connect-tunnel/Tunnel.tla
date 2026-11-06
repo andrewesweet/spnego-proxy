@@ -188,7 +188,7 @@ WriteTimesOut(d) ==
   /\ UNCHANGED <<half, avail, sentN, srcFin, sinkOK, otherActive,
                 cutWhileFlowing, timeoutReArms, dropped>>
 
-\* wg.Wait returns in forwardTunnel; handleClient closes both connections.
+\* wg.Wait returns in forwardTunnel; handleClientCtx closes both connections.
 TunnelCloses ==
   /\ phase = "open"
   /\ \A d \in Dirs : half[d] = "done"

@@ -127,7 +127,7 @@ ProxyReadsRequest ==
   /\ UNCHANGED <<resp, sent, answered, toClient, upReqs, upstream, interims, closedOnBody>>
 
 \* readNextRequest fails on a later iteration: the ReadTimeout deadline passes,
-\* or the client hangs up. run returns and handleClient closes the connection.
+\* or the client hangs up. run returns and handleClientCtx closes the connection.
 ProxyStopsWaiting ==
   /\ pc = "read_request"
   /\ toProxy = <<>>
@@ -141,8 +141,9 @@ ProxyForwardsRequest ==
   /\ pc' = "read_response"
   /\ UNCHANGED <<cur, resp, toProxy, sent, answered, toClient, upstream, interims, closedOnBody>>
 
-\* readUpstreamResponse: one http.ReadResponse call. It returns whatever message
-\* is next in upstreamReader, 1xx included.
+\* One readThroughInterim iteration calls readUpstreamResponse to read the next
+\* message, relaying a 1xx and continuing in the code config. The single-read
+\* sabotage instead treats that 1xx as the answer.
 ProxyReadsResponse ==
   /\ pc = "read_response"
   /\ upstream # <<>>
@@ -156,7 +157,7 @@ ProxyReadsResponse ==
   /\ UNCHANGED <<cur, toProxy, sent, answered, upReqs, interims, closedOnBody>>
 
 \* writeResponse, then return !connectionWillClose(req, resp), which is true
-\* here unless the body drain failed.
+\* here unless the sabotage's body drain failed.
 ProxyRelaysResponse ==
   /\ pc = "write_response"
   /\ toClient' = Append(toClient, resp)
@@ -208,7 +209,7 @@ Spec == Init /\ [][Next]_vars
 \* the ReadTimeout wait.
 EveryRequestAnswered == pc = "closed" => Owed = 0
 
-\* readUpstreamResponse(reader, req) returns req's own final response. Breaking
+\* readThroughInterim returns req's own final response. Breaking
 \* it: the proxy relays a 1xx as req's answer, and frames a later message with
 \* the wrong request.
 ProxyReadsOwnResponse == pc = "write_response" => resp.kind = "final" /\ resp.for = cur

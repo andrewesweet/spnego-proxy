@@ -54,7 +54,7 @@ Init ==
   /\ wire = <<>>
   /\ refused = 0
 
-\* routeNoProxy, then either relayViaUpstream or a new forwardDirect loop.
+\* routeRequest chooses relayViaUpstream or a new forwardDirect loop.
 Route(h) ==
   IF h \in Bypass
     THEN /\ route' = "direct"
