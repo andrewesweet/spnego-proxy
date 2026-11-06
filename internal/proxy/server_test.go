@@ -547,7 +547,9 @@ func TestWriteResponseObservesCancellation(t *testing.T) {
 		case <-shutdownDone:
 		case <-time.After(5 * time.Second):
 			close(conn.release)
-			<-writeDone
+			if err := <-writeDone; err != nil {
+				t.Errorf("writeResponse: %v", err)
+			}
 			t.Fatal("shutdown blocked on response serialization")
 		}
 
