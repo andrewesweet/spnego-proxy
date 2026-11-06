@@ -7,10 +7,14 @@ def check(condition, message)
   abort "FAIL #{message}" unless condition
 end
 
-steps = YAML.load_file(ARGV.fetch(0)).fetch('jobs').fetch('auto-tag').fetch('steps')
+doc = YAML.load_file(ARGV.fetch(0))
+job = doc.fetch('jobs').fetch('auto-tag')
+steps = job.fetch('steps')
 gate = steps.first
 check(gate.fetch('name') == 'Verify all CI checks passed', 'verification must run first')
 gate_id = gate.fetch('id')
+check(job.fetch('if') == 'github.event.workflow_run.head_repository.full_name == github.repository',
+      'job must be guarded to same-repository workflow_run events')
 guard = "steps.#{gate_id}.outputs.decision == 'tag'"
 release_steps = steps[1...-1]
 check(release_steps.map { |step| step.fetch('name') } == [
@@ -32,8 +36,15 @@ check(summary.fetch('env').fetch('GATE_REASON') == "${{ steps.#{gate_id}.outputs
       'summary must consume the gate reason')
 puts 'ok   normalized workflow gates every release operation and propagates gate outputs'
 
+# The required list must exist exactly twice in the workflow: the workflow_run
+# trigger and the gate's required_workflows array. Derive one from the other
+# and assert they match, so drift cannot leave a required workflow unable to
+# trigger the release (its completion would never re-fire the gate).
+trigger = (doc['on'] || doc[true]).fetch('workflow_run').fetch('workflows')
+required = gate.fetch('run')[/required_workflows=\(\n(.*?)\n\s*\)/m, 1].scan(/"([^"]+)"/).flatten
+check(trigger == required, 'workflow_run trigger list must match required_workflows')
+
 runs = JSON.parse(STDIN.read)
-required = ['Build and Test', 'golangci-lint', 'govulncheck', 'Lint Workflows', 'Lint Markdown']
 scenarios = required.map { |name| [name, 'in_progress', nil, 'skip', 0] }
 scenarios += [
   ['govulncheck', 'completed', 'failure', 'no-tag', 1],
@@ -54,7 +65,7 @@ Dir.mktmpdir('auto-tag-test-', __dir__) do |directory|
       'TEST_API_RESPONSE' => JSON.generate([{ 'workflow_runs' => input }])
     }
     stdout, stderr, result = Open3.capture3(env, 'bash', '-euo', 'pipefail', '-c',
-      "gh() { printf '%s\\n' \"$TEST_API_RESPONSE\"; }\n" + gate.fetch('run'))
+      "sleep() { :; }\ngh() { printf '%s\\n' \"$TEST_API_RESPONSE\"; }\n" + gate.fetch('run'))
     check(result.exitstatus == exit_code, "#{expected} exit status: #{stdout}#{stderr}")
     outputs = File.readlines(output, chomp: true).map { |line| line.split('=', 2) }.to_h
     check(outputs['decision'] == expected, "#{expected} decision output")

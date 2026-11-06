@@ -3,10 +3,13 @@ name: Auto Tag
 on:
   # zizmor: ignore[dangerous-triggers] workflow_run grants an elevated
   # github.token, but this workflow only reacts to runs of this repository's
-  # own required CI workflows on the master branch (branches: [master]
-  # excludes fork and PR branches). It never checks out or executes code from
-  # a pull request: the checkout below is pinned to the verified head SHA of
-  # a master push, and pushes authenticate with a dedicated GitHub App token.
+  # own required CI workflows on the master branch. The `branches: [master]`
+  # filter matches the triggering run's head_branch, so a fork branch named
+  # "master" would still pass it; the job-level repository-origin guard
+  # below stops such runs before any privileged step. This workflow never
+  # checks out or executes code from a pull request: the checkout below is
+  # pinned to the verified head SHA of a master push, and pushes
+  # authenticate with a dedicated GitHub App token.
   workflow_run:
     # One completion event per required workflow: Auto Tag fires each time
     # any of these finishes, and the Verify step below tags a commit only
@@ -36,6 +39,11 @@ concurrency:
 
 jobs:
   auto-tag:
+    # workflow_run's branch filter matches the triggering run's head_branch
+    # only, so a fork branch named "master" would pass it. Require the
+    # triggering run to originate from this repository before anything
+    # privileged happens.
+    if: github.event.workflow_run.head_repository.full_name == github.repository
     # No conclusion filter here: the Verify step decides per completion
     # whether to skip cleanly (a required workflow has not completed yet),
     # fail (every required workflow completed and one did not succeed), or
@@ -53,6 +61,7 @@ jobs:
           SHA: ${{ github.event.workflow_run.head_sha }}
           REPOSITORY: ${{ github.repository }}
         run: |
+          set -o pipefail
           # --- gating decision (inputs and pure function; exercised by .github/scripts/test-auto-tag-gate.sh against recorded API JSON) ---
 
           # Workflows that run on every push to master. Auto Tag is
@@ -122,19 +131,50 @@ jobs:
           }
           # --- end gating decision ---
 
-          # Every workflow run whose head SHA is the triggering commit,
-          # across all pages. This includes Auto Tag's own runs and any
-          # unrelated workflows for the same SHA; decide() looks only at
-          # the required and optional names above. A required workflow
-          # with no run listed yet counts as not completed, so the run
-          # ends as a clean skip and a later completion re-runs the gate.
-          # gh --slurp cannot be combined with gh --jq, so the page array
-          # is flattened by jq instead.
-          runs_json=$(gh api --paginate --slurp \
-            "repos/${REPOSITORY}/actions/runs?head_sha=${SHA}&per_page=100" \
-            | jq -c '[.[].workflow_runs[]]')
+          # --- gating loop (fetch runs, decide, and re-query on API lag; exercised by .github/scripts/test-auto-tag-gate.sh) ---
 
-          decision=$(decide <<<"${runs_json}")
+          # Every push run for this commit on master, across all pages,
+          # restricted to event=push and branch=master so a pull-request
+          # run for the same SHA cannot shadow a push run. This includes
+          # unrelated workflows for the same SHA; decide() looks only at
+          # the required and optional names above. gh --slurp cannot be
+          # combined with gh --jq, so the page array is flattened by jq
+          # instead.
+          fetch_runs() {
+            gh api --paginate --slurp \
+              "repos/${REPOSITORY}/actions/runs?head_sha=${SHA}&event=push&branch=master&per_page=100" \
+              | jq -c '[.[].workflow_runs[]]'
+          }
+
+          # API indexing can lag the completion event that started this
+          # run: the run that just finished may not be listed yet, and if
+          # that was the LAST required completion, a premature skip would
+          # strand the release with nothing left to re-trigger it. Before
+          # accepting a required workflow as pending or absent, re-query a
+          # bounded number of times over about a minute; a genuinely
+          # running workflow only delays its clean skip, and a later
+          # completion re-runs the gate anyway.
+          decision=""
+          attempt=0
+          max_attempts=3        # one initial fetch plus two re-queries
+          requery_delay_secs=30 # re-queries span about 60s worst case
+          while :; do
+            runs_json=$(fetch_runs)
+            decision=$(decide <<<"${runs_json}")
+            case "${decision}" in
+              "skip|"*)
+                if [ $((attempt += 1)) -ge "${max_attempts}" ]; then
+                  break
+                fi
+                sleep "${requery_delay_secs}"
+                ;;
+              *)
+                break
+                ;;
+            esac
+          done
+          # --- end gating loop ---
+
           {
             echo "decision=${decision%%|*}"
             echo "reason=${decision#*|}"

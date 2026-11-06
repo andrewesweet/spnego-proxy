@@ -12,8 +12,8 @@
 #
 #   .github/scripts/test-auto-tag-gate.sh
 #
-# Dependencies: bash, jq, ruby (with YAML). Not yet wired into CI; run it locally when
-# touching the Auto Tag workflow.
+# Dependencies: bash, jq, ruby (with YAML). Run in CI by the gate tests job
+# in lint-workflows.yml; run it locally when touching the Auto Tag workflow.
 
 set -euo pipefail
 
@@ -29,7 +29,10 @@ if [ "$(grep -c -- '# --- gating decision' "${workflow}")" -ne 1 ] ||
 fi
 
 # Leading YAML indentation is irrelevant to bash, so the extracted block is
-# sourced as-is.
+# sourced as-is. decide() and the loop assign decision at eval time, which
+# the linter cannot see; the inputs below are read by the extracted blocks.
+# shellcheck disable=SC2154
+# shellcheck disable=SC2034
 eval "$(awk '
   /^ *# --- gating decision/ {on = 1; next}
   /^ *# --- end gating decision/ {on = 0}
@@ -144,5 +147,92 @@ expect "an older failure after a newer success does not regress the state -> tag
   "tag|all required workflows succeeded"
 
 recorded_all_success | ruby "${script_dir}/test-auto-tag-workflow.rb" "${workflow}"
+
+# --- retry behaviour (the shipped gating loop) ------------------------------
+
+# The gating-loop block executes when evaluated, so its gh and sleep calls
+# are stubbed first: API responses are served from a queue (the last one
+# repeats), and re-query delays are counted instead of waited.
+loop_block="$(awk '
+  /^ *# --- gating loop/ {on = 1; next}
+  /^ *# --- end gating loop/ {on = 0}
+  on {print}
+' "${workflow}")"
+[ -n "${loop_block}" ] || { echo "FAIL: gating loop block did not extract"; exit 1; }
+
+gh_log="$(mktemp)"
+trap 'rm -f "${gh_log}"' EXIT
+gh_responses=()
+gh() { # serve queued API responses; the last one repeats. Call counts land
+       # in a file because fetch_runs runs inside a command substitution.
+  local idx
+  idx=$(wc -l < "${gh_log}")
+  if [ "${idx}" -ge "${#gh_responses[@]}" ]; then
+    idx=$((${#gh_responses[@]} - 1))
+  fi
+  printf '%s\n' "${gh_responses[${idx}]}"
+  echo served >> "${gh_log}"
+}
+sleep() { # record the re-query delay instead of waiting
+  sleep_calls=$((sleep_calls + 1))
+  if [ "${1}" != "30" ]; then
+    echo "FAIL: re-query delay is ${1}s, want 30s"
+    exit 1
+  fi
+}
+# shellcheck disable=SC2034  # consumed by the extracted gating-loop block
+REPOSITORY=andrewesweet/spnego-proxy
+# shellcheck disable=SC2034  # consumed by the extracted gating-loop block
+SHA=52034ab2f35bd04a7b91f1a044284a234399c688
+pending_runs="$(derive 'map(if .name == "golangci-lint" then .status = "in_progress" | .conclusion = null else . end)')"
+
+# fetch_runs consumes the array of page documents that gh api --slurp
+# emits ([{"workflow_runs": [...]}, ...], the shape the .rb harness stubs
+# too), not the flat run arrays decide() reads.
+page() {
+  jq -cn --argjson runs "$1" '[{workflow_runs: $runs}]'
+}
+
+expect_loop() { # expect_loop <scenario> <want-decision> <want-gh-calls> <want-sleep-calls>
+  # gh_responses is queued by the caller; only the counters reset here.
+  local scenario="$1" want_decision="$2" want_gh="$3" want_sleep="$4" gh_served
+  : > "${gh_log}"
+  sleep_calls=0
+  eval "${loop_block}"
+  gh_served=$(wc -l < "${gh_log}")
+  # decision is assigned by the eval'd gating-loop block
+  # shellcheck disable=SC2154
+  if [ "${decision}" = "${want_decision}" ] && [ "${gh_served}" = "${want_gh}" ] &&
+    [ "${sleep_calls}" = "${want_sleep}" ]; then
+    echo "ok   ${scenario}"
+  else
+    echo "FAIL ${scenario}"
+    echo "  decision:    want ${want_decision}, got ${decision}"
+    echo "  gh calls:    want ${want_gh}, got ${gh_served}"
+    echo "  sleep calls: want ${want_sleep}, got ${sleep_calls}"
+    exit 1
+  fi
+}
+
+# Completion-event lag: the run that just finished is missing from the first
+# response and appears on re-query, so the final completion releases.
+gh_responses=()
+gh_responses+=("$(page "${pending_runs}")")
+gh_responses+=("$(page "$(recorded_all_success)")")
+expect_loop "API lag on final completion -> re-query then tag" \
+  "tag|all required workflows succeeded" 2 1
+
+# A genuinely running workflow still skips cleanly after the bounded wait;
+# its completion re-fires the gate later.
+gh_responses=()
+gh_responses+=("$(page "${pending_runs}")")
+expect_loop "persistent pending -> clean skip after bounded re-queries" \
+  "skip|golangci-lint" 3 2
+
+# No lag: a single fetch decides without any re-query.
+gh_responses=()
+gh_responses+=("$(page "$(recorded_all_success)")")
+expect_loop "no lag -> single fetch, no re-query" \
+  "tag|all required workflows succeeded" 1 0
 
 echo "all gate tests passed"
