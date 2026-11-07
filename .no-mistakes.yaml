@@ -1,0 +1,4 @@
+ci:
+  required_reviews:
+    - coderabbit
+  review_bot_comments: always
