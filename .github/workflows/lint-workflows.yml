@@ -59,3 +59,20 @@ jobs:
         uses: suzuki-shunsuke/pinact-action@896d595f299e71d65b9d28349d6956abe144390a # v3.0.0
         with:
           skip_push: "true"
+
+  gate-tests:
+    name: gate tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Runs both Auto Tag test scripts: test-auto-tag-gate.sh extracts and
+      # drives the shipped gating blocks against recorded API JSON, and it
+      # chains test-auto-tag-workflow.rb, which normalizes the workflow and
+      # executes the shipped step script with a stubbed gh.
+      - name: Run the Auto Tag gate and workflow tests
+        run: bash .github/scripts/test-auto-tag-gate.sh

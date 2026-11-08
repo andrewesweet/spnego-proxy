@@ -262,6 +262,7 @@ Pull requests run the following checks automatically:
 | C static analysis | clang-tidy, cppcheck | `*.c` (macOS) |
 | Markdown linting | markdownlint-cli2 | `*.md` |
 | Workflow linting | actionlint | `.github/workflows/` |
+| Auto Tag regression tests | Bash, Ruby | [Auto Tag gate test scripts](.github/scripts/test-auto-tag-gate.sh) |
 | Security analysis | CodeQL | Go, C, Actions |
 | Build + unit tests | go build, go test | macOS (CGO) + Linux |
 | PR title format | action-semantic-pull-request | PR titles |
@@ -364,8 +365,23 @@ publishing automatically.
 The **Auto Tag** workflow (`auto-tag.yml`) automates the tag-and-release cycle.
 When a pull request is merged to `master`:
 
-1. The "Build and Test" workflow runs.
-2. On success, Auto Tag verifies all required CI checks passed for the commit.
+1. Every required workflow runs on the push: Build and Test, golangci-lint,
+   govulncheck, Lint Workflows, and Lint Markdown.
+2. Each time one of them completes, Auto Tag checks that commit. If any
+   required workflow has not completed yet, the run ends as a clean skip;
+   the completion of the missing workflow triggers Auto Tag again. Because
+   API indexing can briefly lag a completion event, Auto Tag compares the
+   triggering run's ID, attempt, status, and conclusion with the event.
+   If the API record is missing or stale, Auto Tag re-queries for about a
+   minute, then uses the event's conclusion if the record still lags.
+   Other pending workflows still cause a clean skip. Once all required
+   workflows have completed, Auto Tag continues only when all of them (and
+   any optional workflow that completed, such as CodeQL) succeeded. CodeQL
+   is advisory: only a CodeQL failure that is already completed when the
+   gate decides blocks the release. Auto Tag does not wait for CodeQL, and
+   a later CodeQL completion does not re-trigger it. Auto Tag runs for one
+   commit are serialised through a `concurrency` group, so
+   near-simultaneous completions cannot both tag.
 3. It checks out that verified commit and skips tagging if the commit is no
    longer the tip of `master`.
 4. It runs `git cliff --bumped-version` to compute the next SemVer version.
