@@ -8,11 +8,35 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+// runGSSIntegrationSubprocess runs each fixture in a fresh process. Apple's
+// Heimdal caches Kerberos contexts per OS thread, including configuration paths.
+// Changing KRB5_CONFIG between tests cannot update those cached paths, and Go
+// can reuse the same OS thread for different tests and proxy goroutines.
+// It returns true in the parent after the child has completed the test.
+func runGSSIntegrationSubprocess(t *testing.T) bool {
+	t.Helper()
+	const childEnv = "SPNEGO_GSS_TEST_CHILD"
+	if os.Getenv(childEnv) == t.Name() {
+		return false
+	}
+	args := append(append([]string{}, os.Args[1:]...),
+		"-test.run=^"+regexp.QuoteMeta(t.Name())+"$", "-test.count=1")
+	cmd := exec.Command(os.Args[0], args...) //nolint:gosec // G204: re-execute this test binary
+	cmd.Env = append(os.Environ(), childEnv+"="+t.Name())
+	out, err := cmd.CombinedOutput()
+	t.Logf("%s", out)
+	if err != nil {
+		t.Fatalf("GSS integration subprocess: %v", err)
+	}
+	return true
+}
 
 const (
 	ephemeralKDCRealm     = "TEST.SPNEGO"
@@ -71,6 +95,12 @@ func NewEphemeralKDC(t *testing.T) *EphemeralKDC {
 	}
 
 	// Write configuration files.
+	//
+	// The [realms] kdc entry must stay in bare host:port form: MIT krb5
+	// (Homebrew, and every CI Linux image) parses a `tcp/` transport
+	// prefix as part of the hostname and fails DNS resolution, making
+	// kinit report "Cannot contact any KDC". The udp_preference_limit of
+	// 1 already forces clients onto the KDC's TCP listener.
 	kdcConfPath := filepath.Join(tmpDir, "kdc.conf")
 	kdc.KRB5Conf = filepath.Join(tmpDir, "krb5.conf")
 	aclPath := filepath.Join(tmpDir, "kadm5.acl")
@@ -100,7 +130,7 @@ func NewEphemeralKDC(t *testing.T) *EphemeralKDC {
 
 [realms]
     %s = {
-        kdc = tcp/127.0.0.1:%d
+        kdc = 127.0.0.1:%d
         admin_server = 127.0.0.1:%d
     }
 
