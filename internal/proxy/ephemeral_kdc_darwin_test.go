@@ -71,6 +71,12 @@ func NewEphemeralKDC(t *testing.T) *EphemeralKDC {
 	}
 
 	// Write configuration files.
+	//
+	// The [realms] kdc entry must stay in bare host:port form: MIT krb5
+	// (Homebrew, and every CI Linux image) parses a `tcp/` transport
+	// prefix as part of the hostname and fails DNS resolution, making
+	// kinit report "Cannot contact any KDC". The udp_preference_limit of
+	// 1 already forces clients onto the KDC's TCP listener.
 	kdcConfPath := filepath.Join(tmpDir, "kdc.conf")
 	kdc.KRB5Conf = filepath.Join(tmpDir, "krb5.conf")
 	aclPath := filepath.Join(tmpDir, "kadm5.acl")
@@ -100,7 +106,7 @@ func NewEphemeralKDC(t *testing.T) *EphemeralKDC {
 
 [realms]
     %s = {
-        kdc = tcp/127.0.0.1:%d
+        kdc = 127.0.0.1:%d
         admin_server = 127.0.0.1:%d
     }
 
