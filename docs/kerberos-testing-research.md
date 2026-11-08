@@ -20,7 +20,7 @@ The existing test suite covers:
 | ------ | --------------- | ------------------- |
 | Proxy mechanics | Dial timeout, read timeout, token injection, bidirectional forwarding, half-close, keepalive, connection limiting, graceful shutdown; full proxy chain with mock-KDC tokens in [TestProxyChainWithRealToken](../internal/proxy/gokrb5_integration_test.go) | Corporate upstream-proxy interoperability |
 | gokrb5 path | Password file handling (perms, size, CRLF), provider construction, SPN inference/normalization, error handling; mock-KDC lockout regressions linked below | SPNEGO token acceptance by a corporate upstream proxy |
-| macOS GSS-API | SPN derivation, SPN normalization, graceful error without credentials | Actual token acquisition via Heimdal GSS-API |
+| macOS GSS-API | SPN derivation, SPN normalization, graceful error without credentials; [native GSS-API integration suite](../CONTRIBUTING.md#macos-gss-api-integration-tests) | Corporate upstream-proxy interoperability |
 | Circuit breaker | Open/closed/half-open state transitions, concurrent admission, real token provider with a mock KDC | Directory lockout policy interoperability |
 
 The [lockout regression tests](../internal/proxy/auth_gokrb5_lockout_test.go)
@@ -204,82 +204,40 @@ the Python [k5test](https://github.com/pythongssapi/k5test) library:
 ### What an ephemeral KDC enables
 
 - **Real KDC, no Docker**: Useful if Docker is unavailable or undesirable.
-- **macOS testing potential**: On macOS, if MIT krb5 is installed via Homebrew
-  (`brew install krb5`), this approach can test the gokrb5 path. More
-  importantly, by setting `KRB5_CONFIG` and `KRB5CCNAME=FILE:<tmpfile>`, it
-  may be possible to test the native Heimdal GSS-API path against this
-  ephemeral KDC — **if** macOS's Heimdal respects `KRB5_CONFIG` for the
-  realm configuration. (This needs verification.)
+- **Native macOS coverage**: See the implemented
+  [GSS-API integration suite](../CONTRIBUTING.md#macos-gss-api-integration-tests).
 - **Fast startup**: No container overhead.
 
 ### Ephemeral KDC limitations
 
 - **Requires MIT krb5 packages installed**: `krb5-kdc`, `krb5-admin-server`
   on Ubuntu, or `krb5` via Homebrew on macOS.
-- **More complex setup code**: Need to write Go test helpers that shell out to
-  `kdb5_util`, `kadmin.local`, and manage the `krb5kdc` subprocess lifecycle.
+- **More complex setup code**: Helpers must invoke `kdb5_util` and
+  `kadmin.local` and manage the `krb5kdc` subprocess lifecycle.
 - **Fragile across OS versions**: Different OSes ship different krb5 versions
   with slightly different behaviors.
-- **macOS Heimdal interop is uncertain**: macOS ships Heimdal, not MIT krb5.
-  Whether the system Heimdal GSS-API will correctly talk to a locally-running
-  MIT KDC via `KRB5_CONFIG` override is not guaranteed and needs testing.
 
 ### Effort: Medium-High
 
-Write Go test helpers to manage the KDC lifecycle. Handle platform differences.
-May require installing packages in CI.
+The implemented helper is
+[`NewEphemeralKDC`](../internal/proxy/ephemeral_kdc_darwin_test.go).
 
 ### Recommendation: **Consider as an alternative to Option 2 if Docker is problematic.**
 
-The main advantage over Docker is potential macOS GSS-API testing, but that
-benefit is uncertain. Docker is generally more reproducible.
+For the native macOS setup, see the
+[integration test guide](../CONTRIBUTING.md#macos-gss-api-integration-tests).
+Docker is generally more reproducible.
 
 ---
 
 ## Option 4: Testing the macOS Native GSS-API Path
 
-This is the hardest gap to close. The macOS GSS-API code (`auth_gss_darwin.go`,
-`gss_darwin.c`) uses Apple's Heimdal framework via CGO. Testing this requires:
-
-### Sub-option 4a: Ephemeral KDC on macOS CI Runner
-
-- Use GitHub Actions `macos-latest` runner
-- Install MIT krb5 via Homebrew: `brew install krb5`
-- Spawn an ephemeral KDC (Option 3)
-- Run `kinit` to populate a `FILE:`-type credential cache
-- Set `KRB5CCNAME=FILE:/tmp/test_ccache` to bypass the macOS KCM daemon
-- Set `KRB5_CONFIG` to point to the test `krb5.conf`
-- Call `GetToken()` on the `GSSTokenProvider`
-
-**Key uncertainty**: Apple's Heimdal GSS-API may not respect `KRB5_CONFIG` for
-all operations. The KCM cache bypass via `KRB5CCNAME=FILE:...` is documented
-in [Apple's own Heimdal tests](https://github.com/aosm/Heimdal/blob/master/tests/apple/check-apple-lkdc.in).
-
-**Effort**: High. Requires macOS-specific CI configuration and may hit
-unexpected issues with SIP, Heimdal version differences, etc.
-
-### Sub-option 4b: Structural Testing Without a Real KDC
-
-Instead of testing actual GSS-API calls, verify the code structure:
-
-- The existing tests already cover SPN derivation and normalization
-- Add tests that verify error messages and error handling paths (e.g.,
-  expired credentials, wrong SPN format, missing credential cache)
-- Use `klist` and `kdestroy` in CI to ensure a known-empty credential
-  state, then verify `GSSTokenProvider.GetToken()` fails gracefully
-
-**Effort**: Low. Limited value but better than nothing.
-
-### Sub-option 4c: Accept macOS GSS-API as a Manual Testing Surface
-
-The macOS GSS-API path is a thin wrapper (~88 lines Go + ~144 lines C) around
-Apple's framework. The critical bugs are more likely in the surrounding logic
-(SPN handling, error reporting, credential cache detection) than in the GSS-API
-calls themselves. The unit tests already cover the surrounding logic.
-
-**Effort**: None. Accept the risk.
-
-### Recommendation: **Start with 4b, attempt 4a as a stretch goal.**
+For the implemented suite, prerequisites, and commands, see
+[macOS GSS-API integration tests](../CONTRIBUTING.md#macos-gss-api-integration-tests).
+The fixture's configuration and credential-cache constraints are documented in
+[`NewEphemeralKDC`](../internal/proxy/ephemeral_kdc_darwin_test.go).
+The FILE: credential cache bypasses the macOS KCM daemon, following
+[Apple's Heimdal tests](https://github.com/aosm/Heimdal/blob/master/tests/apple/check-apple-lkdc.in).
 
 ---
 
@@ -368,12 +326,12 @@ networks:
 | ----------- | -------------------- | ----------------------- | ------------------------- | --------------------- | --------------------- |
 | **Effort** | Low | Medium | Medium-High | High | High |
 | **Tests gokrb5 token gen** | Yes (mock) | Yes (real) | Yes (real) | No | Yes (real) |
-| **Tests macOS GSS-API** | No | No | Maybe | Yes | No |
-| **Tests full proxy chain** | Possible | Possible | Possible | No | Yes |
+| **Tests macOS GSS-API** | No | No | See [Option 4](#option-4-testing-the-macos-native-gss-api-path) | Yes | No |
+| **Tests full proxy chain** | Possible | Possible | Possible | See [GSS proxy-chain test](../internal/proxy/integration_gss_darwin_test.go) | Yes |
 | **Token validated by real service** | No | Possible | Possible | No | Yes |
 | **Docker required** | No | Yes | No | No | Yes |
-| **System packages required** | No | No | Yes (krb5) | No | No |
-| **Works in GitHub Actions** | Yes (all runners) | Yes (Ubuntu) | Yes (with setup) | Yes (macOS, uncertain) | Yes (Ubuntu) |
+| **System packages required** | No | No | Yes (krb5) | See [Option 4](#option-4-testing-the-macos-native-gss-api-path) | No |
+| **Works in GitHub Actions** | Yes (all runners) | Yes (Ubuntu) | Yes (with setup) | See [Build and Test](../.github/workflows/build-and-test.yml) | Yes (Ubuntu) |
 | **Parallel test safe** | Yes | With care | With care | With care | No |
 | **Startup time** | Milliseconds | Seconds | Sub-second | Sub-second | Many seconds |
 
@@ -401,14 +359,11 @@ fidelity gap is what Phase 2 closes.
 
 **Eliminates**: Manual testing of real Kerberos protocol compliance.
 
-### Phase 3: macOS GSS-API Testing (Stretch Goal)
+### Phase 3: macOS GSS-API Testing
 
-1. Experiment with ephemeral KDC on macOS CI runners
-2. Determine if `KRB5_CONFIG` + `KRB5CCNAME=FILE:` overrides work with
-   Apple's Heimdal
-3. If viable, add macOS integration tests
-
-**Reduces**: Manual testing on macOS, but may not fully eliminate it.
+See [Option 4](#option-4-testing-the-macos-native-gss-api-path) for the
+implemented approach. Corporate interoperability remains a manual testing
+surface, as described below.
 
 ---
 
