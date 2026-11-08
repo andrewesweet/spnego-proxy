@@ -22,6 +22,9 @@ func TestGSSTokenProviderWithEphemeralKDC(t *testing.T) {
 	if os.Getenv("INTEGRATION") == "" {
 		t.Skip("set INTEGRATION=1 to run GSS-API integration tests")
 	}
+	if runGSSIntegrationSubprocess(t) {
+		return
+	}
 
 	kdc := NewEphemeralKDC(t)
 	defer kdc.Close()
@@ -64,6 +67,9 @@ func TestGSSTokenProviderExplicitSPNWithKDC(t *testing.T) {
 	if os.Getenv("INTEGRATION") == "" {
 		t.Skip("set INTEGRATION=1 to run GSS-API integration tests")
 	}
+	if runGSSIntegrationSubprocess(t) {
+		return
+	}
 
 	kdc := NewEphemeralKDC(t)
 	defer kdc.Close()
@@ -99,6 +105,9 @@ func TestGSSTokenProviderExplicitSPNWithKDC(t *testing.T) {
 func TestGSSTokenProviderHostWithPort(t *testing.T) {
 	if os.Getenv("INTEGRATION") == "" {
 		t.Skip("set INTEGRATION=1 to run GSS-API integration tests")
+	}
+	if runGSSIntegrationSubprocess(t) {
+		return
 	}
 
 	kdc := NewEphemeralKDC(t)
@@ -136,6 +145,9 @@ func TestGSSTokenProviderReacquire(t *testing.T) {
 	if os.Getenv("INTEGRATION") == "" {
 		t.Skip("set INTEGRATION=1 to run GSS-API integration tests")
 	}
+	if runGSSIntegrationSubprocess(t) {
+		return
+	}
 
 	kdc := NewEphemeralKDC(t)
 	defer kdc.Close()
@@ -171,6 +183,9 @@ func TestGSSTokenProviderMissingCache(t *testing.T) {
 	if os.Getenv("INTEGRATION") == "" {
 		t.Skip("set INTEGRATION=1 to run GSS-API integration tests")
 	}
+	if runGSSIntegrationSubprocess(t) {
+		return
+	}
 
 	kdc := NewEphemeralKDC(t)
 	defer kdc.Close()
@@ -205,6 +220,9 @@ func TestGSSTokenProviderUnregisteredSPN(t *testing.T) {
 	if os.Getenv("INTEGRATION") == "" {
 		t.Skip("set INTEGRATION=1 to run GSS-API integration tests")
 	}
+	if runGSSIntegrationSubprocess(t) {
+		return
+	}
 
 	kdc := NewEphemeralKDC(t)
 	defer kdc.Close()
@@ -231,6 +249,9 @@ func TestGSSTokenProviderUnregisteredSPN(t *testing.T) {
 func TestGSSProxyChainWithEphemeralKDC(t *testing.T) {
 	if os.Getenv("INTEGRATION") == "" {
 		t.Skip("set INTEGRATION=1 to run GSS-API integration tests")
+	}
+	if runGSSIntegrationSubprocess(t) {
+		return
 	}
 
 	kdc := NewEphemeralKDC(t)
