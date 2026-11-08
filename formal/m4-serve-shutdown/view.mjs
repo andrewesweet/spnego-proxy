@@ -52,6 +52,8 @@ export const step = (action, from, to) => {
       return "Serve starts waiting for the handlers";
     case "ClientSendsRequest":
       return "a client sends a request";
+    case "ShutdownDiscardsRequest":
+      return "shutdown discards a request that was read after it began";
     case "RequestDone":
       return to.wg === from.wg ? "the response is relayed; the connection stays open" : "the response is relayed; the connection closes";
     case "ClientCloses":

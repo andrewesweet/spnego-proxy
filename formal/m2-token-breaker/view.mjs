@@ -2,7 +2,7 @@
 // a login is at the KDC.
 const vals = (m) => (Array.isArray(m) ? m : Object.values(m ?? {}));
 
-export const title = "SPNEGO token circuit breaker with concurrent client connections";
+export const title = "SPNEGO token circuit breaker with concurrent callers and a latch-free backend abstraction";
 
 export const state = (v) => ({
   Breaker: { closed: "Closed", open: "Open", half_open: "Half-open" }[v.state],
