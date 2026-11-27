@@ -46,7 +46,7 @@ jobs:
         run: echo "path=$(xcrun --show-sdk-path)" >> "$GITHUB_OUTPUT"
 
       - name: Run clang-tidy
-        uses: cpp-linter/cpp-linter-action@8120e05c7fbd25fa09fa93424ec49f55f7b304ab # v2.23.1
+        uses: cpp-linter/cpp-linter-action@f00129419240baeb5d34e89d087f5f013514b309 # v2.24.2
         id: linter
         with:
           style: ''
